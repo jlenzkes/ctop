@@ -29,13 +29,17 @@ BeforeAll {
   # closed session per entry of $closedAt, each with its transcript on disk. A transcript stops changing
   # when its session closes, so its write time is set to the close time (IDLE then reads like real
   # history). Returns what Start-Ctop needs, plus each history row's name -> close time.
-  function New-Fixture([string]$root, [DateTimeOffset[]]$closedAt, [string]$PathTail = $env:PATH, [int]$Turns = 25) {
+  # -NoLive: the roster starts empty. -Kinds: each history entry's kind (default interactive). The fake
+  # claude prints RosterFile on every poll, so a test can change the roster while ctop runs.
+  function New-Fixture([string]$root, [DateTimeOffset[]]$closedAt, [string]$PathTail = $env:PATH, [int]$Turns = 25,
+                       [switch]$NoLive, [string[]]$Kinds = @()) {
     $cfg = Join-Path $root 'cfg'; $bin = Join-Path $root 'bin'
     New-Item -ItemType Directory -Force -Path $bin, (Join-Path $cfg 'projects/-w') | Out-Null
     $live = @{ pid = $PID; cwd = $root; kind = 'interactive'; startedAt = [DateTimeOffset]::UtcNow.AddHours(-1).ToUnixTimeMilliseconds()
                sessionId = '11111111-1111-4111-8111-111111111111'; name = 'live-one'; status = 'idle' }
     $rosterFile = Join-Path $root 'roster.json'
-    ConvertTo-Json -InputObject @($live) -Depth 5 | Set-Content -LiteralPath $rosterFile
+    $liveJson = ConvertTo-Json -InputObject @($live) -Depth 5
+    Set-Content -LiteralPath $rosterFile -Value $(if ($NoLive) { '[]' } else { $liveJson })
     $fake = Join-Path $bin 'claude'
     Set-Content -LiteralPath $fake -Value "#!/bin/sh`ncat '$rosterFile'"
     & chmod +x $fake
@@ -50,11 +54,13 @@ BeforeAll {
       [IO.File]::SetLastWriteTimeUtc($tf, $closedAt[$i].UtcDateTime)
       $name = 'h{0:d3}' -f $i; $closed[$name] = $closedAt[$i]
       @{ closedAt = $closedAt[$i].ToString('o'); why = 'closed'; name = $name; title = "history $i"
-         sessionId = $sid; cwd = "/w/p$($i % 12)"; pid = 50000 + $i; startedAt = 1793400000000; kind = 'interactive' } | ConvertTo-Json -Compress
+         sessionId = $sid; cwd = "/w/p$($i % 12)"; pid = 50000 + $i; startedAt = 1793400000000
+         kind = $(if ($i -lt $Kinds.Count) { $Kinds[$i] } else { 'interactive' }) } | ConvertTo-Json -Compress
     }
     $closedLog = Join-Path $root 'closed.jsonl'
-    [IO.File]::WriteAllLines($closedLog, [string[]]$log)
-    return @{ Cfg = $cfg; Log = $closedLog; Env = "CLAUDE_CONFIG_DIR='$cfg' PATH='${bin}:$PathTail'"; Closed = $closed }
+    [IO.File]::WriteAllLines($closedLog, [string[]]@($log | Where-Object { $_ }))   # none: an empty log
+    return @{ Cfg = $cfg; Log = $closedLog; Env = "CLAUDE_CONFIG_DIR='$cfg' PATH='${bin}:$PathTail'"; Closed = $closed
+              RosterFile = $rosterFile; LiveJson = $liveJson }
   }
 
   $script:ErrFile = @{}   # tmux session -> the file holding ctop's stderr
@@ -85,15 +91,45 @@ BeforeAll {
     return $null
   }
   function Stop-Ctop([string]$s) { & tmux kill-session -t $s 2>$null }
-  # median of the frame times ctop reports on its strip, sampled over ~5 s
+  # Wait for the process in $s to end (the wrapper prints CTOP-EXITED <status>): its exit status, the
+  # screen and its stderr. $null when it did not end in time.
+  function Wait-Exit([string]$s, [double]$seconds) {
+    if ($null -eq (Wait-Screen $s 'CTOP-EXITED \d+' $seconds)) { return $null }
+    $screen = Get-Screen $s
+    $err = $script:ErrFile[$s]
+    @{ Code = [int]([regex]::Match($screen, 'CTOP-EXITED (\d+)').Groups[1].Value); Screen = $screen
+       Stderr = $(if ($err -and (Test-Path -LiteralPath $err)) { (Get-Content -LiteralPath $err -Raw) } else { '' }) }
+  }
+  # A clean exit: status 0, no fatal "stopped:" report, nothing on stderr
+  function Test-CleanExit($x) { $x -and $x.Code -eq 0 -and $x.Screen -notmatch 'stopped:' -and -not "$($x.Stderr)".Trim() }
+  # Median of the pass times ctop reports on its strip, sampled over ~5 s. Only from a ctop that is
+  # alive and drawing: it fails on an exit or crash report, on fewer than 10 readings, and unless the
+  # title-bar clock moved through at least 3 seconds (a frozen screen keeps showing its last figure).
   function Get-MedianFrame([string]$s) {
-    $ms = for ($i = 0; $i -lt 12; $i++) {
-      if ((Get-Screen $s) -match 'frame +(\d+)ms') { [int]$Matches[1] }
+    $ms = @(); $clocks = @{}
+    for ($i = 0; $i -lt 12; $i++) {
+      $screen = Get-Screen $s
+      if ($screen -match 'CTOP-EXITED|stopped:') { throw "ctop is not running: $(($screen -split "`n" | Where-Object { $_ -match 'CTOP-EXITED|stopped:' }) -join ' / ')" }
+      if ($screen -match 'frame +(\d+)ms') { $ms += [int]$Matches[1] }
+      if ($screen -match 'ctop  (\d\d:\d\d:\d\d)') { $clocks[$Matches[1]] = $true }
       Start-Sleep -Milliseconds 400
     }
-    $median = @($ms | Sort-Object)[[math]::Floor(@($ms).Count / 2)]
-    Write-Host "    frame ms: $($ms -join ' ')  (median $median)"
+    if ($ms.Count -lt 10) { throw "only $($ms.Count) frame readings in 12 samples" }
+    if ($clocks.Count -lt 3) { throw "the screen did not advance: $($clocks.Count) distinct clock readings in ~5 s" }
+    $sorted = @($ms | Sort-Object)
+    $median = $sorted[[math]::Floor($sorted.Count / 2)]
+    Write-Host "    frame ms: $($ms -join ' ')  (median $median, max $($sorted[-1]))"
     return $median
+  }
+  # Time from a key to its visible effect, by watching the screen every 20 ms
+  function Measure-KeyResponse([string]$s, [string]$key, [string]$expect, [double]$seconds = 5) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    & tmux send-keys -t $s $key
+    while ($sw.Elapsed.TotalSeconds -lt $seconds) {
+      if ((Get-Screen $s) -match $expect) { return $sw.Elapsed.TotalMilliseconds }
+      Start-Sleep -Milliseconds 20
+    }
+    return $null
   }
 }
 
@@ -138,7 +174,11 @@ Describe 'ctop under a long history' -Tag Integration -Skip:$script:noTmux {
       Wait-Screen $s 'gone 300\b|300 gone' 60 | Should -Not -BeNullOrEmpty
       Start-Sleep -Seconds 3   # past the first scans: steady state
       & tmux send-keys -t $s q
-      Wait-Screen $s 'CTOP-EXITED' 2 | Should -Not -BeNullOrEmpty
+      $x = Wait-Exit $s 2
+      $x | Should -Not -BeNullOrEmpty -Because 'q must end ctop within 2 s'
+      $x.Code | Should -Be 0
+      $x.Screen | Should -Not -Match 'stopped:'
+      "$($x.Stderr)".Trim() | Should -BeNullOrEmpty
     } finally { Stop-Ctop $s }
   }
 
@@ -171,6 +211,21 @@ Describe 'ctop under a long history' -Tag Integration -Skip:$script:noTmux {
       Wait-Screen $s 'gone 300\b|300 gone' 60 | Should -Not -BeNullOrEmpty
       Start-Sleep -Seconds 10   # past warm-up (first scans, first full render)
       Get-MedianFrame $s | Should -BeLessThan 250
+    } finally { Stop-Ctop $s }
+  }
+
+  It 'answers every key within 750 ms with 300 gone rows (worst of 8, measured from outside)' {
+    $s = Start-Ctop $fx '-Keep 30d'
+    try {
+      Wait-Screen $s 'gone 300\b|300 gone' 60 | Should -Not -BeNullOrEmpty
+      Start-Sleep -Seconds 5
+      # 30d <-> 14d: each press changes how many history rows are listed, so the response is a real redraw
+      $lat = for ($i = 0; $i -lt 8; $i++) {
+        if ($i % 2 -eq 0) { Measure-KeyResponse $s '-' 'keep 14d ' } else { Measure-KeyResponse $s '+' 'keep 30d ' }
+      }
+      Write-Host ("    key -> visible ms: {0}" -f (($lat | ForEach-Object { if ($null -eq $_) { 'none' } else { [int]$_ } }) -join ' '))
+      @($lat | Where-Object { $null -eq $_ }).Count | Should -Be 0
+      ($lat | Measure-Object -Maximum).Maximum | Should -BeLessThan 750
     } finally { Stop-Ctop $s }
   }
 
@@ -241,5 +296,125 @@ Describe 'portability' -Tag Integration -Skip:$script:noTmux {
       Wait-Screen $s 'live-one' 30 | Should -Not -BeNullOrEmpty
       (Get-Screen $s) | Should -Not -Match 'stopped:'
     } finally { Stop-Ctop $s }
+  }
+}
+
+Describe 'session lifecycle' -Tag Integration -Skip:$script:noTmux {
+  It 'shows the history when no session is live (history-only start)' {
+    $fx = New-Fixture (Join-Path $TestDrive 'l1') @([DateTimeOffset]::UtcNow.AddMinutes(-5), [DateTimeOffset]::UtcNow.AddMinutes(-9)) -NoLive
+    $s = Start-Ctop $fx '-Keep inf'
+    try {
+      Wait-Screen $s '(?m)^h000 ' 30 | Should -Not -BeNullOrEmpty
+      Wait-Screen $s '(?m)^h001 ' 10 | Should -Not -BeNullOrEmpty   # history loads newest first, a slice per frame
+      (Get-Screen $s) | Should -Not -Match 'no interactive sessions'
+    } finally { Stop-Ctop $s }
+  }
+
+  It 'keeps the history on screen when the last live session leaves' {
+    $fx = New-Fixture (Join-Path $TestDrive 'l2') @([DateTimeOffset]::UtcNow.AddMinutes(-5))
+    $s = Start-Ctop $fx '-Keep inf -RosterInterval 0.5'
+    try {
+      Wait-Screen $s '(?m)^live-one ' 30 | Should -Not -BeNullOrEmpty
+      Wait-Screen $s '(?m)^h000 ' 30 | Should -Not -BeNullOrEmpty
+      Set-Content -LiteralPath $fx.RosterFile -Value '[]'
+      Wait-Screen $s '(?m)^live-one +.*gone' 15 | Should -Not -BeNullOrEmpty   # it left, and stays listed as gone
+      $screen = Get-Screen $s
+      $screen | Should -Match '(?m)^h000 '
+      $screen | Should -Not -Match 'no interactive sessions'
+    } finally { Stop-Ctop $s }
+  }
+
+  It 'says there is nothing to show once the last row is hidden, and peek on nothing does not fail' {
+    $fx = New-Fixture (Join-Path $TestDrive 'l3') @([DateTimeOffset]::UtcNow.AddMinutes(-5)) -NoLive
+    $s = Start-Ctop $fx '-Keep inf'
+    try {
+      Wait-Screen $s '(?m)^h000 ' 30 | Should -Not -BeNullOrEmpty
+      & tmux send-keys -t $s Enter            # peek the history row
+      Wait-Screen $s 'ctop — h000' 5 | Should -Not -BeNullOrEmpty
+      & tmux send-keys -t $s Escape
+      Start-Sleep -Milliseconds 400
+      & tmux send-keys -t $s g                # hide gone rows: nothing left
+      Wait-Screen $s 'no interactive sessions' 5 | Should -Not -BeNullOrEmpty
+      & tmux send-keys -t $s Enter            # peek with no rows: must not open a stale row or fail
+      Start-Sleep -Milliseconds 600
+      $screen = Get-Screen $s
+      $screen | Should -Not -Match 'ctop — h000'
+      $screen | Should -Not -Match 'stopped:|CTOP-EXITED'
+      & tmux send-keys -t $s g                # and it comes back
+      Wait-Screen $s '(?m)^h000 ' 5 | Should -Not -BeNullOrEmpty
+    } finally { Stop-Ctop $s }
+  }
+
+  It 'lists a background session from history only with -All, as it does live ones' {
+    $fx = New-Fixture (Join-Path $TestDrive 'l4') @([DateTimeOffset]::UtcNow.AddMinutes(-5), [DateTimeOffset]::UtcNow.AddMinutes(-6)) -Kinds @('background', 'interactive')
+    $s = Start-Ctop $fx '-Keep inf'
+    try {
+      Wait-Screen $s '(?m)^h001 ' 30 | Should -Not -BeNullOrEmpty   # the interactive one
+      (Get-Screen $s) | Should -Not -Match '(?m)^h000 '
+    } finally { Stop-Ctop $s }
+    $s = Start-Ctop $fx '-Keep inf -All'
+    try {
+      Wait-Screen $s '(?m)^h000 ' 30 | Should -Not -BeNullOrEmpty
+      (Get-Screen $s) | Should -Match '(?m)^h001 '
+    } finally { Stop-Ctop $s }
+  }
+}
+
+Describe 'a table whose body is one line' -Tag Integration -Skip:$script:noTmux {
+  It 'draws a lone session whose row fits on one line (a one-line body was drawn as nothing)' {
+    $fx = New-Fixture (Join-Path $TestDrive 'one') @()
+    $start = [DateTimeOffset]::UtcNow.AddMinutes(-30).ToUnixTimeMilliseconds()
+    # no transcript: an empty title, so the row does not wrap
+    Set-Content -LiteralPath $fx.RosterFile -Value ('[{"pid":' + $PID + ',"cwd":"/tmp","kind":"interactive","startedAt":' + $start + ',"sessionId":"solo-1","name":"solo-one","status":"idle"}]')
+    $s = Start-Ctop $fx ''
+    try { Wait-Screen $s '(?m)^solo-one ' 20 | Should -Not -BeNullOrEmpty } finally { Stop-Ctop $s }
+  }
+}
+
+Describe 'bad roster data' -Tag Integration -Skip:$script:noTmux {
+  It 'keeps running when a session has an impossible startedAt (it crashed ctop)' {
+    $fx = New-Fixture (Join-Path $TestDrive 'bad') @()
+    Set-Content -LiteralPath $fx.RosterFile -Value '[{"pid":1,"cwd":"/","kind":"interactive","startedAt":99999999999999999,"sessionId":"bad-1","name":"bad-one","status":"idle"}]'
+    $s = Start-Ctop $fx ''
+    try {
+      Wait-Screen $s '(?m)^bad-one ' 30 | Should -Not -BeNullOrEmpty
+      Start-Sleep -Seconds 2
+      (Get-Screen $s) | Should -Not -Match 'stopped:|CTOP-EXITED'
+      & tmux send-keys -t $s q
+      Test-CleanExit (Wait-Exit $s 5) | Should -BeTrue
+    } finally { Stop-Ctop $s }
+  }
+}
+
+Describe 'the test harness itself' -Tag Integration -Skip:$script:noTmux {
+  It 'refuses a frame reading from a frozen screen' {
+    $script:n++
+    $s = "ctop-it-$PID-$($script:n)"
+    & tmux new-session -d -s $s -x 200 -y 20 "echo '  ctop  12:00:00'; echo 'frame 1ms'; sleep 60"
+    try { { Get-MedianFrame $s } | Should -Throw -ExpectedMessage '*did not advance*' } finally { Stop-Ctop $s }
+  }
+  It 'refuses a frame reading once ctop has exited' {
+    $script:n++
+    $s = "ctop-it-$PID-$($script:n)"
+    & tmux new-session -d -s $s -x 200 -y 20 "echo '  ctop  12:00:00'; echo 'frame 1ms'; echo CTOP-EXITED 1; sleep 60"
+    try { { Get-MedianFrame $s } | Should -Throw -ExpectedMessage '*not running*' } finally { Stop-Ctop $s }
+  }
+  It 'rejects a child that crashes after drawing a frame, which the quit check used to accept' {
+    $script:n++
+    $s = "ctop-it-$PID-$($script:n)"
+    $err = Join-Path ([IO.Path]::GetTempPath()) "$s.err"; $script:ErrFile[$s] = $err
+    & tmux new-session -d -s $s -x 200 -y 20 "echo 'frame 5ms'; echo 'ctop x stopped: boom' >&2; sh -c 'exit 1' 2>'$err'; echo CTOP-EXITED `$?; sleep 30"
+    try {
+      $x = Wait-Exit $s 10
+      $x | Should -Not -BeNullOrEmpty
+      $x.Code | Should -Be 1
+      Test-CleanExit $x | Should -BeFalse
+    } finally { Stop-Ctop $s }
+  }
+  It 'accepts a clean exit' {
+    $script:n++
+    $s = "ctop-it-$PID-$($script:n)"
+    & tmux new-session -d -s $s -x 200 -y 20 "echo 'frame 5ms'; true; echo CTOP-EXITED `$?; sleep 30"
+    try { Test-CleanExit (Wait-Exit $s 10) | Should -BeTrue } finally { Stop-Ctop $s }
   }
 }

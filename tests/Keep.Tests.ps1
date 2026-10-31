@@ -363,3 +363,15 @@ Describe 'Format-GoneNote (the peek line for a gone row)' {
     Format-GoneNote -Ago '5m' -Cleared $Cleared -Successor $Successor -HasTranscript $Disk | Should -BeExactly $Text
   }
 }
+
+Describe 'Test-KindListed (one rule for live and historical sessions)' {
+  It 'lists <Kind> with -All:<All> -> <Listed>' -ForEach @(
+    @{ Kind = 'interactive'; All = $false; Listed = $true }
+    @{ Kind = 'background';  All = $false; Listed = $false }
+    @{ Kind = 'background';  All = $true;  Listed = $true }
+    @{ Kind = '';            All = $false; Listed = $false }
+    @{ Kind = 'interactive'; All = $true;  Listed = $true }
+  ) {
+    Test-KindListed $Kind $All | Should -Be $Listed
+  }
+}

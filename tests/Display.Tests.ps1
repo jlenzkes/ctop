@@ -136,3 +136,53 @@ Describe 'Update-GoneRow (refresh the clock-dependent cells of a gone row)' {
     $r.STATE | Should -Be 'cleared 7m'
   }
 }
+
+Describe 'Cell-Color on ages from Format-Since (the color must survive the day formats)' {
+  BeforeAll {
+    $script:HighlightModel = 'fable|mythos'
+    function Working([timespan]$span) {
+      $t = Format-Since $span
+      [pscustomobject]@{ STATE = 'working'; IDLE = $t; TURN = $t; _Jobs = @(); _Gone = $null }
+    }
+    function IdleRow([timespan]$span) { [pscustomobject]@{ STATE = 'idle'; IDLE = (Format-Since $span); TURN = ''; _Jobs = @(); _Gone = $null } }
+  }
+  It 'turns TURN and a stalled working STATE red at <Span> (shown as <Text>)' -ForEach @(
+    @{ Span = [timespan]::FromMinutes(30) },
+    @{ Span = [timespan]::FromMinutes(23 * 60 + 59) },
+    @{ Span = [timespan]::FromHours(24) },
+    @{ Span = [timespan]::FromHours(24.5) },
+    @{ Span = [timespan]::FromHours(25) },
+    @{ Span = [timespan]::FromDays(10) },
+    @{ Span = [timespan]::FromDays(400) }
+  ) {
+    $r = Working $Span
+    Cell-Color 'TURN' $r | Should -Be 'red'
+    Cell-Color 'STATE' $r | Should -Be 'red'
+    Cell-Color 'IDLE' (IdleRow $Span) | Should -Be 'dim'
+  }
+  It 'keeps the thresholds below an hour: <Span> -> TURN <Turn>, working STATE <State>' -ForEach @(
+    @{ Span = [timespan]::FromSeconds(50); Turn = '';       State = 'green' }
+    @{ Span = [timespan]::FromMinutes(2);  Turn = '';       State = 'red' }
+    @{ Span = [timespan]::FromMinutes(10); Turn = 'yellow'; State = 'red' }
+    @{ Span = [timespan]::FromMinutes(29); Turn = 'yellow'; State = 'red' }
+  ) {
+    $r = Working $Span
+    Cell-Color 'TURN' $r | Should -Be $Turn
+    Cell-Color 'STATE' $r | Should -Be $State
+  }
+}
+
+Describe 'ConvertFrom-UnixMs (roster startedAt, which ctop does not control)' {
+  It 'converts milliseconds since 1970 to local time' {
+    ConvertFrom-UnixMs 1793400000000 | Should -Be ([DateTimeOffset]::FromUnixTimeMilliseconds(1793400000000).LocalDateTime)
+  }
+  It 'gives $null for <Name> instead of failing' -ForEach @(
+    @{ Name = 'nothing';      Ms = $null }
+    @{ Name = 'zero';         Ms = 0 }
+    @{ Name = 'out of range'; Ms = 99999999999999999 }
+    @{ Name = 'negative';     Ms = -5 }
+    @{ Name = 'text';         Ms = 'soon' }
+  ) {
+    ConvertFrom-UnixMs $Ms | Should -BeNullOrEmpty
+  }
+}

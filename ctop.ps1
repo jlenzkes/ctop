@@ -213,8 +213,16 @@ $ProjectsDir = Join-Path $ConfigDir 'projects'
 $script:TranscriptIndex = @{}
 $script:TailCache  = @{}   # sessionId -> @{ Length; Write; Result }  (skip re-parse if file unchanged)
 
-function Get-Age([long]$unixMs) {
-  $start = [DateTimeOffset]::FromUnixTimeMilliseconds($unixMs).LocalDateTime
+# The roster's startedAt (Unix ms) as local time; $null when missing, not a number or out of range. It
+# comes from another program: one bad value threw out of the frame and stopped ctop.
+function ConvertFrom-UnixMs($ms) {
+  $n = 0L
+  if (-not [long]::TryParse("$ms", [ref]$n) -or $n -le 0 -or $n -gt 253402300799999) { return $null }
+  [DateTimeOffset]::FromUnixTimeMilliseconds($n).LocalDateTime
+}
+function Get-Age($unixMs) {
+  $start = ConvertFrom-UnixMs $unixMs
+  if (-not $start) { return '-' }
   $span = (Get-Date) - $start
   if ($span.TotalHours -ge 1) { '{0}h{1:00}m' -f [int][math]::Floor($span.TotalHours), $span.Minutes }
   else { '{0}m{1:00}s' -f $span.Minutes, $span.Seconds }
@@ -1030,6 +1038,8 @@ function Test-SubagentListed([datetime]$LastWrite, [datetime]$Now, [int]$KeepMin
 # The gone entries inside the window, most recently gone first (the order history rows are built and
 # listed in). Test-KeepWindow for each, with the cutoff worked out once: it runs every frame over the
 # whole history.
+# Which sessions ctop lists, live or from history: interactive ones, and every kind with -All.
+function Test-KindListed([string]$Kind, [bool]$All) { $All -or $Kind -eq 'interactive' }
 function Get-KeptDeparted([hashtable]$Departed, [datetime]$Now, [int]$KeepMinutes) {
   if ($KeepMinutes -eq 0) { return }
   $cut = if ($KeepMinutes -gt 0) { $Now.AddMinutes(-$KeepMinutes) } else { [datetime]::MinValue }
@@ -1394,7 +1404,7 @@ function Read-Roster {
   $script:PollFail = $null; $script:PollFails = 0
   $script:RosterAt = $script:PollAt
   $sessions = $res.Sessions
-  if (-not $All) { $sessions = @($sessions | Where-Object { $_.kind -eq 'interactive' }) }
+  $sessions = @($sessions | Where-Object { Test-KindListed ([string]$_.kind) ([bool]$All) })
   $script:BranchCache = @{}
   Update-TranscriptIndex
   Start-ProcPoll
@@ -1648,7 +1658,7 @@ function Build-Rows {
       MODEL    = $act.Model
       BRANCH   = $($b = if ($act.GitBranch) { $act.GitBranch } else { $git.Branch }; if ($git.Worktree) { 'wt:' + $b } else { $b })
       COST     = if ($act.Cost -gt 0) { '${0:N2}' -f $act.Cost } else { '-' }
-      RATE     = Format-Rate ([double]$act.Cost) $(if ($s.startedAt) { [DateTimeOffset]::FromUnixTimeMilliseconds($s.startedAt).LocalDateTime }) (Get-Date)
+      RATE     = Format-Rate ([double]$act.Cost) (ConvertFrom-UnixMs $s.startedAt) (Get-Date)
       ACTIVITY = $(if ($sample -and (Test-SampleActivity ([bool]$gone) $script:History[$s.sessionId])) { Add-Sample $s.sessionId $state $act.Compacts }; $script:History[$s.sessionId])
       'LAST ACTION' = $act.Last
       CWD      = $cwd
@@ -1672,7 +1682,7 @@ function Build-Rows {
       _AgentN     = $(if ($gone) { 0 } else { @($script:AllAgents[$s.sessionId] | Where-Object { $_ }).Count })
       _Act        = $act
       _Transcript = if ($file) { $file.FullName } else { '-' }
-      _StartedAt  = if ($s.startedAt) { [DateTimeOffset]::FromUnixTimeMilliseconds($s.startedAt).LocalDateTime } else { $null }
+      _StartedAt  = ConvertFrom-UnixMs $s.startedAt
       _Src        = $s
       _Group = $null; _TreeCost = $null; _LaunchCost = $null; _LaunchN = $null; _Launcher = $null; _LaunchedNames = $null; _TreeLast = $null   # Sort-Rows / Render-Table fill these
       _Lines = $null; _LinesSig = $null; _Dirty = $true   # Render-Table's formatted lines, reused while the row is unchanged
@@ -1851,10 +1861,12 @@ function Cell-Color([string]$col, $r) {
     default    { '' }
   }
 }
-# "45s" / "12m" / "6h38m" -> minutes
+# An age as Format-Since writes it ("45s", "12m", "6h", "1d1h", "40d") -> minutes, for the color
+# thresholds (2 / 10 / 30 min). Days count too: a "1d" read as 0 turned a day-old stall green.
 function Minutes([string]$t) {
   if (-not $t) { return 0 }
   $m = 0.0
+  if ($t -match '(\d+)d') { $m += 1440 * [int]$Matches[1] }
   if ($t -match '(\d+)h') { $m += 60 * [int]$Matches[1] }
   if ($t -match '(\d+)m') { $m += [int]$Matches[1] }
   if ($t -match '^(\d+)s$') { $m += [int]$Matches[1] / 60 }
@@ -2253,7 +2265,8 @@ function Show-Help {
     'HEADER',
     '  title bar   clock; live sessions / working / idle; live subagents (stopped, orphaned); gone sessions',
     '  tick        display refresh period (ms). [ / ] adjust by 50ms; floor 50',
-    '  frame       measured ms to build + draw the last frame — the real floor for tick',
+    '  frame       measured ms of the last pass: roster / process harvest, cache save, build and draw',
+    '              (not the wait for keys) — the real floor for tick',
     '  roster age  time since the last good `claude agents --json` result; * = poll in flight',
     '  last poll   measured ms that call took (runs async; display never waits on it). FAILED×N: the',
     '              last N polls failed (non-zero exit, no output, or not a JSON array); the previous',
@@ -2437,6 +2450,8 @@ catch { [Console]::Error.WriteLine("ctop: -Keep $($_.Exception.Message)"); exit 
 # one (closed log); the keep window picks which are drawn. Sessions that are live again drop out on the
 # first poll.
 $script:Departed = Read-ClosedHistory $script:ClosedLogPath
+# the same rule as for the live roster: background sessions only with -All
+foreach ($id in @($script:Departed.Keys)) { if (-not (Test-KindListed ([string]$script:Departed[$id].Session.kind) ([bool]$All))) { $script:Departed.Remove($id) } }
 $script:ShowGone = $true
 $script:Poll     = $null
 $script:PollMs   = 0
@@ -2589,6 +2604,9 @@ try {
   $lastSave = Get-Date
   $winW = [Console]::WindowWidth; $winH = [Console]::WindowHeight
   while ($true) {
+    # "frame" on the strip times this whole pass (cache save, roster / process harvest, build, draw), so
+    # it is the cost the tick has to cover; only the wait for input below is left out
+    $frameSw.Restart()
     if (((Get-Date) - $lastSave).TotalSeconds -ge 60) { Save-ScanCache; $lastSave = Get-Date }
     $loopStart = [System.Diagnostics.Stopwatch]::StartNew()
     if ([Console]::WindowWidth -ne $winW -or [Console]::WindowHeight -ne $winH) {
@@ -2603,7 +2621,6 @@ try {
         ((Get-Date) - $script:PollAt).TotalSeconds -ge $RosterInterval) { Start-RosterPoll }
 
     # display
-    $frameSw.Restart()
     $script:KeptGone = @(Get-KeptDeparted $script:Departed (Get-Date) $script:KeepMin)   # once per frame: rows and the strip's count
     $rows = @(Build-Rows)
     # one pass (five Where-Object pipelines over a long history cost more than the rest of the header)
@@ -2646,9 +2663,11 @@ try {
     $frame += @{ Text = $title; Inverse = $true }
     $frame += @{ Text = $strip; Fg = 'DarkCyan' }
     $frame += ''
-    if ($top.Count -eq 0) {
-      $script:BodyMap = $null
-      $frame += if ($script:RosterAt) { "(no interactive sessions reported by 'claude agents --json')" }
+    if ($rows.Count -eq 0) {
+      # nothing to draw, live or gone: no row can be selected, peeked or copied
+      $script:BodyMap = $null; $sorted = @(); $selectedId = $null; $script:PeekId = $null
+      $hiddenGone = if (-not $script:ShowGone -and $script:KeptGone.Count) { "; g shows $($script:KeptGone.Count) gone" } else { '' }
+      $frame += if ($script:RosterAt) { "(no interactive sessions reported by 'claude agents --json'$hiddenGone)" }
                 elseif ($script:PollFail) { "('claude agents --json' failed: $($script:PollFail); retrying every $RosterInterval s)" }
                 else { '(polling…)' }
     } else {
@@ -2659,7 +2678,9 @@ try {
       # more (only changed rows are re-formatted), so a visible age is never stale, even for one frame.
       for ($pass = 0; $pass -lt 2; $pass++) {
         $tbl  = @(Render-Table $sorted $selectedId)
-        $head = @($tbl[0..1]); $body = if ($tbl.Count -gt 2) { @($tbl[2..($tbl.Count - 1)]) } else { @() }
+        # @(if …): an if's output unrolls, and a one-line body would come back as a bare string that the
+        # styling loop below then indexed character by character (a lone one-line row drew nothing)
+        $head = @($tbl[0..1]); $body = @(if ($tbl.Count -gt 2) { $tbl[2..($tbl.Count - 1)] })
         # rows left for the body: the footer takes the last line, the title/strip/blank and the column
         # header take the rest
         $room = [math]::Max(3, [Console]::WindowHeight - 1 - $frame.Count - $head.Count)
@@ -2792,4 +2813,9 @@ finally {
     Write-Host "ctop $script:CtopVersion stopped: $($script:Fatal.Exception.GetType().Name): $($script:Fatal.Exception.Message)" -ForegroundColor Red
     Write-Host $script:Fatal.ScriptStackTrace -ForegroundColor DarkGray
   }
+}
+# a crash is a failure to whoever ran ctop (a wrapper, a test): say so on stderr and in the exit status
+if ($script:Fatal) {
+  [Console]::Error.WriteLine("ctop $script:CtopVersion stopped: $($script:Fatal.Exception.GetType().Name): $($script:Fatal.Exception.Message)")
+  exit 1
 }

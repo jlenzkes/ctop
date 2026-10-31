@@ -55,12 +55,7 @@ jobs:
       - name: Tests (Pester)
         run: |
           Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser -Force -SkipPublisherCheck
-          Import-Module Pester -RequiredVersion 5.9.1
-          $c = New-PesterConfiguration
-          $c.Run.Path = './tests'
-          $c.Run.Exit = $true
-          $c.Output.Verbosity = 'Detailed'
-          Invoke-Pester -Configuration $c
+          ./tests/Run-Tests.ps1 -Integration ${{ runner.os == 'Linux' && 'Expect' || 'Skip' }}
 
   # Windows PowerShell 5.1, the version built into Windows: the script as committed (UTF-8 with BOM,
   # which 5.1 needs to read its non-ASCII characters), and the unit tests. The end-to-end tests need
@@ -93,13 +88,7 @@ jobs:
         run: |
           Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
           Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser -Force -SkipPublisherCheck
-          Import-Module Pester -RequiredVersion 5.9.1
-          $c = New-PesterConfiguration
-          $c.Run.Path = '.\tests'
-          $c.Run.Exit = $true
-          $c.Filter.ExcludeTag = 'Integration'
-          $c.Output.Verbosity = 'Detailed'
-          Invoke-Pester -Configuration $c
+          .\tests\Run-Tests.ps1 -Integration Skip
 
   # The script on other Linux distributions, with PowerShell 7.6.9 from Microsoft's packages: the deb
   # from the GitHub release on Ubuntu / Debian, Microsoft's RHEL 9 rpm on the RHEL 9 family and on Fedora
@@ -111,7 +100,14 @@ jobs:
         # Debian family: Ubuntu 22.04, Debian 12. Fedora family: RHEL 9 (UBI 9: Red Hat's own packages, but
         # no tmux, so no end-to-end tests), AlmaLinux 9 and Rocky Linux 9 (RHEL 9 rebuilds with tmux), Fedora.
         # Rocky: rockylinux/rockylinux is the maintained image; the official rockylinux:9 stopped in 2024.
-        image: ['ubuntu:22.04', 'debian:12', 'registry.access.redhat.com/ubi9/ubi:latest', 'almalinux:9', 'rockylinux/rockylinux:9', 'fedora:latest']
+        # integration: Expect = tmux must install and every end-to-end test must run; Skip = left out on purpose
+        include:
+          - { image: 'ubuntu:22.04', integration: Expect }
+          - { image: 'debian:12', integration: Expect }
+          - { image: 'registry.access.redhat.com/ubi9/ubi:latest', integration: Skip }   # UBI's repositories have no tmux
+          - { image: 'almalinux:9', integration: Expect }
+          - { image: 'rockylinux/rockylinux:9', integration: Expect }
+          - { image: 'fedora:latest', integration: Expect }
     runs-on: ubuntu-latest
     container: ${{ matrix.image }}
     steps:
@@ -126,7 +122,7 @@ jobs:
             DEBIAN_FRONTEND=noninteractive apt-get install -y -q /tmp/pwsh.deb
           else
             dnf install -y procps-ng
-            dnf install -y tmux || echo "tmux not available here: integration tests will be skipped"
+            if [ "${{ matrix.integration }}" = Expect ]; then dnf install -y tmux; fi
             dnf install -y https://packages.microsoft.com/rhel/9/prod/Packages/p/powershell-7.6.9-1.rh.x86_64.rpm
           fi
           head -2 /etc/os-release
@@ -142,9 +138,4 @@ jobs:
         shell: pwsh
         run: |
           Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser -Force -SkipPublisherCheck
-          Import-Module Pester -RequiredVersion 5.9.1
-          $c = New-PesterConfiguration
-          $c.Run.Path = './tests'
-          $c.Run.Exit = $true
-          $c.Output.Verbosity = 'Detailed'
-          Invoke-Pester -Configuration $c
+          ./tests/Run-Tests.ps1 -Integration ${{ matrix.integration }}
