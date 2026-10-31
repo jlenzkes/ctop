@@ -81,9 +81,14 @@
   Print ctop's version and exit.
 
 .NOTES
-  VERSION 2026.10.31.2 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.10.31.3 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.10.31.3
+    - titles with quotes, newlines or non-ASCII read right: \" was shown literally (escapes were only
+      undone when the text held a double backslash). Cached scan state is redone once (ScanVer 2)
+    - t / y on Linux: sent to the terminal as OSC 52 (and to xclip when there is a display). Set-Clipboard
+      without xclip keeps the text inside pwsh and reports success, so "copied" was shown for nothing
   2026.10.31.2
     - keep window: one setting, -Keep (alias -Linger), for how long gone sessions and stopped subagents
       stay listed; + / - step 0 · 15m · 30m · 45m · 1h · 2h · 4h · 8h · 12h · 1d · 2d · 3d · 7d · 14d ·
@@ -176,7 +181,7 @@ param(
   [switch]$NoMouse,
   [switch]$Version
 )
-$script:CtopVersion = '2026.10.31.2'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.10.31.3'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -442,6 +447,9 @@ function Find-Subagents([System.IO.FileInfo]$parent, [string]$sessionId) {
 # (input + cache reads + cache writes) is at most that many tokens (Haiku 5.5 is tiered at 100k).
 # Bump PriceVer whenever this table changes: cached cost totals from an older table are recomputed.
 $script:PriceVer = 2
+# Bump ScanVer when what a scan extracts changes: cached state from an older scan is redone once.
+# 2: titles are unescaped (\" was kept literally)
+$script:ScanVer = 2
 $script:Pricing = @(
   @{ Match = 'fable-5-1|mythos-5-1'; In = 10;  W5 = 12.5;  W1h = 20;  Read = 0.25; Out = 50 }
   @{ Match = 'fable-5|mythos-5';     In = 10;  W5 = 12.5;  W1h = 20;  Read = 1;    Out = 50 }
@@ -470,7 +478,7 @@ function Get-Price([string]$model, [long]$prompt = 0) {
 #                                     one line per content block, each repeating the usage)
 # Decode a JSON string body captured by regex. Never throws: a malformed escape returns the raw text.
 function Unescape-Json([string]$t) {
-  if (-not $t -or $t.IndexOf('\\') -lt 0) { return $t }
+  if (-not $t -or $t.IndexOf([char]92) -lt 0) { return $t }   # no backslash, nothing escaped ('\\' would be two)
   try { return (ConvertFrom-Json ('"' + $t + '"')) } catch { return $t }
 }
 
@@ -494,6 +502,7 @@ function Load-ScanCache {
       # no Used stamp = written by a build before 2026.10.18.2: drop it (its sessions rescan once)
       if (-not $e.Path -or -not $e.Head -or -not $e.Used -or [long]$e.Used -lt $cut) { continue }
       if ([int]$e.PriceVer -ne $script:PriceVer) { continue }   # costs from an older price table: rescan
+      if ([int]$e.ScanVer -ne $script:ScanVer) { continue }     # extracted by an older scan: rescan
       if (-not $e.ToolCounts) { $e.ToolCounts = @{} }
       $script:ScanCache[$k] = $e
     }
@@ -520,7 +529,7 @@ function Get-HeadPrint([string]$path) {
 }
 function New-ScanState([System.IO.FileInfo]$file) {
   @{ Path = $file.FullName; Head = (Get-HeadPrint $file.FullName)
-     PriceVer = $script:PriceVer; Offset = 0; Turns = 0; Tools = 0; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0;
+     PriceVer = $script:PriceVer; ScanVer = $script:ScanVer; Offset = 0; Turns = 0; Tools = 0; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0;
      LastId = ''; LastCost = 0.0; LastOut = 0; Model = '-'; AiTitle = ''; Summary = ''; Title = ''; First = ''; MsgSummary = ''; Cwd = ''; GitBranch = ''; ToolCounts = @{}
      Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; ToolLog = @() }
 }
@@ -886,9 +895,36 @@ function Test-Finished([System.IO.FileInfo]$sf, $meta) {
 
 # ---- clipboard ------------------------------------------------------------------
 $script:Flash = ''; $script:FlashUntil = [datetime]::MinValue
+# Windows: Set-Clipboard. Elsewhere PowerShell's Set-Clipboard needs xclip and a display; without them it
+# keeps the text inside this pwsh process and still reports success (PowerShell 7.6.9, Clipboard.cs), so
+# the text is also sent to the terminal as OSC 52, which reaches the machine you are looking at, over
+# SSH too. Whether the terminal accepts OSC 52 can't be known, so the flash doesn't claim it.
+function Get-ClipboardPlan([bool]$OnWindows, [string]$Display, [bool]$HasXclip) {
+  if ($OnWindows) { return 'native' }
+  if ($Display -and $HasXclip) { return 'xclip', 'osc52' }
+  return 'osc52'
+}
+function Format-Osc52([string]$Text) {
+  "$([char]27)]52;c;$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Text)))$([char]7)"
+}
+function Format-CopyFlash([string]$What, [string[]]$Used) {
+  $sys = @($Used | Where-Object { $_ -ne 'osc52' })
+  $osc = $Used -contains 'osc52'
+  if ($sys -and $osc) { return "copied $What to clipboard ($($sys -join ', ')) and sent it to the terminal (OSC 52)" }
+  if ($osc) { return "sent $What to the terminal clipboard (OSC 52; needs terminal support)" }
+  return "copied $What to clipboard"
+}
 function Copy-Text([string]$text, [string]$what) {
-  try { Set-Clipboard -Value $text; $script:Flash = "copied $what to clipboard"; }
-  catch { $script:Flash = "clipboard unavailable: $($_.Exception.Message)" }
+  $onWindows = $IsWindows -or $env:OS -eq 'Windows_NT'
+  $hasXclip = [bool](Get-Command xclip -CommandType Application -ErrorAction SilentlyContinue)
+  $used = @(); $err = ''
+  foreach ($m in @(Get-ClipboardPlan $onWindows ([string]$env:DISPLAY) $hasXclip)) {
+    try {
+      if ($m -eq 'osc52') { [Console]::Write((Format-Osc52 $text)) } else { Set-Clipboard -Value $text -ErrorAction Stop }
+      $used += $m
+    } catch { $err = $_.Exception.Message }
+  }
+  $script:Flash = if ($used) { Format-CopyFlash $what $used } else { "clipboard unavailable: $err" }
   $script:FlashUntil = (Get-Date).AddSeconds(3)
 }
 

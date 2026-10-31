@@ -100,7 +100,7 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release not
 |----------------------|--------|
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | Move the selection |
 | `Enter` / `Space`    | Peek: a live detail screen for the selected session (`↑` `↓` switch session, `Esc` closes) |
-| `t`                  | Copy the selected row's transcript path |
+| `t`                  | Copy the selected row's transcript path (see [Copying](#copying)) |
 | `y`                  | Copy its `claude --resume <id>` command |
 | `o`                  | Cycle sort: activity, roster, start, cost, ctx |
 | `v`                  | Toggle layout: wrap / truncate |
@@ -113,6 +113,15 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release not
 | `[` / `]`            | Slower / faster refresh |
 | `h`                  | Help |
 | `q`                  | Quit (or close peek) |
+
+### Copying
+
+On Windows, `t` and `y` use the system clipboard. On Linux they send the text to your terminal with the
+OSC 52 escape sequence, which copies it on the machine you are looking at, over SSH too. Most modern
+terminals accept it; inside tmux it needs `set -g set-clipboard on` (tmux's default, `external`, ignores
+it from applications). With a display and `xclip` installed, the system clipboard is set as well.
+(PowerShell's own `Set-Clipboard` on Linux needs `xclip`; without it, it keeps the text inside the
+PowerShell process and still reports success, so ctop doesn't rely on it.)
 
 ### Mouse
 
