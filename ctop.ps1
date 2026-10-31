@@ -81,9 +81,17 @@
   Print ctop's version and exit.
 
 .NOTES
-  VERSION 2026.10.31.3 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.10.31.4 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.10.31.4
+    - only rows on screen are refreshed and styled each frame: a gone row off screen costs next to nothing
+      (300 gone rows now cost about what the visible screenful does: ~25–35 ms a frame, was ~140 ms).
+      A row that scrolls into view is refreshed before that frame is drawn, so a visible age is never
+      stale; whether a gone transcript changed is checked every 30 s for rows off screen
+    - gone rows sort with a .NET sort (newest gone first; ties by session id, so rows that left in the
+      same poll never swap); in roster sort they follow that order too instead of their stale position.
+      Title-bar counts are one pass over the rows
   2026.10.31.3
     - titles with quotes, newlines or non-ASCII read right: \" was shown literally (escapes were only
       undone when the text held a double backslash). Cached scan state is redone once (ScanVer 2)
@@ -181,7 +189,7 @@ param(
   [switch]$NoMouse,
   [switch]$Version
 )
-$script:CtopVersion = '2026.10.31.3'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.10.31.4'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -1410,18 +1418,25 @@ function Format-Rate([double]$Cost, $Started, [datetime]$Now) {
   $h = ($Now - [datetime]$Started).TotalHours
   if ($h -gt 0.05) { '${0:N2}' -f ($Cost / $h) } else { '-' }
 }
-# Gone rows are rebuilt only when their transcript changes; each frame refreshes just the fields that
-# depend on the clock (Update-GoneRow). sessionId -> @{ Key; Row }
+# Gone rows are rebuilt only when their transcript changes. Their clock-dependent cells (Update-GoneRow)
+# are refreshed only for the rows on screen: RefreshIds holds the ids drawn last frame (and the peeked
+# one), and a row that scrolls into view is caught up before the frame is drawn (main loop), so a
+# visible age is always current and an off-screen row costs next to nothing. sessionId -> @{ Key; Row }
 $script:GoneRows = @{}
 $script:GoneBuildMs = 120   # per frame, for building gone rows not built yet
 $script:GonePending = 0
-function Update-GoneRow($r, $s, $file, $gone, [bool]$cleared, [bool]$sample) {
-  $r.STATE = Resolve-State $s $r._Act $gone $cleared
-  $r.AGE   = if ($s.startedAt) { Get-Age $s.startedAt } else { '-' }
-  $r.IDLE  = if ($file) { Get-Since $file.LastWriteTime } else { '-' }
-  $r.RATE  = Format-Rate ([double]$r._Act.Cost) $r._StartedAt (Get-Date)
-  if ($sample -and (Test-SampleActivity $true $script:History[$s.sessionId])) { Add-Sample $s.sessionId $r.STATE 0 }
-  $r.ACTIVITY = $script:History[$s.sessionId]
+$script:RefreshIds = [System.Collections.Generic.HashSet[string]]::new()   # refresh these this frame
+$script:GoneCheckedAt = [datetime]::MinValue   # when every gone row's transcript was last checked
+$script:FreshIds   = [System.Collections.Generic.HashSet[string]]::new()   # refreshed this frame
+function Update-GoneRow($r) {
+  $s = $r._Src
+  $file = Find-Transcript $r._SessionId
+  $r.STATE    = Resolve-State $s $r._Act $r._Gone ([bool]$r._Cleared)
+  $r.AGE      = if ($s.startedAt) { Get-Age $s.startedAt } else { '-' }
+  $r.IDLE     = if ($file) { Get-Since $file.LastWriteTime } else { '-' }
+  $r.RATE     = Format-Rate ([double]$r._Act.Cost) $r._StartedAt (Get-Date)
+  $r.ACTIVITY = $script:History[$r._SessionId]
+  $r._Dirty   = $true   # Render-Table re-formats it
 }
 function Build-Rows {
   if ($script:GoneRows.Count -gt $script:Departed.Count) {
@@ -1434,15 +1449,35 @@ function Build-Rows {
   # of holding the screen; live sessions are always built. GonePending: rows still to build.
   $budget = [Diagnostics.Stopwatch]::StartNew()
   $script:GonePending = 0
-  $all = @($script:Roster | ForEach-Object { @{ S = $_; Gone = $null; Cleared = $false; Successor = '' } })
-  if ($script:ShowGone) { $all += @($script:KeptGone | ForEach-Object { @{ S = $_.Session; Gone = $_.GoneAt; Cleared = $_.Cleared; Successor = $_.Successor } }) }
+  $script:FreshIds.Clear()
+  # an off-screen gone row is passed through as built; whether its transcript changed (resumed elsewhere,
+  # or deleted by Claude Code's cleanup) is checked every frame for the rows on screen and every 30 s for
+  # all of them (a check of 300 rows costs ~60 ms: every roster poll it was a visible hitch)
+  $validate = ((Get-Date) - $script:GoneCheckedAt).TotalSeconds -ge 30
+  if ($validate) { $script:GoneCheckedAt = Get-Date }
+  $all = [System.Collections.Generic.List[object]]::new()
+  foreach ($x in $script:Roster) { $all.Add(@{ S = $x; Gone = $null; Cleared = $false; Successor = '' }) }
+  if ($script:ShowGone) { foreach ($d in $script:KeptGone) { $all.Add($d) } }   # Departed records: Session, GoneAt, Cleared, Successor
   foreach ($e in $all) {
-    $s = $e.S; $gone = $e.Gone; $cleared = $e.Cleared
+    if ($e.GoneAt) {
+      $id = [string]$e.Session.sessionId
+      $gc = $script:GoneRows[$id]
+      if ($gc -and -not $validate -and -not $script:RefreshIds.Contains($id)) {
+        if ($sample) { $h = $script:History[$id]; if ($h -and $h.Trim()) { Add-Sample $id $gc.Row.STATE 0 } }   # its activity scrolls off
+        $gc.Row; continue
+      }
+      $s = $e.Session; $gone = $e.GoneAt; $cleared = $e.Cleared
+    } else { $s = $e.S; $gone = $null; $cleared = $false }
     if ($gone) {
       $gf = Find-Transcript $s.sessionId
       $gk = "$(if ($gf) { "$($gf.Length)|$($gf.LastWriteTimeUtc.Ticks)" })|$cleared|$($e.Successor)|$gone"
       $gc = $script:GoneRows[$s.sessionId]
-      if ($gc -and $gc.Key -eq $gk) { Update-GoneRow $gc.Row $s $gf $gone $cleared $sample; $gc.Row; continue }
+      if ($gc -and $gc.Key -eq $gk) {
+        # a just-gone row's sparkline keeps scrolling its activity off, on screen or not
+        if ($sample -and (Test-SampleActivity $true $script:History[$s.sessionId])) { Add-Sample $s.sessionId $gc.Row.STATE 0 }
+        if ($script:RefreshIds.Contains([string]$s.sessionId)) { Update-GoneRow $gc.Row; [void]$script:FreshIds.Add([string]$s.sessionId) }
+        $gc.Row; continue
+      }
       if ($budget.ElapsedMilliseconds -ge $script:GoneBuildMs) { $script:GonePending++; continue }
     }
     $proc = if ($s.pid -and -not $gone) { Get-Process -Id $s.pid } else { $null }
@@ -1519,6 +1554,7 @@ function Build-Rows {
           _Transcript = $sf.FullName
           _StartedAt  = $sf.CreationTime
           _Group = $null; _TreeCost = $null; _LaunchCost = $null; _LaunchN = $null; _Launcher = $null; _LaunchedNames = $null; _TreeLast = $null   # Sort-Rows / Render-Table fill these
+      _Lines = $null; _LinesSig = $null; _Dirty = $true   # Render-Table's formatted lines, reused while the row is unchanged
         }
       }
     }
@@ -1606,12 +1642,14 @@ function Build-Rows {
       _Act        = $act
       _Transcript = if ($file) { $file.FullName } else { '-' }
       _StartedAt  = if ($s.startedAt) { [DateTimeOffset]::FromUnixTimeMilliseconds($s.startedAt).LocalDateTime } else { $null }
+      _Src        = $s
       _Group = $null; _TreeCost = $null; _LaunchCost = $null; _LaunchN = $null; _Launcher = $null; _LaunchedNames = $null; _TreeLast = $null   # Sort-Rows / Render-Table fill these
+      _Lines = $null; _LinesSig = $null; _Dirty = $true   # Render-Table's formatted lines, reused while the row is unchanged
     }
     $live = @($kids | Where-Object { $_.STATE -in 'working','thinking' -or $_.STATE -like 'awaiting*' }).Count
     # the +N badge stands in for hidden subagent rows; when the rows are shown they speak for themselves
     $prow | Add-Member -NotePropertyName _LiveKids -NotePropertyValue $(if ($script:ShowSubagents) { 0 } else { $live }) -Force
-    if ($gone) { $script:GoneRows[$s.sessionId] = @{ Key = $gk; Row = $prow } }
+    if ($gone) { $script:GoneRows[$s.sessionId] = @{ Key = $gk; Row = $prow }; [void]$script:FreshIds.Add([string]$s.sessionId) }
     $prow
     if ($script:ShowSubagents) { $kids }
   }
@@ -1656,12 +1694,27 @@ function Sort-Rows([object[]]$rows) {
     $lr = $rows | Where-Object { $_._SessionId -eq $id -and -not $_._Parent } | Select-Object -First 1
     if ($lr) { $lr._LaunchedNames = @($launchKids[$id] | ForEach-Object { ([string]$_.NAME).Trim() }) -join ', ' }
   }
-  $parents = @($rows | Where-Object { -not $_._Parent -and -not $isLaunched.ContainsKey($_._SessionId) } |
-    Sort-Object @{ e = { if ($mode -ne 'activity' -and $_._Gone) { 1 } else { 0 } } },
-                @{ e = { & $key $_ } },
-                @{ e = { if ($_._Gone) { -([datetime]$_._Gone).Ticks } else { 0 } } },   # gone rows: most recently gone first
-                @{ e = { if ($_._StartedAt) { $_._StartedAt.Ticks } else { [long]::MaxValue } } },
-                @{ e = { $_._SessionId } })
+  # Live sessions sort on the mode's key. Gone ones always follow them, most recently gone first (ties,
+  # which one poll's departures share: session id), or on the mode's key in cost / ctx. Gone rows get a
+  # .NET sort on a string key: Sort-Object with script-block keys was most of the sort time with a long
+  # history.
+  $liveP = [System.Collections.Generic.List[object]]::new(); $goneP = [System.Collections.Generic.List[object]]::new()
+  foreach ($r in $rows) {
+    if ($r._Parent -or $isLaunched.ContainsKey($r._SessionId)) { continue }
+    if ($r._Gone) { $goneP.Add($r) } else { $liveP.Add($r) }
+  }
+  $parents = @($liveP | Sort-Object @{ e = { & $key $_ } },
+                                    @{ e = { if ($_._StartedAt) { $_._StartedAt.Ticks } else { [long]::MaxValue } } },
+                                    @{ e = { $_._SessionId } })
+  if ($mode -in 'cost', 'ctx') {
+    $parents += @($goneP | Sort-Object @{ e = { & $key $_ } }, @{ e = { -([datetime]$_._Gone).Ticks } }, @{ e = { $_._SessionId } })
+  } elseif ($goneP.Count) {
+    $gone = $goneP.ToArray(); $gk = [string[]]::new($gone.Count)
+    $max = [datetime]::MaxValue.Ticks
+    for ($i = 0; $i -lt $gone.Count; $i++) { $gk[$i] = '{0:D19}|{1}' -f ($max - ([datetime]$gone[$i]._Gone).Ticks), $gone[$i]._SessionId }
+    [Array]::Sort[string, object]($gk, $gone, [StringComparer]::Ordinal)
+    $parents += $gone
+  }
   # Σ: own + agents + (recursively) sessions it launched
   $sumSeen = @{}
   function Sum-Tree($p) {
@@ -1671,7 +1724,11 @@ function Sort-Rows([object[]]$rows) {
     $p._TreeCost = $own + $l; $p._LaunchCost = $l; $p._LaunchN = $ln
     return $own + $l
   }
-  foreach ($p in $parents) { [void](Sum-Tree $p) }
+  foreach ($p in $parents) {
+    # a gone row has no agents listed and launched nothing: its tree is itself (no call per row)
+    if ($p._Gone -and -not $launchKids.ContainsKey($p._SessionId)) { $p._TreeCost = [double]$p._Act.Cost + [double]$p._AgentCost; $p._LaunchCost = 0.0; $p._LaunchN = 0; continue }
+    [void](Sum-Tree $p)
+  }
   # parent session id -> its agent rows, built once (a lookup per session was O(sessions × rows))
   $kidsOf = @{}
   foreach ($r in $rows) {
@@ -1720,7 +1777,10 @@ function Sort-Rows([object[]]$rows) {
       }
     }
   }
-  foreach ($p in $parents) { Emit-Group $p 0 $p._SessionId }
+  foreach ($p in $parents) {
+    if ($p._Gone -and -not $kidsOf.ContainsKey([string]$p._SessionId) -and -not $launchKids.ContainsKey($p._SessionId)) { $p._Group = $p._SessionId; $out.Add($p); continue }
+    Emit-Group $p 0 $p._SessionId
+  }
   return $out.ToArray()   # unrolled: the caller wraps it in @()
 }
 
@@ -2017,9 +2077,9 @@ function Render-Table([object[]]$rows, [string]$selectedId) {
   if ($script:Compact) { $cands = @($cands | Where-Object { $_.Priority -ge 60 }) }
   $maxLines = if ($script:Layouts[$script:LayoutMode] -eq 'wrap') { [math]::Max(1, $WrapLines) } else { 1 }
   $cols = Layout-Columns $cands $rows $avail $sep
-  $out = @()
-  $out += ($cols | ForEach-Object { Fit $_.Name $_.Width $_.Align }) -join $sep
-  $out += ($cols | ForEach-Object { '-' * $_.Width }) -join $sep
+  $out = [System.Collections.Generic.List[object]]::new()   # a List: += on an array copies it every time
+  $out.Add((($cols | ForEach-Object { Fit $_.Name $_.Width $_.Align }) -join $sep))
+  $out.Add((($cols | ForEach-Object { '-' * $_.Width }) -join $sep))
   # tree shape: a child is the last at its level if no later sibling (same session, same depth)
   # appears before the group ends or climbs back above its depth
   for ($i = 0; $i -lt $rows.Count; $i++) {
@@ -2042,14 +2102,18 @@ function Render-Table([object[]]$rows, [string]$selectedId) {
   # for scrolling: which body lines belong to the selected row, and which row each line belongs to
   $script:SelSpan = $null; $script:LineRow = [System.Collections.Generic.List[int]]::new(); $ord = 0
   foreach ($r in $rows) {
-    if ($grouped -and -not $r._Parent -and -not $r._Depth -and -not $first) { $out += @{ Text = ('╌' * $ruleW); Fg = 'DarkGray' }; $script:LineRow.Add(-1) }
+    if ($grouped -and -not $r._Parent -and -not $r._Depth -and -not $first) { $out.Add(@{ Text = ('╌' * $ruleW); Fg = 'DarkGray' }); $script:LineRow.Add(-1) }
     $first = $false
     $start = $out.Count
-    foreach ($line in (Get-RowLines $cols $r $sep $maxLines $sig)) { $out += Style-Line $line $r $selectedId $false; $script:LineRow.Add($ord) }
+    # an unchanged row (a gone row off screen, say) reuses its lines without even building its cache key
+    if ($r._Dirty -or $r._LinesSig -ne $sig -or $null -eq $r._Lines) {
+      $r._Lines = Get-RowLines $cols $r $sep $maxLines $sig; $r._LinesSig = $sig; $r._Dirty = $false
+    }
+    foreach ($line in $r._Lines) { $out.Add($line); $script:LineRow.Add($ord) }   # styled by the main loop, on screen only
     if ($selectedId -and $r._SessionId -eq $selectedId) { $script:SelSpan = @(($start - 2), ($out.Count - 3)) }   # body-relative
     $ord++
   }
-  return $out
+  return $out.ToArray()
 }
 
 # ---- peek view ------------------------------------------------------------------
@@ -2509,11 +2573,14 @@ try {
     $frameSw.Restart()
     $script:KeptGone = @(Get-KeptDeparted $script:Departed (Get-Date) $script:KeepMin)   # once per frame: rows and the strip's count
     $rows = @(Build-Rows)
-    $top     = @($rows | Where-Object { -not $_._Parent -and -not $_._Gone })
-    $goneN   = @($rows | Where-Object { $_._Gone }).Count
-    $subs    = @($rows | Where-Object { $_._Parent -and -not $_._Done }).Count
-    $subsDone = @($rows | Where-Object { $_._Parent -and $_._Done }).Count
-    $subsOrph = @($rows | Where-Object { $_._Parent -and $_._Orphaned }).Count
+    # one pass (five Where-Object pipelines over a long history cost more than the rest of the header)
+    $topL = [System.Collections.Generic.List[object]]::new(); $goneN = 0; $subs = 0; $subsDone = 0; $subsOrph = 0
+    foreach ($r in $rows) {
+      if ($r._Parent) { if ($r._Done) { $subsDone++ } else { $subs++ }; if ($r._Orphaned) { $subsOrph++ } }
+      elseif ($r._Gone) { $goneN++ }
+      else { $topL.Add($r) }
+    }
+    $top = $topL.ToArray()
     $working = @($top | Where-Object { $_.STATE -in 'working','thinking' -or $_.STATE -like 'waiting*' }).Count
     $idle    = @($top | Where-Object { $_.STATE -eq 'idle' }).Count
     $await   = @($top | Where-Object { $_.STATE -like 'awaiting*' -or $_.STATE -eq 'polling' }).Count
@@ -2554,37 +2621,55 @@ try {
     } else {
       $sorted = @(Sort-Rows $rows)
       if (-not $selectedId -or -not ($sorted._SessionId -contains $selectedId)) { $selectedId = $sorted[0]._SessionId }
-      $tbl  = @(Render-Table $sorted $selectedId)
-      $head = @($tbl[0..1]); $body = if ($tbl.Count -gt 2) { @($tbl[2..($tbl.Count - 1)]) } else { @() }
-      # rows left for the body: the footer takes the last line, the title/strip/blank and the column
-      # header take the rest
-      $room = [math]::Max(3, [Console]::WindowHeight - 1 - $frame.Count - $head.Count)
-      $script:BodyY0 = $frame.Count + $head.Count   # screen line of the first body line (for mouse clicks)
-      if ($body.Count -le $room) { $script:ScrollTop = 0; $script:PageRows = [math]::Max(1, $sorted.Count); $script:BodyMap = $script:LineRow }
-      else {
-        # scroll just enough to keep every line of the selected row visible
-        if ($script:SelSpan) {
-          if ($script:SelSpan[0] -lt $script:ScrollTop) { $script:ScrollTop = $script:SelSpan[0] }
-          if ($script:SelSpan[1] -ge $script:ScrollTop + $room) { $script:ScrollTop = $script:SelSpan[1] - $room + 1 }
+      # Render, then see which rows are on screen. A gone row that scrolled into view since the last frame
+      # was not refreshed by Build-Rows (only last frame's visible rows are): refresh it and render once
+      # more (only changed rows are re-formatted), so a visible age is never stale, even for one frame.
+      for ($pass = 0; $pass -lt 2; $pass++) {
+        $tbl  = @(Render-Table $sorted $selectedId)
+        $head = @($tbl[0..1]); $body = if ($tbl.Count -gt 2) { @($tbl[2..($tbl.Count - 1)]) } else { @() }
+        # rows left for the body: the footer takes the last line, the title/strip/blank and the column
+        # header take the rest
+        $room = [math]::Max(3, [Console]::WindowHeight - 1 - $frame.Count - $head.Count)
+        $script:BodyY0 = $frame.Count + $head.Count   # screen line of the first body line (for mouse clicks)
+        $vis = @(); $where = ''
+        if ($body.Count -le $room) {
+          $script:ScrollTop = 0; $script:PageRows = [math]::Max(1, $sorted.Count); $script:BodyMap = $script:LineRow; $vis = @(0..($sorted.Count - 1))
+          $body = @(for ($li = 0; $li -lt $body.Count; $li++) { $x = $body[$li]; $rowOf = $script:LineRow[$li]; if ($x -is [string] -and $rowOf -ge 0) { Style-Line $x $sorted[$rowOf] $selectedId $false } else { $x } })
         }
-        $script:ScrollTop = [math]::Max(0, [math]::Min($script:ScrollTop, $body.Count - $room))
-        $vTop = $script:ScrollTop; $end = $vTop + $room - 1
-        # a wrapped row cut by the window edge would read as a shorter row: leave it out entirely
-        $cutTop = if ($vTop -gt 0 -and $script:LineRow[$vTop] -ge 0 -and $script:LineRow[$vTop - 1] -eq $script:LineRow[$vTop]) { $script:LineRow[$vTop] } else { -2 }
-        $cutEnd = if ($end + 1 -lt $script:LineRow.Count -and $script:LineRow[$end] -ge 0 -and $script:LineRow[$end + 1] -eq $script:LineRow[$end]) { $script:LineRow[$end] } else { -2 }
-        $slice = @(); $visRows = @()
-        $script:BodyMap = [System.Collections.Generic.List[int]]::new()
-        for ($li = $vTop; $li -le $end -and $li -lt $body.Count; $li++) {
-          $rowOf = $script:LineRow[$li]
-          if ($rowOf -ge 0 -and ($rowOf -eq $cutTop -or $rowOf -eq $cutEnd)) { $slice += ''; $script:BodyMap.Add(-1); continue }
-          $slice += $body[$li]; $script:BodyMap.Add($rowOf); if ($rowOf -ge 0) { $visRows += $rowOf }
+        else {
+          # scroll just enough to keep every line of the selected row visible
+          if ($script:SelSpan) {
+            if ($script:SelSpan[0] -lt $script:ScrollTop) { $script:ScrollTop = $script:SelSpan[0] }
+            if ($script:SelSpan[1] -ge $script:ScrollTop + $room) { $script:ScrollTop = $script:SelSpan[1] - $room + 1 }
+          }
+          $script:ScrollTop = [math]::Max(0, [math]::Min($script:ScrollTop, $body.Count - $room))
+          $vTop = $script:ScrollTop; $end = $vTop + $room - 1
+          # a wrapped row cut by the window edge would read as a shorter row: leave it out entirely
+          $cutTop = if ($vTop -gt 0 -and $script:LineRow[$vTop] -ge 0 -and $script:LineRow[$vTop - 1] -eq $script:LineRow[$vTop]) { $script:LineRow[$vTop] } else { -2 }
+          $cutEnd = if ($end + 1 -lt $script:LineRow.Count -and $script:LineRow[$end] -ge 0 -and $script:LineRow[$end + 1] -eq $script:LineRow[$end]) { $script:LineRow[$end] } else { -2 }
+          $slice = [System.Collections.Generic.List[object]]::new(); $visRows = [System.Collections.Generic.List[int]]::new()
+          $script:BodyMap = [System.Collections.Generic.List[int]]::new()
+          for ($li = $vTop; $li -le $end -and $li -lt $body.Count; $li++) {
+            $rowOf = $script:LineRow[$li]
+            if ($rowOf -ge 0 -and ($rowOf -eq $cutTop -or $rowOf -eq $cutEnd)) { $slice.Add(''); $script:BodyMap.Add(-1); continue }
+            $x = $body[$li]; if ($x -is [string] -and $rowOf -ge 0) { $x = Style-Line $x $sorted[$rowOf] $selectedId $false }
+            $slice.Add($x); $script:BodyMap.Add($rowOf); if ($rowOf -ge 0) { $visRows.Add($rowOf) }
+          }
+          $vis = @($visRows | Select-Object -Unique)
+          $vMin = ($vis | Measure-Object -Minimum).Minimum; $vMax = ($vis | Measure-Object -Maximum).Maximum
+          $script:PageRows = [math]::Max(1, $vMax - $vMin)
+          $body = $slice.ToArray()
+          $where = "   │ rows $($vMin + 1)–$($vMax + 1) of $($sorted.Count)"   # where we are, in the instrument strip
         }
-        $vis = @($visRows | Select-Object -Unique)
-        $script:PageRows = [math]::Max(1, ($vis | Measure-Object -Maximum).Maximum - ($vis | Measure-Object -Minimum).Minimum)
-        $body = $slice
-        # where we are, in the instrument strip
-        $frame[1].Text = $frame[1].Text.TrimEnd() + "   │ rows $(($vis | Measure-Object -Minimum).Minimum + 1)–$(($vis | Measure-Object -Maximum).Maximum + 1) of $($sorted.Count)"
+        $stale = @(foreach ($i in $vis) { $r = $sorted[$i]; if ($r._Gone -and -not $script:FreshIds.Contains([string]$r._SessionId)) { $r } })
+        foreach ($r in $stale) { Update-GoneRow $r; [void]$script:FreshIds.Add([string]$r._SessionId) }
+        if (-not $stale) { break }
       }
+      # next frame refreshes what is on screen now, and the peeked row
+      $script:RefreshIds.Clear()
+      foreach ($i in $vis) { [void]$script:RefreshIds.Add([string]$sorted[$i]._SessionId) }
+      if ($script:PeekId) { [void]$script:RefreshIds.Add([string]$script:PeekId) }
+      if ($where) { $frame[1].Text = $frame[1].Text.TrimEnd() + $where }
       $frame += $head + $body
     }
     $foot = Build-Footer

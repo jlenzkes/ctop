@@ -146,7 +146,8 @@ Gone sessions from earlier runs are read from the closed-sessions log at startup
 or more shows yesterday's sessions too, most recently gone first. Claude Code deletes transcripts older
 than `cleanupPeriodDays` (30 by default); peek says so for a session whose transcript is gone, since it
 can no longer be resumed. A long history loads in slices, newest first, so live sessions show at once;
-the strip reads `gone 120/300` until it is all in.
+the strip reads `gone 120/300` until it is all in. Only the rows on screen are refreshed each frame, so
+a long history costs about what one screenful does.
 
 The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meaning (forever).
 
@@ -189,7 +190,8 @@ Tests use [Pester](https://pester.dev) 5:
   `ctop.ps1` without running it (`tests/Import-Ctop.ps1`), so they need no `claude` and no terminal.
 - `tests/Integration.Tests.ps1` (tag `Integration`): drives the real ctop in tmux against a fake
   `claude` and a 300-session history, checking that keys are never dropped, that frames stay within the
-  tick, and that the live sessions show before the history has loaded. Linux, with `tmux`.
+  tick, that off-screen history is nearly free, that a row scrolled into view shows its current age,
+  and that the live sessions show before the history has loaded. Linux, with `tmux`.
 
 ```powershell
 Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser

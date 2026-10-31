@@ -38,10 +38,26 @@ Describe 'Sort-Rows: gone rows' {
     )
   }
   It 'puts live sessions first, then gone ones, most recently gone first (<Mode>)' -ForEach @(
-    @{ Mode = 'activity' }, @{ Mode = 'start' }
+    @{ Mode = 'activity' }, @{ Mode = 'start' }, @{ Mode = 'roster' }
   ) {
     $script:SortMode = [array]::IndexOf($script:SortModes, $Mode)
     @(Sort-Rows $rows | ForEach-Object { $_._SessionId }) | Should -Be @('live', 'g-new', 'g-mid', 'g-old')
+  }
+  It 'sorts gone rows by cost, after the live ones, in cost mode' {
+    $script:SortMode = [array]::IndexOf($script:SortModes, 'cost')
+    $byCost = @(
+      (Row 'live'  $null              $t0.AddHours(-1))
+      (Row 'cheap' $t0.AddMinutes(-5) $t0.AddDays(-2))
+      (Row 'dear'  $t0.AddDays(-3)    $t0.AddDays(-4))
+    )
+    $byCost[1]._Act = @{ Cost = 1.0; Ctx = '-' }; $byCost[2]._Act = @{ Cost = 50.0; Ctx = '-' }
+    @(Sort-Rows $byCost | ForEach-Object { $_._SessionId }) | Should -Be @('live', 'dear', 'cheap')
+  }
+  It 'orders gone rows that left in the same poll (same time) by session id, so they never swap' {
+    $script:SortMode = 0
+    $same = $t0.AddMinutes(-3)
+    $tied = @((Row 'g-b' $same $t0.AddDays(-1)), (Row 'g-c' $same $t0.AddDays(-3)), (Row 'g-a' $same $t0.AddDays(-2)))
+    @(Sort-Rows $tied | ForEach-Object { $_._SessionId }) | Should -Be @('g-a', 'g-b', 'g-c')
   }
 }
 
@@ -91,5 +107,32 @@ Describe 'Format-Rate (COST per hour since start)' {
     Format-Rate -Cost 0 -Started $now.AddHours(-2) -Now $now | Should -Be '-'
     Format-Rate -Cost 5 -Started $null -Now $now | Should -Be '-'
     Format-Rate -Cost 5 -Started $now.AddMinutes(-2) -Now $now | Should -Be '-'
+  }
+}
+
+Describe 'Update-GoneRow (refresh the clock-dependent cells of a gone row)' {
+  BeforeAll {
+    $script:TranscriptIndex = @{}; $script:History = @{ g1 = '▒█·   ' }
+    function GoneRow([bool]$cleared) {
+      $started = [DateTimeOffset]::UtcNow.AddHours(-3)
+      [pscustomobject]@{ _SessionId = 'g1'; _Gone = (Get-Date).AddMinutes(-7); _Cleared = $cleared; _Act = @{ Cost = 6.0 }
+                         _StartedAt = $started.LocalDateTime; _Src = [pscustomobject]@{ sessionId = 'g1'; startedAt = $started.ToUnixTimeMilliseconds() }
+                         STATE = 'stale'; AGE = 'stale'; IDLE = 'stale'; RATE = 'stale'; ACTIVITY = 'stale'; _Dirty = $false }
+    }
+  }
+  It 'sets STATE, AGE, IDLE, RATE and ACTIVITY from the clock and marks the row changed' {
+    $r = GoneRow $false
+    Update-GoneRow $r
+    $r.STATE | Should -Be 'gone 7m'
+    $r.AGE | Should -Match '^(2h59m|3h00m)$'
+    $r.IDLE | Should -Be '-'          # no transcript on disk
+    $r.RATE | Should -Be '$2.00'      # $6 over 3 h
+    $r.ACTIVITY | Should -Be '▒█·   '
+    $r._Dirty | Should -BeTrue
+  }
+  It 'reads cleared for a /clear' {
+    $r = GoneRow $true
+    Update-GoneRow $r
+    $r.STATE | Should -Be 'cleared 7m'
   }
 }
