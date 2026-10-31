@@ -16,10 +16,10 @@ BeforeAll {
   function tmux { & $script:tmuxExe -L $script:tmuxSock @args }
 
   # a synthetic transcript: prompt, tool call + result, reply; repeated to ~60 KB
-  function New-Transcript([string]$path, [string]$sid, [int]$turns = 25) {
+  function New-Transcript([string]$path, [string]$sid, [int]$turns = 25, [string]$prompt = ('do the thing ' + ('x' * 400))) {
     $ts = [DateTime]::UtcNow.AddDays(-3).ToString('o')
     $turn = @(
-      @{ type = 'user'; sessionId = $sid; timestamp = $ts; cwd = '/w'; message = @{ role = 'user'; content = 'do the thing ' + ('x' * 400) } }
+      @{ type = 'user'; sessionId = $sid; timestamp = $ts; cwd = '/w'; message = @{ role = 'user'; content = $prompt } }
       @{ type = 'assistant'; sessionId = $sid; timestamp = $ts; cwd = '/w'; gitBranch = 'main'
          message = @{ role = 'assistant'; model = 'claude-sonnet-5-5'; usage = @{ input_tokens = 10; output_tokens = 200; cache_read_input_tokens = 30000; cache_creation_input_tokens = 500 }
                       content = @(@{ type = 'tool_use'; id = 'tu1'; name = 'Bash'; input = @{ command = 'ls -la' } }) } }
@@ -39,7 +39,7 @@ BeforeAll {
   # -NoLive: the roster starts empty. -Kinds: each history entry's kind (default interactive). The fake
   # claude prints RosterFile on every poll, so a test can change the roster while ctop runs.
   function New-Fixture([string]$root, [DateTimeOffset[]]$closedAt, [string]$PathTail = $env:PATH, [int]$Turns = 25,
-                       [switch]$NoLive, [string[]]$Kinds = @()) {
+                       [switch]$NoLive, [string[]]$Kinds = @(), [string]$Prompt = ('do the thing ' + ('x' * 400))) {
     $cfg = Join-Path $root 'cfg'; $bin = Join-Path $root 'bin'
     New-Item -ItemType Directory -Force -Path $bin, (Join-Path $cfg 'projects/-w') | Out-Null
     $live = @{ pid = $PID; cwd = $root; kind = 'interactive'; startedAt = [DateTimeOffset]::UtcNow.AddHours(-1).ToUnixTimeMilliseconds()
@@ -57,7 +57,7 @@ BeforeAll {
       $dir = Join-Path $cfg "projects/-w-p$($i % 12)"
       New-Item -ItemType Directory -Force -Path $dir | Out-Null
       $tf = Join-Path $dir "$sid.jsonl"
-      New-Transcript $tf $sid $Turns
+      New-Transcript $tf $sid $Turns $Prompt
       [IO.File]::SetLastWriteTimeUtc($tf, $closedAt[$i].UtcDateTime)
       $name = 'h{0:d3}' -f $i; $closed[$name] = $closedAt[$i]
       @{ closedAt = $closedAt[$i].ToString('o'); why = 'closed'; name = $name; title = "history $i"
@@ -129,11 +129,22 @@ BeforeAll {
     return $median
   }
   # Time from a key to its visible effect, by watching the screen every 20 ms
-  function Measure-KeyResponse([string]$s, [string]$key, [string]$expect, [double]$seconds = 5) {
+  # ms from a key to the screen answering it: the keep window, shown on the strip and in the footer, goes
+  # from $from to $to. Before the key both must read $from (else it throws: no clean starting state).
+  # It counts as answered only once both read $to and the screen has changed, so a half-drawn frame
+  # (strip new, footer old) or a frozen screen showing the new value somewhere is not taken for an answer.
+  # $null when no answer came in $seconds.
+  function Get-KeepShown([string]$screen) { @([regex]::Matches($screen, 'keep (\S+)') | ForEach-Object { $_.Groups[1].Value }) }
+  function Measure-KeyResponse([string]$s, [string]$key, [string]$from, [string]$to, [double]$seconds = 5) {
+    $before = Get-Screen $s
+    $shown = Get-KeepShown $before
+    if ($shown.Count -lt 2 -or @($shown | Where-Object { $_ -ne $from }).Count) { throw "before the key the screen must show keep $from on the strip and footer; it shows: $($shown -join ', ')" }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     & tmux send-keys -t $s $key
     while ($sw.Elapsed.TotalSeconds -lt $seconds) {
-      if ((Get-Screen $s) -match $expect) { return $sw.Elapsed.TotalMilliseconds }
+      $screen = Get-Screen $s
+      $shown = Get-KeepShown $screen
+      if ($screen -ne $before -and $shown.Count -ge 2 -and -not @($shown | Where-Object { $_ -ne $to }).Count) { return $sw.Elapsed.TotalMilliseconds }
       Start-Sleep -Milliseconds 20
     }
     return $null
@@ -228,7 +239,7 @@ Describe 'ctop under a long history' -Tag Integration -Skip:$script:noTmux {
       Start-Sleep -Seconds 5
       # 30d <-> 14d: each press changes how many history rows are listed, so the response is a real redraw
       $lat = for ($i = 0; $i -lt 8; $i++) {
-        if ($i % 2 -eq 0) { Measure-KeyResponse $s '-' 'keep 14d ' } else { Measure-KeyResponse $s '+' 'keep 30d ' }
+        if ($i % 2 -eq 0) { Measure-KeyResponse $s '-' '30d' '14d' } else { Measure-KeyResponse $s '+' '14d' '30d' }
       }
       Write-Host ("    key -> visible ms: {0}" -f (($lat | ForEach-Object { if ($null -eq $_) { 'none' } else { [int]$_ } }) -join ' '))
       @($lat | Where-Object { $null -eq $_ }).Count | Should -Be 0
@@ -254,6 +265,33 @@ Describe 'ctop under a long history' -Tag Integration -Skip:$script:noTmux {
     } finally { Stop-Ctop $s }
     Write-Host "    a screenful: $base ms, 300 rows: $full ms"
     $full | Should -BeLessThan (1.5 * $base)
+  }
+}
+
+Describe 'titles in a non-Latin script' -Tag Integration -Skip:$script:noTmux {
+  It 'cost about what ASCII titles do (a screenful of Hebrew or Chinese titles, frame median)' {
+    # The same history three times, with ASCII, Hebrew and Chinese titles. Text the width fast paths do not
+    # cover is measured element by element, ~10 ms a line (Hebrew titles took a frame from ~55 to ~175 ms).
+    # Relative, so it holds on slower and faster machines alike.
+    $now = [DateTimeOffset]::UtcNow
+    $at = @(for ($i = 0; $i -lt 60; $i++) { $now.AddMinutes(-2 - $i) })
+    $hebrew = (-join @(0x05EA, 0x05E7, 0x05DF, 0x0020, 0x05D0, 0x05EA, 0x0020, 0x05D4, 0x05D1, 0x05D3, 0x05D9, 0x05E7, 0x05D5, 0x05EA, 0x0020 | ForEach-Object { [char]$_ })) * 12
+    $chinese = (-join @(0x4FEE, 0x590D, 0x6D4B, 0x8BD5, 0x7528, 0x4F8B, 0x0020 | ForEach-Object { [char]$_ })) * 10
+    $med = @{}
+    foreach ($case in @(@{ Name = 'ascii'; Prompt = ('fix the tests ' * 12) }, @{ Name = 'hebrew'; Prompt = $hebrew }, @{ Name = 'chinese'; Prompt = $chinese })) {
+      $fx = New-Fixture (Join-Path $TestDrive "script-$($case.Name)") $at -Turns 1 -Prompt $case.Prompt
+      $s = Start-Ctop $fx '-Keep inf'
+      try {
+        Wait-Screen $s 'gone 60\b|60 gone' 60 | Should -Not -BeNullOrEmpty
+        Wait-Screen $s ([regex]::Escape($case.Prompt.Substring(0, 8))) 10 | Should -Not -BeNullOrEmpty -Because 'the titles measured must be on screen'
+        Start-Sleep -Seconds 6
+        $med[$case.Name] = Get-MedianFrame $s
+      } finally { Stop-Ctop $s }
+    }
+    Write-Host ("    frame median: ascii titles {0} ms, hebrew {1} ms, chinese {2} ms" -f $med.ascii, $med.hebrew, $med.chinese)
+    $limit = [math]::Max(1.5 * $med.ascii, $med.ascii + 15)
+    $med.hebrew | Should -BeLessThan $limit
+    $med.chinese | Should -BeLessThan $limit
   }
 }
 
@@ -413,47 +451,67 @@ Describe 'a roster poll that hangs' -Tag Integration -Skip:$script:noTmux {
 }
 
 Describe 'hostile session text' -Tag Integration -Skip:$script:noTmux {
-  It 'does not let a title run terminal commands in peek or the closed log (OSC 52 sets the clipboard)' {
-    $fx = New-Fixture (Join-Path $TestDrive 'osc') @() -NoLive
-    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('pwned-by-title'))
-    $title = "evil $([char]27)]52;c;$payload$([char]7) title"
-    $rec = @{ closedAt = [DateTimeOffset]::UtcNow.AddMinutes(-3).ToString('o'); why = 'closed'; name = 'evil-one'; title = $title
-              sessionId = 'eeeeeeee-0000-4000-8000-000000000001'; cwd = "/tmp/$([char]27)[2J"; pid = 1; startedAt = 1793400000000; kind = 'interactive' }
-    Set-Content -LiteralPath $fx.Log -Value ($rec | ConvertTo-Json -Compress)
-    # A server must exist before its options can be set (an empty one exits): a holder session first.
-    $script:n++; $hold = "ctop-it-$PID-$($script:n)-hold"
-    & tmux new-session -d -s $hold -x 80 -y 10 'sleep 120'
-    $s = $null; $prev = & tmux show-options -gv set-clipboard
-    try {
+  BeforeAll {
+    # Two sessions, one payload each, so each view is judged on its own: the cwd one is newer (listed
+    # first, so peek opens on it; peek showed the cwd raw), the title one older (the closed log showed
+    # titles raw). Nothing here clears the screen (the unit tests cover that), so no screen check can
+    # fail before the clipboard is checked.
+    function Start-Hostile([string]$dir) {
+      $fx = New-Fixture (Join-Path $TestDrive $dir) @() -NoLive
+      $osc = { param($text) "$([char]27)]52;c;$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text)))$([char]7)" }
+      $recs = @(
+        @{ closedAt = [DateTimeOffset]::UtcNow.AddMinutes(-2).ToString('o'); why = 'closed'; name = 'evil-cwd'; title = 'plain title'
+           sessionId = 'eeeeeeee-0000-4000-8000-000000000002'; cwd = "/tmp/a$(& $osc 'pwned-by-cwd')b"; pid = 1; startedAt = 1793400000000; kind = 'interactive' }
+        @{ closedAt = [DateTimeOffset]::UtcNow.AddMinutes(-3).ToString('o'); why = 'closed'; name = 'evil-title'; title = "evil $(& $osc 'pwned-by-title') title"
+           sessionId = 'eeeeeeee-0000-4000-8000-000000000001'; cwd = '/tmp/plain'; pid = 1; startedAt = 1793400000000; kind = 'interactive' }
+      ) | ForEach-Object { $_ | ConvertTo-Json -Compress }
+      [IO.File]::WriteAllLines($fx.Log, [string[]]$recs)
+      # A server must exist before its options can be set (an empty one exits): a holder session first.
+      $script:n++; $h = @{ Hold = "ctop-it-$PID-$($script:n)-hold"; S = $null }
+      & tmux new-session -d -s $h.Hold -x 80 -y 10 'sleep 120'
+      $h.Prev = & tmux show-options -gv set-clipboard
       & tmux set-option -g set-clipboard on
       $LASTEXITCODE | Should -Be 0
       & tmux show-options -gv set-clipboard | Should -Be 'on'
       # positive control: with this setting an application's OSC 52 does land in a tmux buffer
-      $ctl = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('control-payload'))
-      & tmux new-window -d -t $hold "printf '\033]52;c;$ctl\a'; sleep 60"
+      $ctl = "control-payload-$($script:n)"
+      & tmux new-window -d -t $h.Hold "printf '\033]52;c;$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ctl)))\a'; sleep 60"
       $sw = [Diagnostics.Stopwatch]::StartNew(); $seen = ''
-      while ($sw.Elapsed.TotalSeconds -lt 5 -and $seen -notmatch 'control-payload') {
-        $seen = (& tmux list-buffers -F '#{buffer_sample}' 2>$null) -join "`n"; Start-Sleep -Milliseconds 100
-      }
-      $seen | Should -Match 'control-payload' -Because 'the terminal must accept OSC 52, or a clean result below proves nothing'
-      $s = Start-Ctop $fx '-Keep inf'
-      Wait-Screen $s '(?m)^evil-one ' 30 | Should -Not -BeNullOrEmpty
-      # the clipboard is checked after each view has had time to draw, before anything is read off the
-      # screen: an unsanitized ESC[2J would wreck the screen and fail a screen check first, hiding this one
-      $buffers = { (& tmux list-buffers -F '#{buffer_sample}' 2>$null) -join "`n" }
-      & tmux send-keys -t $s Enter                 # peek: the title and cwd, in full
-      Start-Sleep -Milliseconds 1500
-      & $buffers | Should -Not -Match 'pwned-by-title' -Because 'peek drew the title'
-      Wait-Screen $s 'ctop — evil-one' 5 | Should -Not -BeNullOrEmpty
-      & tmux send-keys -t $s Escape; Start-Sleep -Milliseconds 400
-      & tmux send-keys -t $s x                     # the closed-sessions log
-      Start-Sleep -Milliseconds 1500
-      & $buffers | Should -Not -Match 'pwned-by-title' -Because 'the closed log drew the title'
-      Wait-Screen $s 'closed sessions' 5 | Should -Not -BeNullOrEmpty
-    } finally {
-      & tmux set-option -g set-clipboard $prev   # later tests share this private server
-      if ($s) { Stop-Ctop $s }; Stop-Ctop $hold
+      while ($sw.Elapsed.TotalSeconds -lt 5 -and $seen -notmatch $ctl) { $seen = Get-Buffers; Start-Sleep -Milliseconds 100 }
+      $seen | Should -Match $ctl -Because 'the terminal must accept OSC 52, or a clean result below proves nothing'
+      $h.S = Start-Ctop $fx '-Keep inf'
+      Wait-Screen $h.S '(?m)^evil-cwd ' 30 | Should -Not -BeNullOrEmpty
+      Wait-Screen $h.S '(?m)^evil-title ' 5 | Should -Not -BeNullOrEmpty
+      $h
     }
+    function Stop-Hostile($h) {
+      if (-not $h) { return }
+      if ($h.Prev) { & tmux set-option -g set-clipboard $h.Prev }   # later tests share this private server
+      if ($h.S) { Stop-Ctop $h.S }; Stop-Ctop $h.Hold
+    }
+    function Get-Buffers { (& tmux list-buffers -F '#{buffer_sample}' 2>$null) -join "`n" }
+  }
+  # Each view in its own test: a failure in one cannot hide the other. The clipboard is checked once the
+  # view has had time to draw, before anything is read off the screen.
+  It 'does not let a cwd set the clipboard in peek (OSC 52)' {
+    $h = $null
+    try {
+      $h = Start-Hostile 'osc-peek'
+      & tmux send-keys -t $h.S Home Enter          # peek on evil-cwd: its cwd, in full
+      Start-Sleep -Milliseconds 1500
+      Get-Buffers | Should -Not -Match 'pwned-by' -Because 'peek drew the cwd'
+      Wait-Screen $h.S 'ctop — evil-cwd' 5 | Should -Not -BeNullOrEmpty -Because 'the check above must have been made on peek'
+    } finally { Stop-Hostile $h }
+  }
+  It 'does not let a title or cwd set the clipboard in the closed-sessions log (OSC 52)' {
+    $h = $null
+    try {
+      $h = Start-Hostile 'osc-log'
+      & tmux send-keys -t $h.S x                   # the closed-sessions log: both titles and cwds
+      Start-Sleep -Milliseconds 1500
+      Get-Buffers | Should -Not -Match 'pwned-by' -Because 'the closed log drew the titles and cwds'
+      Wait-Screen $h.S 'closed sessions' 5 | Should -Not -BeNullOrEmpty -Because 'the check above must have been made on the closed log'
+    } finally { Stop-Hostile $h }
   }
 }
 
@@ -475,6 +533,31 @@ Describe 'wide characters in a row' -Tag Integration -Skip:$script:noTmux {
       $wide = @($lines | Where-Object { $_ -like "$([char]0x65E5)*" })[0]
       # three wide characters: three characters fewer in the text for the same cell position on screen
       ($wide.IndexOf('gone') + 3) | Should -Be $plain.IndexOf('gone') -Because "`n$plain`n$wide"
+    } finally { Stop-Ctop $s }
+  }
+}
+
+Describe 'a gone session whose transcript moves' -Tag Integration -Skip:$script:noTmux {
+  It 'reads the new file when it is another file of the same size and time, also when only the case differs' {
+    $fx = New-Fixture (Join-Path $TestDrive 'mv') @([DateTimeOffset]::UtcNow.AddMinutes(-3)) -NoLive -Turns 1
+    $sid = '00000000-0000-4000-8000-000000000000'                 # h000, under projects/-w-p0
+    $old = Join-Path $fx.Cfg "projects/-w-p0/$sid.jsonl"
+    $when = [IO.File]::GetLastWriteTimeUtc($old)
+    # the same transcript, its last reply spelled differently (same length): only the file tells them apart
+    $move = { param($from, $dir, $reply)
+      $to = Join-Path $fx.Cfg "projects/$dir/$sid.jsonl"
+      New-Item -ItemType Directory -Force -Path (Split-Path $to) | Out-Null
+      [IO.File]::WriteAllText($to, ([IO.File]::ReadAllText($from) -replace '"text":"[A-Za-z]{4}"', "`"text`":`"$reply`""))
+      [IO.File]::SetLastWriteTimeUtc($to, $when); Remove-Item -LiteralPath $from
+      $to
+    }
+    $s = Start-Ctop $fx '-Keep inf -RosterInterval 0.5'
+    try {
+      Wait-Screen $s '(?m)^h000 .*text: done' 30 | Should -Not -BeNullOrEmpty
+      $new = & $move $old '-w-moved' 'DONE'                       # another directory (the session moved)
+      Wait-Screen $s '(?m)^h000 .*text: DONE' 10 | Should -Not -BeNullOrEmpty -Because 'the row must follow its transcript to the new file'
+      $null = & $move $new '-W-MOVED' 'Done'                       # a directory that differs only in case (Linux: another one)
+      Wait-Screen $s '(?m)^h000 .*text: Done' 10 | Should -Not -BeNullOrEmpty -Because 'on Linux -w-moved and -W-MOVED are different directories'
     } finally { Stop-Ctop $s }
   }
 }
@@ -537,6 +620,25 @@ Describe 'the test harness itself' -Tag Integration -Skip:$script:noTmux {
       $x | Should -Not -BeNullOrEmpty
       $x.Code | Should -Be 1
       Test-CleanExit $x | Should -BeFalse
+    } finally { Stop-Ctop $s }
+  }
+  It 'does not take a frozen half-drawn screen (strip new, footer old) for a key response' {
+    $script:n++
+    $s = "ctop-it-$PID-$($script:n)"
+    & tmux new-session -d -s $s -x 200 -y 20 "echo 'strip  keep 14d '; echo 'footer  +/- keep 30d '; sleep 60"
+    try {
+      Start-Sleep -Milliseconds 300
+      { Measure-KeyResponse $s '-' '30d' '14d' 2 } | Should -Throw -ExpectedMessage '*before the key*'
+      { Measure-KeyResponse $s '+' '14d' '30d' 2 } | Should -Throw -ExpectedMessage '*before the key*'
+    } finally { Stop-Ctop $s }
+  }
+  It 'does not take a frozen screen for a key response' {
+    $script:n++
+    $s = "ctop-it-$PID-$($script:n)"
+    & tmux new-session -d -s $s -x 200 -y 20 "echo 'strip  keep 30d '; echo 'footer  +/- keep 30d '; sleep 60"
+    try {
+      Start-Sleep -Milliseconds 300
+      Measure-KeyResponse $s '-' '30d' '14d' 2 | Should -BeNullOrEmpty
     } finally { Stop-Ctop $s }
   }
   It 'accepts a clean exit' {

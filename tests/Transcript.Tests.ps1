@@ -30,6 +30,15 @@ Describe 'Update-Scan: titles' {
     $st = Update-Scan (Get-Item -LiteralPath $f) 's1'
     $st.First | Should -BeExactly 'Please turn this one file into a full "repo" by adding a README'
   }
+  It 'takes a first prompt in a non-Latin script as the title: <Name>' -ForEach @(
+    @{ Name = 'Hebrew';   Text = (-join @(0x05EA, 0x05E7, 0x05DF, 0x0020, 0x05D0, 0x05EA, 0x0020, 0x05D4, 0x05D1, 0x05D3, 0x05D9, 0x05E7, 0x05D5, 0x05EA | ForEach-Object { [char]$_ })) }
+    @{ Name = 'Chinese';  Text = (-join @(0x4FEE, 0x590D, 0x6D4B, 0x8BD5, 0x7528, 0x4F8B | ForEach-Object { [char]$_ })) }
+    @{ Name = 'Russian';  Text = (-join @(0x0438, 0x0441, 0x043F, 0x0440, 0x0430, 0x0432, 0x044C, 0x0020, 0x0442, 0x0435, 0x0441, 0x0442, 0x044B | ForEach-Object { [char]$_ })) }
+  ) {
+    $f = Join-Path $TestDrive "nl-$Name.jsonl"
+    Set-Content -LiteralPath $f -Encoding utf8 -Value (@{ type = 'user'; sessionId = 'n'; message = @{ role = 'user'; content = $Text } } | ConvertTo-Json -Compress -Depth 5)
+    (Update-Scan (Get-Item -LiteralPath $f) "nl-$Name").First | Should -BeExactly $Text
+  }
   It 'stamps new scan state with the current scan version' {
     $f = Join-Path $TestDrive 's2.jsonl'
     Set-Content -LiteralPath $f -Value (@{ type = 'user'; sessionId = 's2'; message = @{ role = 'user'; content = 'hello there' } } | ConvertTo-Json -Compress -Depth 5)
@@ -210,5 +219,42 @@ Describe 'Get-LastAction: its tail cache' {
     [IO.File]::WriteAllText($b, (Reply 'bravo final') + "`n"); [IO.File]::SetLastWriteTimeUtc($b, $when)
     (Get-LastAction (Get-Item -LiteralPath $a) 's').Last | Should -Be 'text: alpha final'
     (Get-LastAction (Get-Item -LiteralPath $b) 's').Last | Should -Be 'text: bravo final'
+  }
+}
+
+Describe 'transcript identity is case-sensitive where the filesystem is' {
+  BeforeDiscovery {
+    # a case-sensitive filesystem holds a.x and A.x as two files (Linux); Windows and macOS by default do not
+    $probe = Join-Path ([IO.Path]::GetTempPath()) "ctop-case-$PID"
+    New-Item -ItemType Directory -Force -Path $probe | Out-Null
+    [IO.File]::WriteAllText((Join-Path $probe 'a.x'), '1')
+    $script:caseInsensitive = Test-Path -LiteralPath (Join-Path $probe 'A.x')
+    Remove-Item -LiteralPath $probe -Recurse -Force
+  }
+  BeforeAll {
+    $script:PriceVer = 2; $script:ScanVer = 2
+    function Reply([string]$text) {
+      @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'
+         message = @{ role = 'assistant'; model = 'm'; content = @(@{ type = 'text'; text = $text }) } } | ConvertTo-Json -Compress -Depth 6
+    }
+    function Prompt([string]$text) { @{ type = 'user'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'; message = @{ role = 'user'; content = $text } } | ConvertTo-Json -Compress -Depth 5 }
+  }
+  BeforeEach { $script:ScanCache = @{}; $script:ScanVerified = @{}; $script:TailCache = @{} }
+  It 'reads A.jsonl after a.jsonl of the same size and time as another file' -Skip:$script:caseInsensitive {
+    $when = [datetime]::UtcNow.AddMinutes(-1)
+    $lo = Join-Path $TestDrive 'c.jsonl'; $up = Join-Path $TestDrive 'C.jsonl'
+    [IO.File]::WriteAllText($lo, (Reply 'alpha final') + "`n"); [IO.File]::SetLastWriteTimeUtc($lo, $when)
+    [IO.File]::WriteAllText($up, (Reply 'bravo final') + "`n"); [IO.File]::SetLastWriteTimeUtc($up, $when)
+    (Get-LastAction (Get-Item -LiteralPath $lo) 'k').Last | Should -Be 'text: alpha final'
+    (Get-LastAction (Get-Item -LiteralPath $up) 'k').Last | Should -Be 'text: bravo final'
+  }
+  It 'starts the scan over when the transcript becomes a file whose name differs only in case' -Skip:$script:caseInsensitive {
+    $lo = Join-Path $TestDrive 'd.jsonl'; $up = Join-Path $TestDrive 'D.jsonl'
+    [IO.File]::WriteAllText($lo, (Prompt 'first prompt alpha') + "`n")
+    [IO.File]::WriteAllText($up, (Prompt 'first prompt bravo') + "`n")
+    (Update-Scan (Get-Item -LiteralPath $lo) 'k').First | Should -Be 'first prompt alpha'
+    $st = Update-Scan (Get-Item -LiteralPath $up) 'k'
+    $st.First | Should -Be 'first prompt bravo'
+    $st.Path | Should -BeExactly $up
   }
 }

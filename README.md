@@ -250,14 +250,16 @@ Release notes are kept in the script's `.NOTES` help section. When cutting a bui
 Tests use [Pester](https://pester.dev) 5:
 
 - `tests/Keep.Tests.ps1`, `Display.Tests.ps1`, `Transcript.Tests.ps1`, `Clipboard.Tests.ps1`,
-  `Encoding.Tests.ps1`, `Process.Tests.ps1` (Windows only): unit tests. They load the functions from `ctop.ps1` without running it
+  `Encoding.Tests.ps1`, `Rows.Tests.ps1`, `Process.Tests.ps1` (its process tests run on Windows only):
+  unit tests. They load the functions from `ctop.ps1` without running it
   (`tests/Import-Ctop.ps1`), so they need no `claude` and no terminal.
 - `tests/Integration.Tests.ps1` (tag `Integration`): drives the real ctop in tmux against a fake
   `claude` and a 300-session history, checking that keys are never dropped, that frames stay within the
   tick, that off-screen history is nearly free, that a row scrolled into view shows its current age,
   and that the live sessions show before the history has loaded; also sessions coming and going, a hung
-  roster poll, hostile session text, wide characters and a clean exit. Linux, with `tmux`; they run on
-  a private tmux server (`tmux -L`), so your own sessions and options are left alone.
+  roster poll, hostile session text, wide characters, titles in non-Latin scripts, a transcript that
+  moves, and a clean exit. Linux, with `tmux`; they run on a private tmux server (`tmux -L`), so your
+  own sessions and options are left alone.
 
 ```powershell
 Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser

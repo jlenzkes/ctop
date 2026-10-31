@@ -325,6 +325,14 @@ Describe 'terminal cell widths' {
     # .NET Framework (Windows PowerShell 5.1) splits the pair into two text elements: there it measures 4
     Get-CellWidth ([char]::ConvertFromUtf32(0x1F1FA) + [char]::ConvertFromUtf32(0x1F1F8)) | Should -Be 2
   }
+  It 'Limit-Chars / Last-Chars keep a supplementary combining mark with its letter' {
+    $mark = [char]::ConvertFromUtf32(0x1D167)          # MUSICAL SYMBOL COMBINING TREMOLO-1: a surrogate pair, category Mn
+    $s = "a$($mark)x"                                   # 'a' and its mark are one text element
+    Limit-Chars $s 1 | Should -BeExactly ''             # the letter cannot leave without its mark
+    Limit-Chars $s 3 | Should -BeExactly "a$mark"
+    Last-Chars $s 3 | Should -BeExactly 'x'             # nor the mark start a tail on its own
+    Last-Chars $s 4 | Should -BeExactly $s
+  }
   It 'Truncate-Ansi stops at <N> cells, with color codes around' {
     $E = [char]27; $t = "$E[31m" + ([string][char]0x754C * 5) + "$E[0m"
     $out = Truncate-Ansi $t 5
