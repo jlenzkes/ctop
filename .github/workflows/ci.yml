@@ -103,7 +103,7 @@ jobs:
 
   # The script on other Linux distributions, with PowerShell 7.6.9 from Microsoft's packages: the deb
   # from the GitHub release on Ubuntu / Debian, Microsoft's RHEL 9 rpm on the RHEL 9 family and on Fedora
-  # (which Microsoft's install docs do not list as supported).
+  # (Microsoft's install docs have no Fedora page; the RHEL 9 package works there).
   linux-distros:
     strategy:
       fail-fast: false

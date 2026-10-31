@@ -19,25 +19,35 @@ Everything is read locally. ctop makes no model calls and uses no tokens.
 
 ## Requirements
 
-- **PowerShell.** Tested with PowerShell 7.6.9. Earlier 7.x releases haven't been tested.
-  - **Windows PowerShell 5.1** can't run the script as it is now. The file is UTF-8 without a
-    byte-order mark and contains non-ASCII characters (`—`, `…`, `█`). Windows PowerShell reads
-    such a file in the legacy ANSI code page
-    ([about_Character_Encoding](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_character_encoding?view=powershell-5.1)),
-    and decoded as Windows-1252 the script has 70 parse errors. Whether it would work in 5.1
-    with a byte-order mark added is untested.
+- **PowerShell**: PowerShell 7 (`pwsh`) or Windows PowerShell 5.1. See [Tested on](#tested-on) for
+  which versions have been run, and how far.
 - **Claude Code** on `PATH`, with the `claude agents --json` command. ctop stops with an error
   at startup if `claude` can't be found.
-- **Operating system**
-  - **Windows**: the script includes Windows-specific code (CIM for the process table, console
-    mouse input), and its notes record behavior verified on Windows.
-  - **Linux**: tested. The process table comes from `ps -ww -eo pid,ppid,etimes,…` (procps) and
-    `/proc/<pid>/stat`.
-  - **macOS**: untested. The process-table code is written for Linux `ps` and `/proc`.
+- **Operating system**: Windows, or Linux in the Debian and Fedora / RHEL families. On Linux the
+  process table comes from `ps -ww -eo pid,ppid,etimes,…` (procps) and `/proc/<pid>/stat`; without
+  `ps`, ctop still runs but can't see background jobs. macOS is untested: the process-table code is
+  written for Linux `ps` and `/proc`.
 
 ## Install
 
-Clone the repository and run the script:
+On Linux, install PowerShell 7 first. These are the commands CI uses (PowerShell 7.6.9):
+
+```bash
+# Ubuntu / Debian
+curl -sSLf -o /tmp/pwsh.deb https://github.com/PowerShell/PowerShell/releases/download/v7.6.9/powershell_7.6.9-1.deb_amd64.deb
+sudo apt-get install -y /tmp/pwsh.deb
+```
+
+```bash
+# RHEL 9 and rebuilds (AlmaLinux, Rocky), Fedora
+sudo dnf install -y https://packages.microsoft.com/rhel/9/prod/Packages/p/powershell-7.6.9-1.rh.x86_64.rpm
+```
+
+Microsoft's install docs have pages, with support lists, for Ubuntu, Debian and RHEL; I found none
+for Fedora. The RHEL 9 package installs and runs there all the same (Fedora 44 in CI). Microsoft also documents package
+repositories for each distribution, which keep PowerShell updated.
+
+Then clone the repository and run the script:
 
 ```bash
 git clone https://github.com/jlenzkes/ctop.git
@@ -151,6 +161,46 @@ a long history costs about what one screenful does.
 
 The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meaning (forever).
 
+## Tested on
+
+What has actually been run, as of build `2026.10.31.5`. Anything not listed here is untested.
+
+**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (157).
+*End to end*: the integration tests (9), which drive the real ctop in tmux against a fake `claude`
+and a 300-session history.
+
+| Platform | PowerShell | Unit | End to end |
+|---|---|---|---|
+| Windows Server 2025 (GitHub `windows-latest`) | Windows PowerShell 5.1.26100 | ✅ | not run (needs tmux) |
+| Windows Server 2025 (GitHub `windows-latest`) | 7.6.7 | ✅ | not run (needs tmux) |
+| Ubuntu 24.04 (GitHub `ubuntu-latest`) | 7.6.9 | ✅ | ✅ |
+| Ubuntu 22.04.5 (container) | 7.6.9 | ✅ | ✅ tmux 3.2a |
+| Debian 12 bookworm (container) | 7.6.9 | ✅ | ✅ tmux 3.3a |
+| RHEL 9.8 (UBI 9 container) | 7.6.9 | ✅ | not run: UBI's repositories have no tmux |
+| AlmaLinux 9.8, a RHEL 9 rebuild (container) | 7.6.9 | ✅ | ✅ tmux 3.2a |
+| Fedora 44 (container) | 7.6.9 | ✅ | ✅ tmux 3.8 |
+
+Each job also checks that the script parses and that `-Version` runs. The two PowerShell 7 jobs on
+GitHub's own runners (Windows, Ubuntu 24.04) also run PSScriptAnalyzer.
+
+**By hand**, with a live Claude Code session (Claude Code 2.1.314, PowerShell 7.6.9, Ubuntu 24.04 in
+a container): the roster, transcripts and subagent rows, background jobs (a running `sleep` shown as
+`polling`), peek, the keep window (`+` / `-`, history from the closed log), a failed
+`claude agents --json` keeping the last roster, and `t` / `y` copying through OSC 52 into tmux's
+clipboard (with `set-clipboard on`).
+
+**Reported by the author**: Windows with PowerShell 7.6.9, in daily use.
+
+**Not tested**
+
+- **Windows PowerShell 5.1, interactively.** Only the unit tests, parsing and `-Version` have run on 5.1. From reading the code:
+  - **Process table:** 5.1 has no ThreadJob module by default, so the process table is read on the display thread every roster poll, which may make the display stutter.
+  - **Mouse:** untested on 5.1.
+- **The terminal UI on Windows in CI.** GitHub's Windows runners have no console to drive it.
+- **VS Code sessions on Linux.**
+- **macOS.**
+- **Interactive use on the Linux distributions above, beyond the integration tests.**
+
 ## Files it writes
 
 All in the Claude config directory: `$env:CLAUDE_CONFIG_DIR` if set, otherwise `~/.claude`.
@@ -199,10 +249,14 @@ Invoke-Pester ./tests -ExcludeTagFilter Integration   # unit tests
 Invoke-Pester ./tests -TagFilter Integration          # end to end (needs tmux)
 ```
 
-The [CI workflow](.github/workflows/ci.yml) runs on Windows and Linux. It checks that the script
-parses, that `-Version` works and matches `.NOTES`, runs
+The [CI workflow](.github/workflows/ci.yml) runs the platforms in [Tested on](#tested-on). It checks
+that the script parses and that `-Version` works (and matches `.NOTES`), runs
 [PSScriptAnalyzer](https://github.com/PowerShell/PSScriptAnalyzer) for error-level findings, and runs
-the unit tests (and, on Linux, the integration tests). To run the analyzer locally:
+the tests: unit tests everywhere, integration tests wherever tmux is available.
+
+`.ps1` files are UTF-8 **with** a byte-order mark: Windows PowerShell 5.1 reads a file without one as
+ANSI and can't parse ctop's non-ASCII characters. `.editorconfig` asks editors to keep it, and
+`tests/Encoding.Tests.ps1` fails if one goes missing. To run the analyzer locally:
 
 ```powershell
 Install-Module PSScriptAnalyzer -Scope CurrentUser

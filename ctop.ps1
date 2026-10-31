@@ -91,7 +91,8 @@
     - Windows PowerShell 5.1 runs it again (unit tests pass there in CI): the file is UTF-8 with a BOM
       (5.1 read it as ANSI and could not parse it); no [Array]::Sort[T](…) generic-call syntax (7.3+);
       a session with exactly one subagent listed it again on 5.1; the scan cache loads on 5.1 too
-      (it needed ConvertFrom-Json -AsHashtable, so every start rescanned every transcript)
+      (it needed ConvertFrom-Json -AsHashtable, so every start rescanned every transcript); the mouse
+      helper's file name no longer needs SHA256.HashData (.NET 5+), which turned the mouse off on 5.1
   2026.10.31.4
     - only rows on screen are refreshed and styled each frame: a gone row off screen costs next to nothing
       (300 gone rows now cost about what the visible screenful does: ~25–35 ms a frame, was ~140 ms).
@@ -2503,7 +2504,7 @@ function Enable-Mouse {
     if (-not ('CtopCon.Con' -as [type])) {
       # compiled once to a DLL beside the caches: compiling on every start would cost ~1 s
       # named by a hash of the source (String.GetHashCode is randomized per process in .NET Core)
-      $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($script:ConSrc)), 0, 4) -replace '-'
+      $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:ConSrc)), 0, 4) -replace '-'
       $dll = Join-Path $ConfigDir "ctop-con-$h.dll"
       if (-not (Test-Path -LiteralPath $dll)) { Add-Type -TypeDefinition $script:ConSrc -OutputAssembly $dll -OutputType Library -ErrorAction Stop }
       Add-Type -Path $dll -ErrorAction Stop
