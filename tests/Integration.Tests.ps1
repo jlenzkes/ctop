@@ -65,6 +65,9 @@ BeforeAll {
     $script:ErrFile[$s] = $err
     $cmd = "$($fx.Env) '$($script:pwsh)' -NoProfile -File '$($script:ctop)' -ClosedLog '$($fx.Log)' -NoColor $ctopArgs 2>'$err'; echo CTOP-EXITED `$?; sleep 60"
     & tmux new-session -d -s $s -x 200 -y $height $cmd
+    # some tmux builds keep a detached session at 80x24 whatever -x / -y say (AlmaLinux 9's 3.2a did),
+    # which cut the strip the tests read
+    & tmux resize-window -t $s -x 200 -y $height 2>$null
     return $s
   }
   function Get-Screen([string]$s) { (& tmux capture-pane -p -t $s) -join "`n" }
@@ -125,14 +128,14 @@ Describe 'ctop under a long history' -Tag Integration -Skip:$script:noTmux {
     $s = Start-Ctop $fx '-Keep inf'
     try {
       Wait-Screen $s 'live-one' 60 | Should -Not -BeNullOrEmpty
-      Wait-Screen $s 'gone 300' 30 | Should -Not -BeNullOrEmpty
+      Wait-Screen $s 'gone 300\b|300 gone' 30 | Should -Not -BeNullOrEmpty
     } finally { Stop-Ctop $s }
   }
 
   It 'quits on q within 2 s with 300 gone rows listed' {
     $s = Start-Ctop $fx '-Keep inf'
     try {
-      Wait-Screen $s 'gone 300' 60 | Should -Not -BeNullOrEmpty
+      Wait-Screen $s 'gone 300\b|300 gone' 60 | Should -Not -BeNullOrEmpty
       Start-Sleep -Seconds 3   # past the first scans: steady state
       & tmux send-keys -t $s q
       Wait-Screen $s 'CTOP-EXITED' 2 | Should -Not -BeNullOrEmpty
@@ -153,7 +156,7 @@ Describe 'ctop under a long history' -Tag Integration -Skip:$script:noTmux {
   It 'applies every one of five quick - presses under full load (300 gone rows)' {
     $s = Start-Ctop $fx '-Keep inf'
     try {
-      Wait-Screen $s 'gone 300' 60 | Should -Not -BeNullOrEmpty
+      Wait-Screen $s 'gone 300\b|300 gone' 60 | Should -Not -BeNullOrEmpty
       Start-Sleep -Seconds 3
       & tmux send-keys -t $s - - - - -   # ∞ → 30d → 14d → 7d → 3d → 2d
       Wait-Screen $s 'keep 2d ' 5 | Should -Not -BeNullOrEmpty
@@ -165,7 +168,7 @@ Describe 'ctop under a long history' -Tag Integration -Skip:$script:noTmux {
   It 'draws a frame within the 250 ms tick with 300 gone rows listed (steady state, median)' {
     $s = Start-Ctop $fx '-Keep inf'
     try {
-      Wait-Screen $s 'gone 300' 60 | Should -Not -BeNullOrEmpty
+      Wait-Screen $s 'gone 300\b|300 gone' 60 | Should -Not -BeNullOrEmpty
       Start-Sleep -Seconds 10   # past warm-up (first scans, first full render)
       Get-MedianFrame $s | Should -BeLessThan 250
     } finally { Stop-Ctop $s }
@@ -183,7 +186,7 @@ Describe 'ctop under a long history' -Tag Integration -Skip:$script:noTmux {
     } finally { Stop-Ctop $s }
     $s = Start-Ctop $fx '-Keep inf'
     try {
-      Wait-Screen $s 'gone 300' 60 | Should -Not -BeNullOrEmpty
+      Wait-Screen $s 'gone 300\b|300 gone' 60 | Should -Not -BeNullOrEmpty
       Start-Sleep -Seconds 10
       $full = Get-MedianFrame $s
     } finally { Stop-Ctop $s }
@@ -204,7 +207,7 @@ Describe 'ages on rows that scroll into view' -Tag Integration -Skip:$script:noT
     # on screen while it is read, so a row refreshed only by the NEXT frame would show its stale age.
     $s = Start-Ctop $fx2 '-Keep inf -Tick 3000' 20
     try {
-      Wait-Screen $s 'gone 60 ' 60 | Should -Not -BeNullOrEmpty
+      Wait-Screen $s 'gone 60 |60 gone' 60 | Should -Not -BeNullOrEmpty
       Start-Sleep -Seconds 6               # the bottom rows' ages move on while they are off screen
       & tmux send-keys -t $s End           # oldest gone is listed last; the key repaints at once
       Start-Sleep -Milliseconds 700
