@@ -79,9 +79,13 @@
   Print ctop's version and exit.
 
 .NOTES
-  VERSION 2026.10.27.1 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.10.31.1 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.10.31.1
+    - a failed `claude agents --json` poll (non-zero exit, no output, not a JSON array) keeps the last
+      roster: it was read as an empty one, so every session flashed "gone" and was written to the
+      closed log as closed. The strip shows poll FAILED×N; roster age counts from the last good poll
   2026.10.27.1
     - a new subagent reads thinking from its first second: its prompt can sit behind ~10 large setup
       attachments, past the 256 KB tail ctop read, which left STATE blank until the first reply
@@ -153,7 +157,7 @@ param(
   [switch]$NoMouse,
   [switch]$Version
 )
-$script:CtopVersion = '2026.10.27.1'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.10.31.1'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -1137,12 +1141,26 @@ function Read-Roster {
   if (-not $p) { return $false }
   if (-not ($p.Proc.HasExited -and $p.Out.IsCompleted)) { return $false }
   $script:PollMs   = [int]$p.Started.ElapsedMilliseconds
-  $script:RosterAt = Get-Date
+  $script:PollAt   = Get-Date
   $script:Poll     = $null
   $raw = $p.Out.Result
+  $exit = $p.Proc.ExitCode
   $p.Proc.Dispose()
-  $sessions = @()
-  if ($raw) { try { $sessions = @($raw | ConvertFrom-Json) } catch { $sessions = @() } }
+  # A failed poll is not an empty roster. Only a clean exit with a JSON array counts; anything else
+  # keeps the last good roster (no row goes "gone", nothing is written to the closed log) and is
+  # reported on the strip. A successful [] is a real empty roster and is applied as usual.
+  $sessions = $null; $why = ''
+  if ($exit -ne 0) {
+    $err = if ($p.Err.IsCompleted) { ("$($p.Err.Result)" -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1) } else { '' }
+    $why = "exit $exit" + $(if ($err) { ": $($err.Trim())" })
+  } elseif (-not "$raw".TrimStart().StartsWith('[')) {
+    $why = if ("$raw".Trim()) { 'output is not a JSON array' } else { 'no output' }
+  } else {
+    try { $sessions = @($raw | ConvertFrom-Json -ErrorAction Stop) } catch { $why = 'invalid JSON' }
+  }
+  if ($why) { $script:PollFail = $why; $script:PollFails++; return $false }
+  $script:PollFail = $null; $script:PollFails = 0
+  $script:RosterAt = $script:PollAt
   if (-not $All) { $sessions = @($sessions | Where-Object { $_.kind -eq 'interactive' }) }
   $script:BranchCache = @{}
   Update-TranscriptIndex
@@ -1897,8 +1915,10 @@ function Show-Help {
     '  title bar   clock; live sessions / working / idle; live subagents (stopped, orphaned); gone sessions',
     '  tick        display refresh period (ms). +/- adjust by 50ms; floor 50',
     '  frame       measured ms to build + draw the last frame — the real floor for tick',
-    '  roster age  time since the last `claude agents --json` result; * = poll in flight',
-    '  last poll   measured ms that call took (runs async; display never waits on it)',
+    '  roster age  time since the last good `claude agents --json` result; * = poll in flight',
+    '  last poll   measured ms that call took (runs async; display never waits on it). FAILED×N: the',
+    '              last N polls failed (non-zero exit, no output, or not a JSON array); the previous',
+    '              roster stays on screen unchanged and nothing is marked gone until a poll succeeds',
     '  hidden N cols  columns the window is too narrow for (low priority first). Peek shows everything.',
     '',
     'ROWS',
@@ -2070,7 +2090,10 @@ $script:ClosedLogPath = if ($ClosedLog) { $ClosedLog } else { Join-Path $ConfigD
 $script:ShowGone = $true
 $script:Poll     = $null
 $script:PollMs   = 0
-$script:RosterAt = $null
+$script:RosterAt = $null   # when the last GOOD roster landed (roster age, empty-roster message)
+$script:PollAt   = $null   # when the last poll finished, good or failed (schedules the next one)
+$script:PollFail = $null   # why the last poll failed; $null after a good one
+$script:PollFails = 0      # consecutive failed polls
 $selectedId = $null       # session id of the highlighted row
 $script:ScrollTop = 0     # first visible body line when the list is taller than the window
 $script:PageRows = 10     # rows per screenful, for PgUp / PgDn
@@ -2226,8 +2249,8 @@ try {
     # feed: harvest a finished poll, and (re)start one if it's time
     $fresh = Read-Roster
     Read-ProcPoll
-    if (-not $script:Poll -and $script:RosterAt -and
-        ((Get-Date) - $script:RosterAt).TotalSeconds -ge $RosterInterval) { Start-RosterPoll }
+    if (-not $script:Poll -and $script:PollAt -and
+        ((Get-Date) - $script:PollAt).TotalSeconds -ge $RosterInterval) { Start-RosterPoll }
 
     # display
     $frameSw.Restart()
@@ -2258,7 +2281,7 @@ try {
     $strip = '  ' + (Cell 'tick'   "${tick}ms"        14) + '│ ' +
                     (Cell 'frame'  "${lastFrameMs}ms" 14) + '│ ' +
                     (Cell 'roster' "$rosterAge$pollFlag" 12) + '│ ' +
-                    (Cell 'poll'   "$($script:PollMs)ms" 12) +
+                    $(if ($script:PollFail) { Cell 'poll' "FAILED×$($script:PollFails)" 16 } else { Cell 'poll' "$($script:PollMs)ms" 16 }) +
              $(if ($script:Compact) { '│ compact ' }) +
              $(if ($script:HiddenCols.Count) { '│ ' + (Cell 'hidden' "$($script:HiddenCols.Count) cols" 14) }) +
              $(if ($script:Departed.Count) { '│ ' + (Cell 'gone' "$($script:Departed.Count)$(if (-not $script:ShowGone) { ' hidden' })" 14) }) +
@@ -2269,7 +2292,9 @@ try {
     $frame += ''
     if ($top.Count -eq 0) {
       $script:BodyMap = $null
-      $frame += if ($script:RosterAt) { "(no interactive sessions reported by 'claude agents --json')" } else { '(polling…)' }
+      $frame += if ($script:RosterAt) { "(no interactive sessions reported by 'claude agents --json')" }
+                elseif ($script:PollFail) { "('claude agents --json' failed: $($script:PollFail); retrying every $RosterInterval s)" }
+                else { '(polling…)' }
     } else {
       $sorted = @(Sort-Rows $rows)
       if (-not $selectedId -or -not ($sorted._SessionId -contains $selectedId)) { $selectedId = $sorted[0]._SessionId }
