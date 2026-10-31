@@ -19,12 +19,19 @@ Everything is read locally. ctop makes no model calls and uses no tokens.
 
 ## Requirements
 
-- **PowerShell 7** (`pwsh`). The author runs 7.6.9.
-- **Claude Code** on `PATH`, with the `claude agents --json` command. ctop exits at startup if
-  `claude` can't be found.
-- **Windows or Linux.**
-  - **Windows**: full support, including mouse input in the console.
-  - **Linux**: reads the process table with `ps -ww -eo pid,ppid,etimes,…` (procps) and
+- **PowerShell.** Tested with PowerShell 7.6.9. Earlier 7.x releases haven't been tested.
+  - **Windows PowerShell 5.1** can't run the script as it is now. The file is UTF-8 without a
+    byte-order mark and contains non-ASCII characters (`—`, `…`, `█`). Windows PowerShell reads
+    such a file in the legacy ANSI code page
+    ([about_Character_Encoding](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_character_encoding?view=powershell-5.1)),
+    and decoded as Windows-1252 the script has 70 parse errors. Whether it would work in 5.1
+    with a byte-order mark added is untested.
+- **Claude Code** on `PATH`, with the `claude agents --json` command. ctop stops with an error
+  at startup if `claude` can't be found.
+- **Operating system**
+  - **Windows**: the script includes Windows-specific code (CIM for the process table, console
+    mouse input), and its notes record behavior verified on Windows.
+  - **Linux**: tested. The process table comes from `ps -ww -eo pid,ppid,etimes,…` (procps) and
     `/proc/<pid>/stat`.
   - **macOS**: untested. The process-table code is written for Linux `ps` and `/proc`.
 
