@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PowerShell version
+        run: $PSVersionTable
+
+      - name: Parse
+        run: |
+          $tokens = $null; $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./ctop.ps1), [ref]$tokens, [ref]$errors)
+          if ($errors) { $errors | ForEach-Object { Write-Error "$($_.Extent.StartLineNumber): $($_.Message)" }; exit 1 }
+
+      - name: Version matches .NOTES
+        run: |
+          $out = & ./ctop.ps1 -Version
+          if ($out -notmatch '^ctop (\d{4}\.\d{2}\.\d{2}\.\d+)$') { Write-Error "unexpected -Version output: $out"; exit 1 }
+          $v = $Matches[1]
+          $notes = (Get-Content ./ctop.ps1 -Raw) -cmatch 'VERSION (\d{4}\.\d{2}\.\d{2}\.\d+)'
+          if (-not $notes) { Write-Error 'no VERSION line in .NOTES'; exit 1 }
+          if ($Matches[1] -ne $v) { Write-Error "-Version says $v but .NOTES says $($Matches[1])"; exit 1 }
+          "ctop $v"
+
+      - name: PSScriptAnalyzer
+        run: |
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $r = Invoke-ScriptAnalyzer -Path ./ctop.ps1 -Settings ./PSScriptAnalyzerSettings.psd1
+          $r | Format-Table -AutoSize
+          if ($r) { exit 1 }
