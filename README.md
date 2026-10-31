@@ -77,6 +77,7 @@ Unblock-File ./ctop.ps1
 ./ctop.ps1 -All                 # include background sessions too
 ./ctop.ps1 -Sort cost -Compact  # most expensive first, essential columns only
 ./ctop.ps1 -NoSubagents -Keep 1d      # also list sessions that closed in the last day
+./ctop.ps1 -Snapshot -MaxWidth 160 > ctop.txt   # one frame, as text
 ./ctop.ps1 -Version
 ```
 
@@ -102,6 +103,7 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release not
 | `-NoColor`        |                    | Disable ANSI colors. |
 | `-All`            |                    | Include background sessions (`kind == "background"`). |
 | `-NoMouse`        |                    | Windows: leave the mouse to the terminal (see [Mouse](#mouse)). |
+| `-Snapshot`       |                    | Print one frame as plain text and exit: every session listed, no colors, nothing written. Width: `-MaxWidth`, else the window's, else 200. |
 | `-Version`        |                    | Print the version and exit. |
 
 ### Keys

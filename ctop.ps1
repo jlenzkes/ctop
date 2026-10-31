@@ -80,10 +80,20 @@
 .PARAMETER Version
   Print ctop's version and exit.
 
+.PARAMETER Snapshot
+  Print one frame as plain text and exit: every session listed (not a screenful), no colors, no keys,
+  nothing written (no scan cache, no closed-log entries). For a pipe, a file, or sharing what ctop
+  sees. Width: -MaxWidth, else the window's, else 200 columns.
+
 .NOTES
-  VERSION 2026.10.31.9 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.10.31.10 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.10.31.10
+    - -Snapshot prints one frame as plain text and exits: every session listed, not a screenful; no
+      colors or keys; nothing written (scan cache, closed log). For pipes, files and sharing. From cxtop.
+      Without a console (a pipe) ctop had no window size to draw with: everything now asks one place
+    - the strip's "hidden N cols" ran into the next divider at two digits
   2026.10.31.9
     - n copies the selected session's contact (name and @address, session ID, kind, state, directory,
       machine, transcript, attach or resume command) to paste into another Claude session, which can
@@ -264,9 +274,10 @@ param(
   [switch]$NoColor,
   [switch]$All,
   [switch]$NoMouse,
+  [switch]$Snapshot,
   [switch]$Version
 )
-$script:CtopVersion = '2026.10.31.9'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.10.31.10'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -324,6 +335,13 @@ function Clear-Screen {
 # Lines may be strings or @{ Text; Fg; Bg; Inverse }. $Footer is pinned to the last row.
 # Never writes the last column (w-1) so the terminal cannot auto-wrap.
 # Cells may carry ANSI SGR color codes (see Paint); padding and truncation use visible length.
+# ---- window size ----------------------------------------------------------------------------
+# Everything that sizes the screen asks here. A snapshot has no window (its output may be a pipe, where
+# the console reports -1): it is as wide as -MaxWidth (else the window, else 200) and as tall as needed.
+$script:SnapSize = $null
+function Get-WindowWidth { if ($script:SnapSize) { $script:SnapSize.W } else { [Console]::WindowWidth } }
+function Get-WindowHeight { if ($script:SnapSize) { $script:SnapSize.H } else { [Console]::WindowHeight } }
+
 # ---- terminal cell widths ------------------------------------------------------------
 # A terminal gives East Asian wide characters and most emoji two cells, and combining marks and
 # zero-width characters none, while .Length counts UTF-16 units: CJK titles pushed columns out of line
@@ -454,8 +472,8 @@ function Protect-TerminalText([string]$text) {
   [regex]::Replace([regex]::Replace($text, '\x1b(?!\[[0-9;]*m)', ''), '[\x00-\x1A\x1C-\x1F\x7F-\x9F]', ' ')
 }
 function Write-Frame([object[]]$lines, [string]$Footer = '') {
-  $w = [Console]::WindowWidth
-  $h = [Console]::WindowHeight
+  $w = (Get-WindowWidth)
+  $h = (Get-WindowHeight)
   $E = [char]27
   $fg0 = [Console]::ForegroundColor; $bg0 = [Console]::BackgroundColor
   [Console]::SetCursorPosition(0, 0)
@@ -1416,6 +1434,7 @@ function ConvertFrom-RosterPoll([int]$ExitCode, [string]$Stdout, [string]$Stderr
 # ---- closed-sessions log ----------------------------------------------------------
 # Appended whenever a session leaves the roster; survives ctop restarts. Shown with 'x'.
 function Write-ClosedLog($sess, [datetime]$when, [string]$why = 'closed', [string]$successor = '') {
+  if ($script:SnapSize) { return }   # a snapshot writes nothing
   try {
     $file  = Find-Transcript $sess.sessionId
     $title = Get-SessionTitle $sess.sessionId $file
@@ -1443,7 +1462,7 @@ function Show-Closed {
     $lines += "  $t  $(if ($r.why -eq 'cleared') { 'clr' } else { '   ' })  $nm  $($r.title)"
     $lines += "                              claude --resume $($r.sessionId)     $($r.cwd)"
   }
-  $per = [math]::Max(4, [Console]::WindowHeight - 3)
+  $per = [math]::Max(4, (Get-WindowHeight) - 3)
   $pages = [math]::Max(1, [math]::Ceiling($lines.Count / $per))
   for ($pg = 0; $pg -lt $pages; $pg++) {
     $chunk = @($lines[($pg * $per)..([math]::Min($lines.Count, ($pg + 1) * $per) - 1)])
@@ -2496,7 +2515,7 @@ $script:LayoutMode = [array]::IndexOf($script:Layouts, $Layout)
 
 function Render-Table([object[]]$rows, [string]$selectedId) {
   $sep = '  '
-  $avail = [Console]::WindowWidth - 2
+  $avail = (Get-WindowWidth) - 2
   if ($MaxWidth -gt 0) { $avail = [math]::Min($avail, $MaxWidth) }
   $script:HiddenCols = @()
   $cands = @($script:Columns)
@@ -2552,7 +2571,7 @@ function Peek-Block([string]$label, [string]$text, [int]$width) {
   return ,$out
 }
 function Build-Peek([object]$r) {
-  $pw = [Console]::WindowWidth - 2
+  $pw = (Get-WindowWidth) - 2
   $lines = @(
     @{ Text = "  ctop — $($r.NAME.Trim())   (live)"; Inverse = $true },   # keeps the └: says "subagent" at a glance
     '',
@@ -2627,7 +2646,7 @@ function Build-Footer {
     @((Lamp 'g' 'gone'      $script:ShowGone), 0),
     @(' x closed ', 7), @(' t/y/n/d copy ', 8), @(' r poll ', 9), @((Mode '+/-' "keep $(Format-Keep $script:KeepMin)"), 2), @(' h help ', 0), @(' q quit ', 0)
   )
-  $limit = [Console]::WindowWidth - 1
+  $limit = (Get-WindowWidth) - 1
   $keep = @($items)
   while ($true) {
     $line = ' ' + (($keep | ForEach-Object { $_[0] }) -join ' ')
@@ -2809,7 +2828,7 @@ function Show-Help {
     'T-columns depend on the undocumented transcript JSONL shape and may break on updates.'
   )
   # paginate to the window height; any key pages forward, q/Esc closes
-  $per = [math]::Max(5, [Console]::WindowHeight - 3)
+  $per = [math]::Max(5, (Get-WindowHeight) - 3)
   $pages = [math]::Ceiling($help.Count / $per)
   for ($pg = 0; $pg -lt $pages; $pg++) {
     $chunk = @($help[($pg * $per)..([math]::Min($help.Count, ($pg + 1) * $per) - 1)])
@@ -2955,7 +2974,7 @@ function Resolve-Mouse($e, [string]$footer, [bool]$inPeek, [int]$selOrd) {
   $dbl  = ($e.Flags -band 2) -ne 0
   if (-not $left -or ($e.Flags -band 1)) { return $null }   # release, other buttons, plain moves
   if ($inPeek) { if ($dbl) { return $null }; return @{ Key = (Key-Of 'Escape') } }
-  $h = try { [Console]::WindowHeight } catch { 0 }
+  $h = try { (Get-WindowHeight) } catch { 0 }
   if ($y -eq $h - 1) {   # footer: "<key> <label>" items
     $plain = Strip-Ansi $footer
     foreach ($m in [regex]::Matches($plain, '(?<![\w/])([a-z])\s+(sort:\w+|sort|wrap|compact|subagents|gone|closed|poll|help|quit)\b')) {
@@ -2977,27 +2996,38 @@ function Resolve-Mouse($e, [string]$footer, [bool]$inPeek, [int]$selOrd) {
 # Windows consoles default to the OEM code page (437), which lacks ▁ ▼ ↑ ↓ … — they print as ? or .
 # Switch to UTF-8 for ctop's lifetime; the original is restored on exit.
 $origOutEnc = [Console]::OutputEncoding
+if ($Snapshot) {
+  $cw = $(try { [Console]::WindowWidth } catch { 0 })
+  $script:SnapSize = @{ W = $(if ($MaxWidth -gt 0) { $MaxWidth + 1 } elseif ($cw -gt 0) { $cw } else { 201 }); H = 100000 }
+  $script:GoneBuildMs = [int]::MaxValue   # every row in the one frame
+  $snapPass = 0
+}
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {}
 try {
-  [Console]::CursorVisible = $false
-  Clear-Screen
-  $Host.UI.RawUI.WindowTitle = 'ctop'
-  Enable-Mouse
+  if (-not $Snapshot) {
+    [Console]::CursorVisible = $false
+    Clear-Screen
+    $Host.UI.RawUI.WindowTitle = 'ctop'
+    Enable-Mouse
+  }
   Update-TranscriptIndex
   Start-RosterPoll
+  if ($Snapshot) {   # the one frame shows the roster: wait for it (or for its failure / deadline)
+    while (-not (Read-Roster) -and $script:Poll) { Start-Sleep -Milliseconds 25 }
+  }
   $frameSw = [System.Diagnostics.Stopwatch]::new()
   $lastFrameMs = 0
   Load-ScanCache
   $lastSave = Get-Date
-  $winW = [Console]::WindowWidth; $winH = [Console]::WindowHeight
+  $winW = (Get-WindowWidth); $winH = (Get-WindowHeight)
   while ($true) {
     # "frame" on the strip times this whole pass (cache save, roster / process harvest, build, draw), so
     # it is the cost the tick has to cover; only the wait for input below is left out
     $frameSw.Restart()
     if (((Get-Date) - $lastSave).TotalSeconds -ge 60) { Save-ScanCache; $lastSave = Get-Date }
     $loopStart = [System.Diagnostics.Stopwatch]::StartNew()
-    if ([Console]::WindowWidth -ne $winW -or [Console]::WindowHeight -ne $winH) {
-      $winW = [Console]::WindowWidth; $winH = [Console]::WindowHeight
+    if ((Get-WindowWidth) -ne $winW -or (Get-WindowHeight) -ne $winH) {
+      $winW = (Get-WindowWidth); $winH = (Get-WindowHeight)
       Clear-Screen   # the terminal reflows old lines on resize; wipe them, including the last column
     }
 
@@ -3024,7 +3054,7 @@ try {
     $rosterAge = if ($script:RosterAt) { Get-Since $script:RosterAt } else { '…' }
     $keptGone  = $script:KeptGone.Count
     $pollFlag  = if ($script:Poll) { '*' } else { ' ' }
-    $w = if ($MaxWidth -gt 0) { [math]::Min([Console]::WindowWidth, $MaxWidth + 1) } else { [Console]::WindowWidth }
+    $w = if ($MaxWidth -gt 0) { [math]::Min((Get-WindowWidth), $MaxWidth + 1) } else { (Get-WindowWidth) }
     # title bar: name + clock on the left, counts right-aligned (within MaxWidth)
     $left  = "  ctop  $(Get-Date -Format 'HH:mm:ss')"
     $parts = @("$($top.Count) sessions", "$working working", "$idle idle")
@@ -3042,7 +3072,7 @@ try {
                     (Cell 'roster' "$rosterAge$pollFlag" 12) + '│ ' +
                     $(if ($script:PollFail) { Cell 'poll' "FAILED×$($script:PollFails)" 16 } else { Cell 'poll' "$($script:PollMs)ms" 16 }) +
              $(if ($script:Compact) { '│ compact ' }) +
-             $(if ($script:HiddenCols.Count) { '│ ' + (Cell 'hidden' "$($script:HiddenCols.Count) cols" 14) }) +
+             $(if ($script:HiddenCols.Count) { '│ ' + (Cell 'hidden' "$($script:HiddenCols.Count) cols" 15) }) +
              '│ ' + (Cell 'keep' (Format-Keep $script:KeepMin) 12) +
              $(if ($keptGone) { '│ ' + (Cell 'gone' $(if ($script:GonePending -and $script:ShowGone) { "$($keptGone - $script:GonePending)/$keptGone" } else { "$keptGone$(if (-not $script:ShowGone) { ' hidden' })" }) 14) }) +
              '│ ' + (Cell 'build' $script:CtopVersion 20)   # labeled and away from the clock: a bare date beside it reads as "now"
@@ -3070,7 +3100,7 @@ try {
         $head = @($tbl[0..1]); $body = @(if ($tbl.Count -gt 2) { $tbl[2..($tbl.Count - 1)] })
         # rows left for the body: the footer takes the last line, the title/strip/blank and the column
         # header take the rest
-        $room = [math]::Max(3, [Console]::WindowHeight - 1 - $frame.Count - $head.Count)
+        $room = [math]::Max(3, (Get-WindowHeight) - 1 - $frame.Count - $head.Count)
         $script:BodyY0 = $frame.Count + $head.Count   # screen line of the first body line (for mouse clicks)
         $vis = @(); $where = ''
         if ($body.Count -le $room) {
@@ -3112,6 +3142,18 @@ try {
       if ($script:PeekId) { [void]$script:RefreshIds.Add([string]$script:PeekId) }
       if ($where) { $frame[1].Text = $frame[1].Text.TrimEnd() + $where }
       $frame += $head + $body
+    }
+    if ($Snapshot) {
+      # the strip is built before the table finds which columns fit (hidden N cols), so it is a frame behind:
+      # print the second frame, which also times the first as "frame"
+      $snapPass++
+      if ($snapPass -lt 2) { $lastFrameMs = [int]$frameSw.ElapsedMilliseconds; continue }
+      $sw = $script:SnapSize.W - 1
+      foreach ($item in $frame) {
+        $t = Strip-Ansi (Protect-TerminalText $(if ($item -is [string]) { $item } else { [string]$item.Text }))
+        [Console]::Out.WriteLine((Limit-Cells $t $sw).TrimEnd())
+      }
+      break
     }
     $foot = Build-Footer
     if ((Get-Date) -lt $script:FlashUntil) { $foot = "  ► $($script:Flash)" }
@@ -3190,14 +3232,16 @@ catch {
 }
 finally {
   Stop-RosterPoll $script:Poll
-  Disable-Mouse   # give the console its QuickEdit / mouse mode back, crash or not
-  [Console]::CursorVisible = $true
   if ($script:ProcJob) { Remove-Job $script:ProcJob -Force -ErrorAction SilentlyContinue }
-  Save-ScanCache
   try { [Console]::OutputEncoding = $origOutEnc } catch {}
-  $Host.UI.RawUI.WindowTitle = $origTitle
-  [Console]::SetCursorPosition(0, [Console]::WindowHeight - 1)
-  Write-Host ''
+  if (-not $Snapshot) {   # a snapshot changed none of this, and writes nothing
+    Disable-Mouse   # give the console its QuickEdit / mouse mode back, crash or not
+    [Console]::CursorVisible = $true
+    Save-ScanCache
+    $Host.UI.RawUI.WindowTitle = $origTitle
+    [Console]::SetCursorPosition(0, (Get-WindowHeight) - 1)
+    Write-Host ''
+  }
   if ($script:Fatal) {
     Write-Host (Protect-TerminalText "ctop $script:CtopVersion stopped: $($script:Fatal.Exception.GetType().Name): $($script:Fatal.Exception.Message)") -ForegroundColor Red
     Write-Host $script:Fatal.ScriptStackTrace -ForegroundColor DarkGray

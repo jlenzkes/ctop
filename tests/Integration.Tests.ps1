@@ -70,6 +70,8 @@ BeforeAll {
               RosterFile = $rosterFile; LiveJson = $liveJson; Fake = $fake }
   }
 
+  # cells on screen, for plain text (East Asian wide characters count two)
+  function Get-CellWidthForTest([string]$t) { $t.Length + [regex]::Matches($t, '[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFF00-\uFF60\uFFE0-\uFFE6]').Count }
   $script:ErrFile = @{}   # tmux session -> the file holding ctop's stderr
   function Start-Ctop($fx, [string]$ctopArgs, [int]$height = 50) {
     $script:n++
@@ -512,6 +514,48 @@ Describe 'hostile session text' -Tag Integration -Skip:$script:noTmux {
       Get-Buffers | Should -Not -Match 'pwned-by' -Because 'the closed log drew the titles and cwds'
       Wait-Screen $h.S 'closed sessions' 5 | Should -Not -BeNullOrEmpty -Because 'the check above must have been made on the closed log'
     } finally { Stop-Hostile $h }
+  }
+}
+
+Describe 'a snapshot (-Snapshot)' -Tag Integration -Skip:$script:noTmux {
+  # Not in tmux: a snapshot is for pipes and files, where there is no console to size the window by.
+  BeforeAll {
+    function Invoke-Snapshot($fx, [string[]]$more) {
+      $out = Join-Path $TestDrive "snap-$([guid]::NewGuid()).txt"; $err = "$out.err"
+      $cmd = "$($fx.Env) '$($script:pwsh)' -NoProfile -File '$($script:ctop)' -ClosedLog '$($fx.Log)' -Snapshot $($more -join ' ') >'$out' 2>'$err' </dev/null; echo `$?"
+      $sw = [Diagnostics.Stopwatch]::StartNew()
+      $code = (& sh -c $cmd | Select-Object -Last 1)
+      @{ Code = [int]$code; Ms = $sw.ElapsedMilliseconds; Text = [IO.File]::ReadAllText($out); Err = [IO.File]::ReadAllText($err) }
+    }
+  }
+  It 'prints one frame, every session listed, as plain text within the width, and exits 0' {
+    $now = [DateTimeOffset]::UtcNow
+    $fx = New-Fixture (Join-Path $TestDrive 'snap') @(for ($i = 0; $i -lt 70; $i++) { $now.AddMinutes(-2 - $i) }) -Turns 1
+    $x = Invoke-Snapshot $fx @('-Keep', 'inf', '-MaxWidth', '120')
+    $x.Code | Should -Be 0 -Because $x.Err
+    $x.Err.Trim() | Should -BeNullOrEmpty
+    $lines = $x.Text -split "`r?`n"
+    $lines[0] | Should -Match 'ctop'
+    $x.Text | Should -Match '(?m)^live-one '
+    foreach ($i in 0, 35, 69) { $x.Text | Should -Match ('(?m)^h{0:d3} ' -f $i) -Because 'a snapshot lists every row, not a screenful' }
+    $x.Text | Should -Not -Match "[\x00-\x08\x0B-\x1F\x7F]" -Because 'plain text: no colors, no cursor movement'
+    foreach ($l in $lines) { Get-CellWidthForTest $l | Should -BeLessOrEqual 120 }
+    $lines[1] | Should -Match 'hidden \d+ cols' -Because 'at 120 columns some columns do not fit, and the strip says so'
+  }
+  It 'writes nothing: no scan cache, no closed log entries' {
+    $fx = New-Fixture (Join-Path $TestDrive 'snap-ro') @([DateTimeOffset]::UtcNow.AddMinutes(-3)) -Turns 1
+    $before = [IO.File]::ReadAllText($fx.Log)
+    $x = Invoke-Snapshot $fx @('-Keep', 'inf')
+    $x.Code | Should -Be 0 -Because $x.Err
+    Test-Path -LiteralPath (Join-Path $fx.Cfg 'ctop-scancache.json') | Should -BeFalse
+    [IO.File]::ReadAllText($fx.Log) | Should -BeExactly $before
+  }
+  It 'says why when the roster cannot be read, and still exits' {
+    $fx = New-Fixture (Join-Path $TestDrive 'snap-bad') @() -NoLive
+    Set-Content -LiteralPath $fx.Fake -Value "#!/bin/sh`necho not-json"
+    $x = Invoke-Snapshot $fx @()
+    $x.Text | Should -Match "claude agents --json' failed"
+    $x.Code | Should -Be 0
   }
 }
 
