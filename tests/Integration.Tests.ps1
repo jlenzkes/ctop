@@ -550,6 +550,26 @@ Describe 'a snapshot (-Snapshot)' -Tag Integration -Skip:$script:noTmux {
     Test-Path -LiteralPath (Join-Path $fx.Cfg 'ctop-scancache.json') | Should -BeFalse
     [IO.File]::ReadAllText($fx.Log) | Should -BeExactly $before
   }
+  It 'prices with -PricingFile instead of the built-in table' {
+    # the fixture's 25 turns of claude-sonnet-5-5 cost $0.32 at the built-in rates (worked out by hand in
+    # 'tree cost of a session that leaves'); every rate doubled, $0.64
+    $fx = New-Fixture (Join-Path $TestDrive 'snap-price') @()
+    $prices = Join-Path $TestDrive 'prices.json'
+    [IO.File]::WriteAllText($prices, '[{"Match":"sonnet-5-5","In":4,"W5":5,"W1h":8,"Read":0.2,"Out":20}]')
+    $base = Invoke-Snapshot $fx @('-MaxWidth', '400')
+    $base.Text | Should -Match '(?m)^live-one .*\$0\.32\b' -Because $base.Err
+    $x = Invoke-Snapshot $fx @('-MaxWidth', '400', '-PricingFile', "'$prices'")
+    $x.Code | Should -Be 0 -Because $x.Err
+    $x.Text | Should -Match '(?m)^live-one .*\$0\.64\b'
+  }
+  It 'stops at once with exit 2 and the reason when the pricing file is wrong' {
+    $fx = New-Fixture (Join-Path $TestDrive 'snap-badprice') @()
+    $prices = Join-Path $TestDrive 'bad-prices.json'
+    [IO.File]::WriteAllText($prices, '[{"Match":"sonnet-","In":1,"W5":1,"W1h":1,"Out":1}]')
+    $x = Invoke-Snapshot $fx @('-PricingFile', "'$prices'")
+    $x.Code | Should -Be 2
+    $x.Err | Should -Match '-PricingFile: pricing file entry 1: Read'
+  }
   It 'says why when the roster cannot be read, and still exits' {
     $fx = New-Fixture (Join-Path $TestDrive 'snap-bad') @() -NoLive
     Set-Content -LiteralPath $fx.Fake -Value "#!/bin/sh`necho not-json"

@@ -103,6 +103,7 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release not
 | `-NoColor`        |                    | Disable ANSI colors. |
 | `-All`            |                    | Include background sessions (`kind == "background"`). |
 | `-NoMouse`        |                    | Windows: leave the mouse to the terminal (see [Mouse](#mouse)). |
+| `-PricingFile`    |                    | A JSON price table in place of the built-in one (see [Pricing](#pricing)). |
 | `-Snapshot`       |                    | Print one frame as plain text and exit: every session listed, no colors, nothing written. Width: `-MaxWidth`, else the window's, else 200. |
 | `-Version`        |                    | Print the version and exit. |
 
@@ -218,6 +219,25 @@ clipboard (with `set-clipboard on`).
 - **VS Code sessions on Linux.**
 - **macOS.**
 - **Interactive use on the Linux distributions above, beyond the integration tests.**
+
+### Pricing
+
+COST uses a built-in table of API list prices. To use other rates, pass `-PricingFile` a JSON array,
+in match order (the first `Match` regex that fits the model id wins), of rates in dollars per million
+tokens:
+
+```json
+[
+  { "Match": "opus-5-5",   "In": 4, "W5": 5,   "W1h": 8, "Read": 0.2, "Out": 20 },
+  { "Match": "sonnet-5-5", "In": 2, "W5": 2.5, "W1h": 4, "Read": 0.1, "Out": 10 },
+  { "Match": "haiku-5-5",  "MaxPrompt": 100000, "In": 0.1, "W5": 0.125, "W1h": 0.2, "Read": 0.01, "Out": 0.5 }
+]
+```
+
+`In` / `Out` are input and output tokens, `Read` cache reads, `W5` / `W1h` 5-minute and 1-hour cache
+writes; every one is required. `MaxPrompt`, optional, limits a row to requests of at most that many
+prompt tokens (for tiered prices). The file replaces the built-in table: replies from a model it doesn't
+match add nothing to COST (a session with only those shows `-`). Editing the file recomputes cached costs.
 
 ## Files it writes
 

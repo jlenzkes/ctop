@@ -80,15 +80,28 @@
 .PARAMETER Version
   Print ctop's version and exit.
 
+.PARAMETER PricingFile
+  A JSON price table to use in place of the built-in one: an array, in match order, of
+  { "Match": "<regex on the model id>", "In": n, "W5": n, "W1h": n, "Read": n, "Out": n } in dollars
+  per million tokens (W5 / W1h: 5-minute / 1-hour cache writes, Read: cache reads), with an optional
+  "MaxPrompt" (the row applies only up to that many prompt tokens). Every rate is required. Editing
+  the file recomputes cached costs.
+
 .PARAMETER Snapshot
   Print one frame as plain text and exit: every session listed (not a screenful), no colors, no keys,
   nothing written (no scan cache, no closed-log entries). For a pipe, a file, or sharing what ctop
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.10.31.11 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.10.31.12 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.10.31.12
+    - -PricingFile: your own price table in place of the built-in one (JSON; every rate required; a bad
+      file stops ctop with exit 2 and the reason). Cached costs are versioned by the file's content, so
+      editing it recomputes them. From cxtop
+    - a scan cache priced by anything but the built-in table could not be read at all (the price version
+      was cast to a number): it was silently dropped and every transcript rescanned
   2026.10.31.11
     - a session waiting on a question for you (AskUserQuestion) shows it: LAST ACTION reads asks: <the
       question> (+N more), and peek lists each question with its header and numbered choices. Once a
@@ -278,10 +291,11 @@ param(
   [switch]$NoColor,
   [switch]$All,
   [switch]$NoMouse,
+  [string]$PricingFile = '',
   [switch]$Snapshot,
   [switch]$Version
 )
-$script:CtopVersion = '2026.10.31.11'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.10.31.12'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -735,6 +749,40 @@ $script:Pricing = @(
   @{ Match = 'haiku-3-5';            In = 0.8; W5 = 1;     W1h = 1.6; Read = 0.08; Out = 4 }
   @{ Match = 'haiku-';               In = 1;   W5 = 1.25;  W1h = 2;   Read = 0.1;  Out = 5 }
 )
+# -PricingFile: your own table in place of the one above. A JSON array, in match order, of
+#   { "Match": "<regex on the model id>", "In": n, "W5": n, "W1h": n, "Read": n, "Out": n, "MaxPrompt": n? }
+# in dollars per million tokens (W5 / W1h: 5-minute / 1-hour cache writes; Read: cache reads). Every rate
+# is required (a missing one would price at $0 without a word). Cached costs are versioned by the file's
+# content, so editing it recomputes them.
+function Import-PricingFile([string]$path) {
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "pricing file not found: $path" }
+  $raw = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $path).ProviderPath)
+  try { $data = ConvertFrom-Json -InputObject $raw -ErrorAction Stop } catch { throw "pricing file is not JSON: $path" }
+  if ($raw.TrimStart() -notmatch '^\[') { throw 'pricing file must hold a JSON array of rates' }
+  $items = @(foreach ($x in $data) { $x })
+  if (-not $items.Count) { throw 'pricing file has no rates' }
+  $table = @(for ($i = 0; $i -lt $items.Count; $i++) {
+    $x = $items[$i]; $n = $i + 1
+    if (-not ($x.Match -is [string]) -or -not $x.Match) { throw "pricing file entry ${n}: Match must be a regex" }
+    try { $null = [regex]::new($x.Match) } catch { throw "pricing file entry ${n}: Match is not a valid regex ($($x.Match))" }
+    $row = @{ Match = $x.Match }
+    foreach ($k in 'In', 'W5', 'W1h', 'Read', 'Out') {
+      $v = $x.$k
+      if ($null -eq $v -or -not ($v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal]) -or [double]$v -lt 0) {
+        throw "pricing file entry ${n}: $k must be a number of dollars per million tokens, 0 or more"
+      }
+      $row[$k] = [double]$v
+    }
+    if ($x.PSObject.Properties.Name -contains 'MaxPrompt') {
+      if (-not ($x.MaxPrompt -is [int] -or $x.MaxPrompt -is [long]) -or [long]$x.MaxPrompt -le 0) { throw "pricing file entry ${n}: MaxPrompt must be a whole number of tokens above 0" }
+      $row.MaxPrompt = [long]$x.MaxPrompt
+    }
+    $row
+  })
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { $hash = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($raw)) | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
+  return @{ Table = $table; Ver = 'file-' + $hash.Substring(0, 16) }
+}
 function Get-Price([string]$model, [long]$prompt = 0) {
   foreach ($p in $script:Pricing) { if ($model -match $p.Match -and (-not $p.MaxPrompt -or $prompt -le $p.MaxPrompt)) { return $p } }
   return $null
@@ -784,7 +832,7 @@ function Load-ScanCache {
       $e = $h[$k]
       # no Used stamp = written by a build before 2026.10.18.2: drop it (its sessions rescan once)
       if (-not $e.Path -or -not $e.Head -or -not $e.Used -or [long]$e.Used -lt $cut) { continue }
-      if ([int]$e.PriceVer -ne $script:PriceVer) { continue }   # costs from an older price table: rescan
+      if ([string]$e.PriceVer -cne [string]$script:PriceVer) { continue }   # costs from another price table: rescan (a file's version is text)
       if ([int]$e.ScanVer -ne $script:ScanVer) { continue }     # extracted by an older scan: rescan
       if (-not $e.ToolCounts) { $e.ToolCounts = @{} }
       $script:ScanCache[$k] = $e
@@ -2887,6 +2935,10 @@ function Show-Help {
 # last frame took to build+draw, so you can see where the time actually goes.
 $script:Roster   = @()
 $script:ClosedLogPath = if ($ClosedLog) { $ClosedLog } else { Join-Path $ConfigDir 'ctop-closed.jsonl' }
+if ($PricingFile) {
+  try { $pf = Import-PricingFile $PricingFile; $script:Pricing = $pf.Table; $script:PriceVer = $pf.Ver }
+  catch { [Console]::Error.WriteLine("ctop: -PricingFile: $($_.Exception.Message)"); exit 2 }
+}
 try { $script:KeepMin = Resolve-Keep -Keep $Keep -SubagentWindowSeconds $(if ($PSBoundParameters.ContainsKey('SubagentWindow')) { $SubagentWindow } else { $null }) }
 catch { [Console]::Error.WriteLine("ctop: -Keep $($_.Exception.Message)"); exit 2 }
 # sessionId -> @{ Session; GoneAt; Cleared; Successor }: every session that left, this run or an earlier
