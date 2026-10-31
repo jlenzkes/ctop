@@ -559,6 +559,28 @@ Describe 'a snapshot (-Snapshot)' -Tag Integration -Skip:$script:noTmux {
   }
 }
 
+Describe 'a session waiting on a question for you' -Tag Integration -Skip:$script:noTmux {
+  It 'shows the question in LAST ACTION and its choices in peek' {
+    $fx = New-Fixture (Join-Path $TestDrive 'ask') @() -Turns 2
+    $sid = '11111111-1111-4111-8111-111111111111'
+    $ask = @{ type = 'assistant'; sessionId = $sid; timestamp = [DateTime]::UtcNow.ToString('o'); cwd = '/w'
+              message = @{ role = 'assistant'; model = 'claude-sonnet-5-5'; content = @(@{ type = 'tool_use'; id = 'toolu_ask1'; name = 'AskUserQuestion'
+                input = @{ questions = @(@{ question = 'Which database should the tests use?'; header = 'Test DB'; multiSelect = $false
+                  options = @(@{ label = 'SQLite (Recommended)'; description = 'In memory, no setup' }, @{ label = 'Postgres'; description = 'Matches production' }) }) } }) } }
+    [IO.File]::AppendAllText((Join-Path $fx.Cfg "projects/-w/$sid.jsonl"), ($ask | ConvertTo-Json -Compress -Depth 12) + "`n")
+    $s = Start-Ctop $fx ''
+    try {
+      Wait-Screen $s '(?m)^live-one .*asks: Which database' 30 | Should -Not -BeNullOrEmpty
+      & tmux send-keys -t $s Home Enter
+      Wait-Screen $s 'QUESTION +\[Test DB\] Which database should the tests use\?' 5 | Should -Not -BeNullOrEmpty
+      $screen = Get-Screen $s
+      $screen | Should -Match '1\. SQLite \(Recommended\): In memory, no setup'
+      $screen | Should -Match '2\. Postgres: Matches production'
+      $screen | Should -Match 'waiting for your answer in that session'
+    } finally { Stop-Ctop $s }
+  }
+}
+
 Describe 'copying a contact' -Tag Integration -Skip:$script:noTmux {
   It 'puts the selected session''s contact on the clipboard with n, and its ID with d (OSC 52 into tmux)' {
     $fx = New-Fixture (Join-Path $TestDrive 'contact') @()

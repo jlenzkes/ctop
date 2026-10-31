@@ -86,9 +86,13 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.10.31.10 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.10.31.11 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.10.31.11
+    - a session waiting on a question for you (AskUserQuestion) shows it: LAST ACTION reads asks: <the
+      question> (+N more), and peek lists each question with its header and numbered choices. Once a
+      newer entry answers it, asked:. From cxtop's pending-question view; answer in that session
   2026.10.31.10
     - -Snapshot prints one frame as plain text and exits: every session listed, not a screenful; no
       colors or keys; nothing written (scan cache, closed log). For pipes, files and sharing. From cxtop.
@@ -277,7 +281,7 @@ param(
   [switch]$Snapshot,
   [switch]$Version
 )
-$script:CtopVersion = '2026.10.31.10'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.10.31.11'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -967,7 +971,7 @@ function Read-TailLines([string]$path, [int]$bytes) {
 }
 
 function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
-  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; ToolLog = @(); Handback = $false; Synthetic = $null; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0 }
+  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $null; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0 }
   if (-not $file) { return $out }
   $stamp = $script:TailCache[$sessionId]
   # the same file, unchanged: a session's transcript can become another file (it follows the cwd)
@@ -1050,6 +1054,22 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
       $t = (([string]$tool.input.message) -replace '[\x00-\x1F\x7F]+', ' ') -replace '\s{2,}', ' '
       $out.LastFull = ('handback: ' + $t).Trim()
       $out.Last = if ($out.LastFull.Length -gt 130) { (Limit-Chars $out.LastFull 129) + '…' } else { $out.LastFull }
+      break
+    }
+    if ($tool -and $tool.name -eq 'AskUserQuestion') {
+      # A question for you, from the tool's own input (questions[]: question, header, options[] of label /
+      # description, multiSelect). Waiting while this call is the newest entry: an answer is a newer one.
+      $qs = @(foreach ($q in @($tool.input.questions)) {
+        if (-not $q) { continue }
+        @{ Text = (Get-ContactText $q.question); Header = (Get-ContactText $q.header); Multi = [bool]$q.multiSelect
+           Options = @(foreach ($op in @($q.options)) { if ($op) { (Get-ContactText $op.label) + $(if ($op.description) { ': ' + (Get-ContactText $op.description) }) } }) }
+      })
+      $waiting = $lastObj -and $lastObj.type -eq 'assistant' -and (@($lastObj.message.content) | Where-Object { $_.type -eq 'tool_use' -and $_.id -eq $tool.id })
+      $verb = if ($waiting) { 'asks' } else { 'asked' }
+      $first = if ($qs) { $qs[0].Text } else { '(question not recorded)' }
+      $out.LastFull = "${verb}: " + $(if ($qs) { ($qs | ForEach-Object { $_.Text }) -join ' / ' } else { $first })
+      $out.Last = "${verb}: " + (Limit-Chars $first 110) + $(if ($qs.Count -gt 1) { " (+$($qs.Count - 1) more)" })
+      if ($waiting) { $out.Questions = $qs }
       break
     }
     if ($tool) {
@@ -2570,6 +2590,22 @@ function Peek-Block([string]$label, [string]$text, [int]$width) {
   }
   return ,$out
 }
+# A question the session is waiting on you to answer (AskUserQuestion): each question with its header and
+# choices. Answer it in that session; ctop only shows it.
+function Get-QuestionLines([object[]]$qs, [int]$width) {
+  if (-not $qs -or -not $qs.Count) { return }   # nothing: no line in peek
+  $out = @()
+  for ($i = 0; $i -lt $qs.Count; $i++) {
+    $q = $qs[$i]
+    $label = if ($i -eq 0) { 'QUESTION' } else { '' }
+    $out += (Peek-Block $label $(if ($q.Header) { "[$($q.Header)] $($q.Text)" } else { $q.Text }) $width)   # (Peek-Block returns one array: add its lines, not the array)
+    $n = 0
+    foreach ($op in @($q.Options)) { $n++; $out += (Peek-Block '' "  $n. $op" $width) }
+    if ($q.Multi) { $out += (Peek-Block '' '  (choose any)' $width) }
+  }
+  $out += (Peek-Block '' 'waiting for your answer in that session (ctop only shows it)' $width)
+  return ,$out
+}
 function Build-Peek([object]$r) {
   $pw = (Get-WindowWidth) - 2
   $lines = @(
@@ -2605,6 +2641,7 @@ function Build-Peek([object]$r) {
     $(if ($r._Orphaned -and $r._Spawner) { "               to have it read, resume the spawner (peek it for the command) or the session" } else { $null }),
     $(if ($r._Shape) { "  SHAPE        $($r._Shape)" + $(if ($r._Shape -eq 'background') { '   (its spawner keeps working while this runs)' } else { '   (its spawner is blocked until this returns)' }) } else { $null }),
     $(Peek-Block 'LAST ACTION' $(if ($r._Act.LastFull) { $r._Act.LastFull } else { $r.'LAST ACTION' }) $pw),
+    $(Get-QuestionLines @($r._Act.Questions) $pw),
     "  CWD          $($r.CWD)",
     $(if ($r._Git.Worktree) { "  WORKTREE     yes — branch $($r._Git.Branch); main repo $($r._Git.Main)" } else { $null }),
     $(if ($r._LaunchCwd -and -not [string]::Equals($r._LaunchCwd, $r.CWD, [StringComparison]::OrdinalIgnoreCase)) { "  LAUNCHED IN  $($r._LaunchCwd)   (session has since moved)" } else { $null }),
@@ -2770,7 +2807,8 @@ function Show-Help {
     '  CMP         T  compactions so far. Magenta = one in the last 10 min, yellow = older. Each replaces',
     '                 the history with a summary; peek shows when / why / how big',
     '  LAST ACTION T  newest tool call (name + main argument), the start of Claude''s last text (text:),',
-    '                 or a subagent''s report (handback:)',
+    '                 a subagent''s report (handback:), or a question for you (asks: while it waits for your',
+    '                 answer, asked: after). Peek lists each question with its choices; answer in that session',
     '  ACTIVITY    T  sparkline of STATE, one sample every 2 s (40 s window), newest on the right:',
     '                 █ working   ▒ thinking   · idle   ░ (cyan) awaiting a background job   ▼ compaction',
     '                 ▁ (red) waiting on you: a permission',
