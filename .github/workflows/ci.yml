@@ -109,8 +109,9 @@ jobs:
       fail-fast: false
       matrix:
         # Debian family: Ubuntu 22.04, Debian 12. Fedora family: RHEL 9 (UBI 9: Red Hat's own packages, but
-        # no tmux, so no end-to-end tests), AlmaLinux 9 (a RHEL 9 rebuild with tmux), Fedora.
-        image: ['ubuntu:22.04', 'debian:12', 'registry.access.redhat.com/ubi9/ubi:latest', 'almalinux:9', 'fedora:latest']
+        # no tmux, so no end-to-end tests), AlmaLinux 9 and Rocky Linux 9 (RHEL 9 rebuilds with tmux), Fedora.
+        # Rocky: rockylinux/rockylinux is the maintained image; the official rockylinux:9 stopped in 2024.
+        image: ['ubuntu:22.04', 'debian:12', 'registry.access.redhat.com/ubi9/ubi:latest', 'almalinux:9', 'rockylinux/rockylinux:9', 'fedora:latest']
     runs-on: ubuntu-latest
     container: ${{ matrix.image }}
     steps:
