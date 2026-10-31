@@ -178,6 +178,7 @@ and a 300-session history.
 | Debian 12 bookworm (container) | 7.6.9 | ✅ | ✅ tmux 3.3a |
 | RHEL 9.8 (UBI 9 container) | 7.6.9 | ✅ | not run: UBI's repositories have no tmux |
 | AlmaLinux 9.8, a RHEL 9 rebuild (container) | 7.6.9 | ✅ | ✅ tmux 3.2a |
+| Rocky Linux 9.8, a RHEL 9 rebuild (container) | 7.6.9 | ✅ | ✅ tmux 3.2a |
 | Fedora 44 (container) | 7.6.9 | ✅ | ✅ tmux 3.8 |
 
 Each job also checks that the script parses and that `-Version` runs. The two PowerShell 7 jobs on

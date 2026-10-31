@@ -9,7 +9,7 @@ BeforeAll {
   $script:n = 0
 
   # a synthetic transcript: prompt, tool call + result, reply; repeated to ~60 KB
-  function New-Transcript([string]$path, [string]$sid) {
+  function New-Transcript([string]$path, [string]$sid, [int]$turns = 25) {
     $ts = [DateTime]::UtcNow.AddDays(-3).ToString('o')
     $turn = @(
       @{ type = 'user'; sessionId = $sid; timestamp = $ts; cwd = '/w'; message = @{ role = 'user'; content = 'do the thing ' + ('x' * 400) } }
@@ -21,7 +21,7 @@ BeforeAll {
          message = @{ role = 'assistant'; model = 'claude-sonnet-5-5'; usage = @{ input_tokens = 10; output_tokens = 300; cache_read_input_tokens = 31000; cache_creation_input_tokens = 200 }
                       content = @(@{ type = 'text'; text = 'done' }) } }
     ) | ForEach-Object { $_ | ConvertTo-Json -Depth 10 -Compress }
-    $lines = for ($i = 0; $i -lt 25; $i++) { $turn }
+    $lines = for ($i = 0; $i -lt $turns; $i++) { $turn }
     [IO.File]::WriteAllLines($path, [string[]]$lines)
   }
 
@@ -29,7 +29,7 @@ BeforeAll {
   # closed session per entry of $closedAt, each with its transcript on disk. A transcript stops changing
   # when its session closes, so its write time is set to the close time (IDLE then reads like real
   # history). Returns what Start-Ctop needs, plus each history row's name -> close time.
-  function New-Fixture([string]$root, [DateTimeOffset[]]$closedAt, [string]$PathTail = $env:PATH) {
+  function New-Fixture([string]$root, [DateTimeOffset[]]$closedAt, [string]$PathTail = $env:PATH, [int]$Turns = 25) {
     $cfg = Join-Path $root 'cfg'; $bin = Join-Path $root 'bin'
     New-Item -ItemType Directory -Force -Path $bin, (Join-Path $cfg 'projects/-w') | Out-Null
     $live = @{ pid = $PID; cwd = $root; kind = 'interactive'; startedAt = [DateTimeOffset]::UtcNow.AddHours(-1).ToUnixTimeMilliseconds()
@@ -46,7 +46,7 @@ BeforeAll {
       $dir = Join-Path $cfg "projects/-w-p$($i % 12)"
       New-Item -ItemType Directory -Force -Path $dir | Out-Null
       $tf = Join-Path $dir "$sid.jsonl"
-      New-Transcript $tf $sid
+      New-Transcript $tf $sid $Turns
       [IO.File]::SetLastWriteTimeUtc($tf, $closedAt[$i].UtcDateTime)
       $name = 'h{0:d3}' -f $i; $closed[$name] = $closedAt[$i]
       @{ closedAt = $closedAt[$i].ToString('o'); why = 'closed'; name = $name; title = "history $i"
@@ -197,27 +197,29 @@ Describe 'ctop under a long history' -Tag Integration -Skip:$script:noTmux {
 
 Describe 'ages on rows that scroll into view' -Tag Integration -Skip:$script:noTmux {
   BeforeAll {
-    # 60 sessions that closed 5–35 s ago: their ages tick every second, so a stale one shows
+    # 40 sessions that closed 2–12 s ago: their ages tick every second, so a stale one shows. One-turn
+    # transcripts so they load in a few frames even at a 3 s tick on a slow runner: the ages must still
+    # read in seconds (under a minute) when the test looks, or a stale age could hide in "1m"
     $now = [DateTimeOffset]::UtcNow
-    $script:fx2 = New-Fixture (Join-Path $TestDrive 'a') @(for ($i = 0; $i -lt 60; $i++) { $now.AddSeconds(-5 - $i / 2) })
+    $script:fx2 = New-Fixture (Join-Path $TestDrive 'a') @(for ($i = 0; $i -lt 40; $i++) { $now.AddSeconds(-2 - $i / 4) }) -Turns 1
   }
 
   It 'shows the current age on a row the moment it scrolls into view, after time off screen' {
-    # 20 lines: most of the 60 rows are off screen. A 3 s tick keeps the frame drawn right after the key
+    # 20 lines: most of the 40 rows are off screen. A 3 s tick keeps the frame drawn right after the key
     # on screen while it is read, so a row refreshed only by the NEXT frame would show its stale age.
     $s = Start-Ctop $fx2 '-Keep inf -Tick 3000' 20
     try {
-      Wait-Screen $s 'gone 60 |60 gone' 60 | Should -Not -BeNullOrEmpty
+      Wait-Screen $s 'gone 40 |40 gone' 60 | Should -Not -BeNullOrEmpty
       Start-Sleep -Seconds 6               # the bottom rows' ages move on while they are off screen
       & tmux send-keys -t $s End           # oldest gone is listed last; the key repaints at once
       Start-Sleep -Milliseconds 700
       $screen = Get-Screen $s
       $at = [DateTimeOffset]::UtcNow
-      $line = ($screen -split "`n") | Where-Object { $_ -match '^h059\b' } | Select-Object -First 1
+      $line = ($screen -split "`n") | Where-Object { $_ -match '^h039\b' } | Select-Object -First 1
       $line | Should -Not -BeNullOrEmpty
       $line -match 'gone (\d+)s' | Should -BeTrue
-      $expected = [int][math]::Floor(($at - $fx2.Closed['h059']).TotalSeconds)
-      Write-Host "    h059 shows gone $($Matches[1])s, expected ~$($expected)s"
+      $expected = [int][math]::Floor(($at - $fx2.Closed['h039']).TotalSeconds)
+      Write-Host "    h039 shows gone $($Matches[1])s, expected ~$($expected)s"
       [math]::Abs([int]$Matches[1] - $expected) | Should -BeLessOrEqual 1
     } finally { Stop-Ctop $s }
   }
