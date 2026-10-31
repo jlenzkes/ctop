@@ -40,13 +40,13 @@ Describe 'Stop-RosterPoll' -Skip:$script:notWindows {
   }
   It 'ends a hung parent and its child together' {
     $p = Start-FakePoll '/d /c "start /b ping -n 60 127.0.0.1 & ping -n 60 127.0.0.1 >nul"'   # cmd waits on the second
-    $kids = Wait-Kids $p.Proc.Id
+    $root = $p.Proc.Id; $kids = Wait-Kids $root
     try {
       $kids.Count | Should -BeGreaterThan 0
-      Stop-RosterPoll $p
+      Stop-RosterPoll $p                 # it disposes the Process object: ask by pid from here on
       Start-Sleep -Milliseconds 500
-      $p.Proc.HasExited | Should -BeTrue
+      Get-Alive @($root) | Should -BeNullOrEmpty
       Get-Alive $kids | Should -BeNullOrEmpty
-    } finally { $kids | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue } }
+    } finally { @($root) + $kids | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue } }
   }
 }

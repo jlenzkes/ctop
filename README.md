@@ -173,7 +173,7 @@ wide characters. Each job fails if a test it is meant to run was skipped (`tests
 | Platform | PowerShell | Unit | End to end |
 |---|---|---|---|
 | Windows Server 2025 (GitHub `windows-latest`) | Windows PowerShell 5.1.26100.33648 | ✅ | not run (needs tmux) |
-| Windows Server 2025 (GitHub `windows-latest`) | 7.6.9 | ✅ | not run (needs tmux) |
+| Windows Server 2025 (GitHub `windows-latest`) | 7.6.7 or 7.6.9 (whichever the runner image has) | ✅ | not run (needs tmux) |
 | Ubuntu 24.04 (GitHub `ubuntu-latest`) | 7.6.9 | ✅ | ✅ |
 | Ubuntu 22.04.5 (container) | 7.6.9 | ✅ | ✅ tmux 3.2a |
 | Debian 12 bookworm (container) | 7.6.9 | ✅ | ✅ tmux 3.3a |
