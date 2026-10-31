@@ -94,17 +94,22 @@ Describe 'ctop under a long history' -Tag Integration -Skip:$script:noTmux {
     $script:fx = New-Fixture (Join-Path $TestDrive 'h') @(for ($i = 0; $i -lt 300; $i++) { $now.AddMinutes(-1 - $rand.NextDouble() * 30 * 1440) })
   }
 
-  It 'shows the live session within 2 s of starting, while the history is still loading (cold cache)' {
+  It 'shows the live session while the history is still loading (cold cache)' {
+    # The property, independent of machine speed: the first screen with the live session on it still
+    # reads "gone N/300", so live rows did not wait for the history. (Building all 300 history rows
+    # before the first frame took ~8 s here.) A loose cap guards against startup getting slow overall.
     Remove-Item -LiteralPath (Join-Path $fx.Cfg 'ctop-scancache.json') -ErrorAction SilentlyContinue
-    # baseline: what starting pwsh and parsing ctop.ps1 costs on this machine
     $sw = [Diagnostics.Stopwatch]::StartNew(); & $script:pwsh -NoProfile -File $script:ctop -Version | Out-Null; $base = $sw.Elapsed.TotalSeconds
     $sw.Restart()
     $s = Start-Ctop $fx '-Keep inf'
     try {
       Wait-Screen $s 'live-one' 60 | Should -Not -BeNullOrEmpty
       $took = $sw.Elapsed.TotalSeconds
-      Write-Host ("    pwsh start {0:N1} s, live session shown after {1:N1} s" -f $base, $took)
-      $took | Should -BeLessThan ($base + 2)
+      $screen = Get-Screen $s
+      $loading = if ($screen -match 'gone (\d+)/300') { [int]$Matches[1] } else { $null }
+      Write-Host ("    pwsh start {0:N1} s, live session shown after {1:N1} s, history then at {2}/300" -f $base, $took, $(if ($null -ne $loading) { $loading } else { 'done' }))
+      $loading | Should -Not -BeNullOrEmpty -Because 'the live session must show before the history has loaded'
+      $took | Should -BeLessThan ($base * 4 + 4)
     } finally { Stop-Ctop $s }
   }
 
