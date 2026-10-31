@@ -79,10 +79,16 @@ BeforeAll {
     $err = Join-Path ([IO.Path]::GetTempPath()) "$s.err"
     $script:ErrFile[$s] = $err
     $cmd = "$($fx.Env) '$($script:pwsh)' -NoProfile -File '$($script:ctop)' -ClosedLog '$($fx.Log)' -NoColor $ctopArgs 2>'$err'; echo CTOP-EXITED `$?; sleep 60"
-    & tmux new-session -d -s $s -x 200 -y $height $cmd
-    # some tmux builds keep a detached session at 80x24 whatever -x / -y say (AlmaLinux 9's 3.2a did),
-    # which cut the strip the tests read
+    # Size the pane first, then start ctop in it. Some tmux builds keep a detached session at 80x24
+    # whatever -x / -y say (AlmaLinux 9's 3.2a did), and a ctop started before the resize landed drew a
+    # 24-row frame (Debian 12's 3.3a, once: a peek cut short). So: a placeholder, the resize, a check
+    # that tmux reports the size, and only then ctop, in that same pane.
+    & tmux new-session -d -s $s -x 200 -y $height 'sleep 600'
     & tmux resize-window -t $s -x 200 -y $height 2>$null
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ((& tmux display -p -t $s '#{pane_width}x#{pane_height}') -ne "200x$height" -and $sw.Elapsed.TotalSeconds -lt 5) { Start-Sleep -Milliseconds 50 }
+    & tmux display -p -t $s '#{pane_width}x#{pane_height}' | Should -Be "200x$height" -Because 'ctop must start in a pane of the size the test reads'
+    & tmux respawn-pane -k -t $s $cmd
     return $s
   }
   function Get-Screen([string]$s) { (& tmux capture-pane -p -t $s) -join "`n" }
