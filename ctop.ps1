@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   A top(1)-style live view of *interactive* Claude Code sessions.
 
@@ -10,11 +10,17 @@
       ~/.claude/projects/<project>/<sessionId>.jsonl
   Press q to quit, r to refresh now. Ctrl-C also works.
 
+.PARAMETER Keep
+  How long gone sessions (dimmed, STATE "gone") and stopped subagents stay listed. One setting for
+  both. Minutes (30), or 45m, 2h, 1d12h, 1w; 0 = drop them at once; inf = keep everything. Default
+  15m. Adjust at runtime with + / - (0 · 15m · 30m · 45m · 1h · 2h · 4h · 8h · 12h · 1d · 2d · 3d ·
+  7d · 14d · 30d · ∞); the strip shows "keep". Gone sessions from earlier runs are read from the
+  closed-sessions log, so a longer window shows yesterday's sessions too. A live subagent (working)
+  is always listed; a thinking one for at least 15 min. Alias: -Linger (its old minutes still work).
+
 .PARAMETER SubagentWindow
-  Seconds a STOPPED subagent stays listed after its last write (default 900 = 15 min; 0 = until
-  its parent session goes away). A live subagent (working/thinking) is always listed regardless
-  of how long its current tool call takes. Subagents have no process or PID; state is inferred
-  from their transcript.
+  Deprecated: use -Keep. Seconds; still accepted, rounded up to minutes, and 0 (its old "until the
+  parent goes away") means inf. Ignored when -Keep is given.
 
 .PARAMETER Sort
   Initial sort mode: activity (default), roster, start, cost, ctx. Cycle at runtime with 'o'.
@@ -30,10 +36,6 @@
 .PARAMETER MaxWidth
   Optional cap on table width in columns (default 0 = use the whole window). Set it if your
   window is wider than the monitor, so columns don't extend past the visible edge.
-
-.PARAMETER Linger
-  Minutes a session stays listed (dimmed, STATE "gone") after it disappears from the roster.
-  Default 15. Peek a gone row for its title, cwd and resume command. Toggle with 'g'.
 
 .PARAMETER HighlightModel
   Regex; MODEL cells matching it are shown in magenta so an unintended model stands out.
@@ -79,9 +81,115 @@
   Print ctop's version and exit.
 
 .NOTES
-  VERSION 2026.10.27.1 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.10.31.8 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.10.31.8 — the validation's second round
+    - Windows PowerShell 5.1: stopping a poll could stop an unrelated process after a pid was reused
+      (a parent id names whichever process had that pid). A child is followed only if it was created
+      after its parent, and stopped only if its pid still names it
+    - a gone row is keyed on its transcript's path as well (a row could keep showing another file),
+      and the key is taken before the row is built: a subagent write during the build was folded into
+      the key but not into the cost, so the cost never caught up
+    - paths compare case-sensitively in every cache: on Linux a.jsonl and A.jsonl are two files
+    - a combining mark outside the BMP (a surrogate pair) is kept with its letter when text is cut
+    - a first prompt in Hebrew, Chinese, Russian and other scripts becomes the title: it needed three
+      ASCII letters (such sessions read "(untitled)"), now three letters in a row of any script. Not
+      every script has those: Hindi or Tamil, which write vowels as marks between letters, can still
+      read "(untitled)". Cached scans are redone once (ScanVer 4)
+    - titles in Hebrew, Arabic, Armenian, Georgian, Chinese, Japanese, Korean and other scripts without
+      combining marks are measured at the speed of ASCII: a screen of Hebrew titles took a frame from
+      ~55 ms to ~175 ms
+    - tests: each view's clipboard check stands alone; a key counts as answered only when the strip
+      and footer both show its effect; Build-Rows is tested directly
+  2026.10.31.7 — fixes from the audit's validation round
+    - LAST ACTION could show another transcript's last action: its cache checked size and time, not
+      which file it was
+    - a transcript replaced by one whose start differed only in letter case once encoded (@ vs Z) read
+      as the same file: the start is compared case-sensitively. A longer rewrite that keeps the first
+      256 bytes still reads as an append (Claude Code only appends)
+    - a STATE with a +N subagent badge and wide text pushed the next columns out of line
+    - a wrapped path with wide characters could take more lines than -WrapLines
+    - LAST ACTION and a failed poll's reason are shortened without cutting a character in half (an
+      emoji at the cut left half a surrogate pair)
+    - widths: the fast path covers only characters that are one cell on their own and never join the
+      one before (a soft hyphen, Arabic number signs and bidi isolates were counted as one cell); a
+      flag is two cells (four on Windows PowerShell 5.1, whose .NET splits the pair)
+    - a gone session's tree cost follows its subagent transcripts as they grow; a new subagent file
+      of a gone session is found when its own transcript changes, or at the next start
+    - Windows PowerShell 5.1: a poll that hangs is stopped with everything it started (claude.cmd's
+      node outlived its cmd.exe). Linux: a process that outlives claude and holds its output is not
+      stopped (it is no longer claude's child); ctop still drops the poll and polls again
+    - tests: the integration tests run on a private tmux server and never touch yours; the clipboard
+      test proves the terminal accepts OSC 52 before it trusts a clean result
+  2026.10.31.6 — fixes from an outside audit of the branch
+    - nothing live but history in the keep window: the history was not drawn (the table was skipped
+      whenever no session was live), and peek / t / y could act on a row no longer shown
+    - ages of a day or more (1d4h) colored as fresh: the age parser ignored days
+    - background sessions from the closed log were listed without -All; they follow -All like live ones
+    - a session with an impossible startedAt stopped ctop; ages it can't read show as -
+    - a lone session whose row fits on one line was drawn as nothing (a one-line body)
+    - a roster poll that hangs is stopped after max(5 s, 5 × -RosterInterval) and counted as failed;
+      the last roster stays on screen and the next poll starts. It used to block every later poll
+    - session text (titles, paths, tool arguments) can no longer send terminal commands: control
+      characters and escape sequences other than colors are removed before drawing (an OSC 52 in a
+      title could set your clipboard from peek or the closed log)
+    - a transcript that is replaced, cut short or moved is rescanned from the start; one that only
+      grew is still read from where the last scan stopped
+    - a prompt that mentions tool_result counts as a turn again (it was taken for a tool result).
+      Cached scan state is redone once (ScanVer 3)
+    - a gone session's TREE COST still counts its subagents (their part dropped to $0 once it left)
+    - columns line up with CJK and other wide characters, emoji and combining accents: widths,
+      padding and cuts are measured in terminal cells, not string length, and a cut never splits
+      a character
+    - frame in the help is the time of the whole last pass (roster, process harvest, cache save,
+      build, draw); the cache save was left out
+    - a fatal error exits with code 1 and prints its message on stderr
+    - tests: the quit test fails a crash exit; the frame and key timing tests refuse a frozen or
+      exited ctop; CI fails a job that claims to run the integration tests and skips them
+  2026.10.31.5
+    - Linux without the clear program (minimal Fedora / RHEL images): ctop stopped at once with "The
+      expression after '&' …": PowerShell's Clear-Host runs clear. The screen is cleared with the same
+      escape sequences instead
+    - Windows PowerShell 5.1 runs it again (unit tests pass there in CI): the file is UTF-8 with a BOM
+      (5.1 read it as ANSI and could not parse it); no [Array]::Sort[T](…) generic-call syntax (7.3+);
+      a session with exactly one subagent listed it again on 5.1; the scan cache loads on 5.1 too
+      (it needed ConvertFrom-Json -AsHashtable, so every start rescanned every transcript); the mouse
+      helper's file name no longer needs SHA256.HashData (.NET 5+), which turned the mouse off on 5.1
+  2026.10.31.4
+    - only rows on screen are refreshed and styled each frame: a gone row off screen costs next to nothing
+      (300 gone rows now cost about what the visible screenful does: ~25–35 ms a frame, was ~140 ms).
+      A row that scrolls into view is refreshed before that frame is drawn, so a visible age is never
+      stale; whether a gone transcript changed is checked every 30 s for rows off screen
+    - gone rows sort with a .NET sort (newest gone first; ties by session id, so rows that left in the
+      same poll never swap); in roster sort they follow that order too instead of their stale position.
+      Title-bar counts are one pass over the rows
+  2026.10.31.3
+    - titles with quotes, newlines or non-ASCII read right: \" was shown literally (escapes were only
+      undone when the text held a double backslash). Cached scan state is redone once (ScanVer 2)
+    - t / y on Linux: sent to the terminal as OSC 52 (and to xclip when there is a display). Set-Clipboard
+      without xclip keeps the text inside pwsh and reports success, so "copied" was shown for nothing
+  2026.10.31.2
+    - keep window: one setting, -Keep (alias -Linger), for how long gone sessions and stopped subagents
+      stay listed; + / - step 0 · 15m · 30m · 45m · 1h · 2h · 4h · 8h · 12h · 1d · 2d · 3d · 7d · 14d ·
+      30d · ∞ at runtime, shown as keep on the strip and in the footer. 0 = drop at once and ∞ = forever,
+      for both (-SubagentWindow still works; its 0 still means forever). Tick moved to [ / ]
+    - gone sessions from earlier runs are read back from the closed log (which now also records kind and
+      the /clear successor), so a long window shows yesterday's sessions, newest gone first, with their
+      logged title; peek says when Claude Code has deleted a transcript (cleanupPeriodDays) instead of
+      offering a resume that cannot work
+    - keys are read every frame however long it took: a frame slower than the tick stopped ctop reading
+      the keyboard at all, q included (seen with ~150 gone rows)
+    - faster with many rows (300 gone rows: ~1.6 s a frame → ~0.15 s): gone rows are built once and
+      reused, sorting no longer scans every row per session, a history row's sparkline no longer changes
+      (which re-rendered every row every 2 s), and history loads ~120 ms of rows per frame, newest first,
+      so live sessions show at once (cold start with 300: 7.9 s → 1.4 s)
+    - ages past a day read 1d1h / 40d instead of 25h / 960h
+    - tests: Pester unit tests and an end-to-end test that drives ctop in tmux (tests/)
+  2026.10.31.1
+    - a failed `claude agents --json` poll (non-zero exit, no output, not a JSON array) keeps the last
+      roster: it was read as an empty one, so every session flashed "gone" and was written to the
+      closed log as closed. The strip shows poll FAILED×N; roster age counts from the last good poll
   2026.10.27.1
     - a new subagent reads thinking from its first second: its prompt can sit behind ~10 large setup
       attachments, past the 256 KB tail ctop read, which left STATE blank until the first reply
@@ -137,14 +245,14 @@
 param(
   [int]$Tick = 250,
   [double]$RosterInterval = 2,
-  [int]$SubagentWindow = 900,
+  [Alias('Linger')][string]$Keep = '',
+  [int]$SubagentWindow = 0,
   [switch]$NoSubagents,
   [switch]$Compact,
   [ValidateSet('activity','roster','start','cost','ctx')][string]$Sort = 'activity',
   [ValidateSet('wrap','truncate')][string]$Layout = 'wrap',
   [int]$WrapLines = 2,
   [int]$MaxWidth = 0,
-  [int]$Linger = 15,
   [string]$HighlightModel = 'fable|mythos',
   [string]$SelectBg = '48;5;238',
   [string]$ClosedLog = '',
@@ -153,7 +261,7 @@ param(
   [switch]$NoMouse,
   [switch]$Version
 )
-$script:CtopVersion = '2026.10.27.1'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.10.31.8'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -166,10 +274,18 @@ $ProjectsDir = Join-Path $ConfigDir 'projects'
 #   $TranscriptIndex : sessionId -> newest transcript FileInfo (rebuilt every roster poll)
 #   $ScanCache  : sessionId -> byte offset + running totals (incremental transcript scan)
 $script:TranscriptIndex = @{}
-$script:TailCache  = @{}   # sessionId -> @{ Length; Write; Result }  (skip re-parse if file unchanged)
+$script:TailCache  = @{}   # sessionId -> @{ Path; Length; Write; Result }  (skip re-parse if the same file is unchanged)
 
-function Get-Age([long]$unixMs) {
-  $start = [DateTimeOffset]::FromUnixTimeMilliseconds($unixMs).LocalDateTime
+# The roster's startedAt (Unix ms) as local time; $null when missing, not a number or out of range. It
+# comes from another program: one bad value threw out of the frame and stopped ctop.
+function ConvertFrom-UnixMs($ms) {
+  $n = 0L
+  if (-not [long]::TryParse("$ms", [ref]$n) -or $n -le 0 -or $n -gt 253402300799999) { return $null }
+  [DateTimeOffset]::FromUnixTimeMilliseconds($n).LocalDateTime
+}
+function Get-Age($unixMs) {
+  $start = ConvertFrom-UnixMs $unixMs
+  if (-not $start) { return '-' }
   $span = (Get-Date) - $start
   if ($span.TotalHours -ge 1) { '{0}h{1:00}m' -f [int][math]::Floor($span.TotalHours), $span.Minutes }
   else { '{0}m{1:00}s' -f $span.Minutes, $span.Seconds }
@@ -178,11 +294,24 @@ function Get-Age([long]$unixMs) {
 function Get-Since($t) {
   if ($null -eq $t -or "$t" -eq '') { return '-' }
   try { $t = [datetime]$t } catch { return '-' }
-  $span = (Get-Date) - $t
+  Format-Since ((Get-Date) - $t)
+}
+# One unit, two past a day while that is still short: 42s, 5m, 23h, 1d1h, 9d23h, 10d, 400d.
+function Format-Since([timespan]$span) {
   if ($span.Ticks -lt 0) { $span = [timespan]::Zero }   # clock skew / future-stamped entries
-  if ($span.TotalHours -ge 1)   { '{0}h' -f [int][math]::Floor($span.TotalHours) }
-  elseif ($span.TotalMinutes -ge 1) { '{0}m' -f [int][math]::Floor($span.TotalMinutes) }
-  else { '{0}s' -f [int]$span.TotalSeconds }
+  if ($span.TotalDays -ge 10)   { return '{0}d' -f [int][math]::Floor($span.TotalDays) }
+  if ($span.TotalDays -ge 1)    { return '{0}d{1}' -f [int][math]::Floor($span.TotalDays), $(if ($span.Hours) { "$($span.Hours)h" } else { '' }) }
+  if ($span.TotalHours -ge 1)   { return '{0}h' -f [int][math]::Floor($span.TotalHours) }
+  if ($span.TotalMinutes -ge 1) { return '{0}m' -f [int][math]::Floor($span.TotalMinutes) }
+  return '{0}s' -f [int][math]::Floor($span.TotalSeconds)
+}
+
+# Clear the screen and its scrollback. PowerShell's Clear-Host on Linux / macOS runs the external clear
+# program (& (Get-Command clear).Definition) and fails when there is none, as in minimal Fedora / RHEL
+# images; the escape sequences clear writes do the same without it: home, erase screen, erase scrollback.
+function Clear-Screen {
+  if ($IsWindows -or $env:OS -eq 'Windows_NT') { Clear-Host; return }
+  [Console]::Write("$([char]27)[H$([char]27)[2J$([char]27)[3J")
 }
 
 # ---- frame writer -----------------------------------------------------------
@@ -190,19 +319,134 @@ function Get-Since($t) {
 # Lines may be strings or @{ Text; Fg; Bg; Inverse }. $Footer is pinned to the last row.
 # Never writes the last column (w-1) so the terminal cannot auto-wrap.
 # Cells may carry ANSI SGR color codes (see Paint); padding and truncation use visible length.
+# ---- terminal cell widths ------------------------------------------------------------
+# A terminal gives East Asian wide characters and most emoji two cells, and combining marks and
+# zero-width characters none, while .Length counts UTF-16 units: CJK titles pushed columns out of line
+# and a cut could split a surrogate pair. Widths are measured per text element (a character with its
+# combining marks). That is slow in PowerShell (a 200-character line: ~10 ms), so two fast paths come first,
+# for text made only of characters that never join the one before them (no marks, joiners, emoji):
+#   narrow: one cell each (Latin, Greek, Cyrillic, Armenian, Hebrew and Arabic letters, Georgian,
+#           punctuation, arrows, math, box drawing, blocks, ctop's own symbols): width = length
+#   wide:   two cells each (CJK, kana, Hangul syllables, fullwidth forms): width = length + count of these
+# A unit test sweeps the whole BMP to keep the fast paths in agreement with the element widths.
+$script:CellRx = $null
+# The regexes, built on first use (so the unit tests, which load only the functions, use these same ones)
+function Get-CellRx {
+  if (-not $script:CellRx) {
+    $narrow = '\u0020-\u007E\u00A0-\u00AC\u00AE-\u02FF\u0370-\u0482\u048A-\u052F\u0531-\u058A\u05D0-\u05EA\u05EF-\u05F4\u0620-\u064A\u0660-\u066F\u0671-\u06D4\u06EE-\u06FF\u10A0-\u10FF\u1E00-\u1FFF\u2010-\u2027\u2030-\u205E\u20A0-\u20C0\u2100-\u27BF\u2800-\u28FF'
+    $wide = '\u2E80-\u3029\u3030-\u303E\u3041-\u3098\u309B-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF01-\uFF60\uFFE0-\uFFE6'
+    $script:CellRx = @{ Plain = [regex]('^[' + $narrow + ']*$'); Simple = [regex]('^[' + $narrow + $wide + ']*$'); Wide = [regex]('[' + $wide + ']') }
+  }
+  $script:CellRx
+}
+function Test-PlainCells([string]$s) { (Get-CellRx).Plain.IsMatch($s) }
+# narrow and wide characters only: one text element per character, its width known from the character
+function Test-SimpleCells([string]$s) { (Get-CellRx).Simple.IsMatch($s) }
+function Get-CharCells([char]$c) { if ((Get-CellRx).Wide.IsMatch([string]$c)) { 2 } else { 1 } }
+# Cells of one text element: 0 for a lone combining mark or format character (ZWJ, bidi marks),
+# 2 for wide (CJK, Hangul, fullwidth forms, most emoji, a flag), else 1.
+function Get-ElementCells([string]$e) {
+  if (-not $e) { return 0 }
+  $cat = [Globalization.CharUnicodeInfo]::GetUnicodeCategory($e, 0)
+  if ($cat -eq 'NonSpacingMark' -or $cat -eq 'EnclosingMark' -or $cat -eq 'Format') { return 0 }
+  $cp = 0; try { $cp = [char]::ConvertToUtf32($e, 0) } catch { return 1 }   # a lone surrogate
+  if (($cp -ge 0x1100 -and $cp -le 0x115F) -or ($cp -ge 0x2E80 -and $cp -le 0x303E) -or ($cp -ge 0x3041 -and $cp -le 0x33FF) -or
+      ($cp -ge 0x3400 -and $cp -le 0x4DBF) -or ($cp -ge 0x4E00 -and $cp -le 0x9FFF) -or ($cp -ge 0xA000 -and $cp -le 0xA4CF) -or
+      ($cp -ge 0xA960 -and $cp -le 0xA97F) -or ($cp -ge 0xAC00 -and $cp -le 0xD7A3) -or ($cp -ge 0xF900 -and $cp -le 0xFAFF) -or
+      ($cp -ge 0xFE10 -and $cp -le 0xFE19) -or ($cp -ge 0xFE30 -and $cp -le 0xFE6F) -or ($cp -ge 0xFF00 -and $cp -le 0xFF60) -or
+      ($cp -ge 0xFFE0 -and $cp -le 0xFFE6) -or ($cp -ge 0x1F1E6 -and $cp -le 0x1F1FF) -or ($cp -ge 0x1F300 -and $cp -le 0x1F64F) -or ($cp -ge 0x1F680 -and $cp -le 0x1F6FF) -or
+      ($cp -ge 0x1F900 -and $cp -le 0x1F9FF) -or ($cp -ge 0x1FA70 -and $cp -le 0x1FAFF) -or ($cp -ge 0x20000 -and $cp -le 0x3FFFD)) { return 2 }
+  return 1
+}
+function Get-CellWidth([string]$s) {
+  if (-not $s) { return 0 }
+  if (Test-PlainCells $s) { return $s.Length }
+  if (Test-SimpleCells $s) { return $s.Length + (Get-CellRx).Wide.Matches($s).Count }
+  $w = 0; $en = [Globalization.StringInfo]::GetTextElementEnumerator($s)
+  while ($en.MoveNext()) { $w += Get-ElementCells ([string]$en.Current) }
+  return $w
+}
+# The longest start of $s that fits in $n cells, cut between whole characters.
+function Limit-Cells([string]$s, [int]$n) {
+  if (-not $s -or $n -le 0) { return '' }
+  if (Test-PlainCells $s) { return $s.Substring(0, [math]::Min($n, $s.Length)) }
+  if (Test-SimpleCells $s) {
+    $w = 0; $end = 0
+    while ($end -lt $s.Length) { $c = Get-CharCells $s[$end]; if ($w + $c -gt $n) { break }; $w += $c; $end++ }
+    return $s.Substring(0, $end)
+  }
+  $w = 0; $end = 0; $en = [Globalization.StringInfo]::GetTextElementEnumerator($s)
+  while ($en.MoveNext()) {
+    $c = Get-ElementCells ([string]$en.Current)
+    if ($w + $c -gt $n) { break }
+    $w += $c; $end = $en.ElementIndex + ([string]$en.Current).Length
+  }
+  return $s.Substring(0, $end)
+}
+# The longest end of $s that fits in $n cells (paths keep their tail).
+function Last-Cells([string]$s, [int]$n) {
+  if (-not $s -or $n -le 0) { return '' }
+  if (Test-PlainCells $s) { return $s.Substring([math]::Max(0, $s.Length - $n)) }
+  if (Test-SimpleCells $s) {
+    $w = 0; $start = $s.Length
+    while ($start -gt 0) { $c = Get-CharCells $s[$start - 1]; if ($w + $c -gt $n) { break }; $w += $c; $start-- }
+    return $s.Substring($start)
+  }
+  $els = [Collections.Generic.List[string]]::new(); $en = [Globalization.StringInfo]::GetTextElementEnumerator($s)
+  while ($en.MoveNext()) { $els.Add([string]$en.Current) }
+  $w = 0; $start = $els.Count
+  for ($i = $els.Count - 1; $i -ge 0; $i--) { $c = Get-ElementCells $els[$i]; if ($w + $c -gt $n) { break }; $w += $c; $start = $i }
+  return (-join $els.GetRange($start, $els.Count - $start))
+}
+# Budgets in UTF-16 units (LAST ACTION's 120, say), cut between characters: never inside a surrogate pair,
+# never between a character and its combining marks.
+function Test-Joined([string]$s, [int]$i) {
+  if ($i -le 0 -or $i -ge $s.Length) { return $false }
+  if ([char]::IsLowSurrogate($s[$i])) { return $true }
+  $cat = [Globalization.CharUnicodeInfo]::GetUnicodeCategory($s, $i)   # (string, index): a supplementary mark is a surrogate pair
+  return ($cat -eq 'NonSpacingMark' -or $cat -eq 'SpacingCombiningMark' -or $cat -eq 'EnclosingMark')
+}
+function Limit-Chars([string]$s, [int]$n) {
+  if (-not $s -or $s.Length -le $n) { return $s }
+  $end = [math]::Max(0, $n); while ($end -gt 0 -and (Test-Joined $s $end)) { $end-- }
+  return $s.Substring(0, $end)
+}
+function Last-Chars([string]$s, [int]$n) {
+  if (-not $s -or $s.Length -le $n) { return $s }
+  $start = $s.Length - [math]::Max(0, $n); while ($start -lt $s.Length -and (Test-Joined $s $start)) { $start++ }
+  return $s.Substring($start)
+}
+
 $script:AnsiRx = [regex]'\x1b\[[0-9;]*m'
-function Strip-Ansi([string]$t) { $script:AnsiRx.Replace($t, '') }
+function Strip-Ansi([string]$t) { [regex]::Replace($t, '\x1b\[[0-9;]*m', '') }
+# Cut to $n cells, keeping the color codes (and closing them).
 function Truncate-Ansi([string]$t, [int]$n) {
+  $rx = if ($script:AnsiRx) { $script:AnsiRx } else { [regex]'\x1b\[[0-9;]*m' }
+  $bare = $rx.Replace($t, '')   # the color codes are skipped below; judge the text
+  $plain = Test-PlainCells $bare; $simple = (-not $plain) -and (Test-SimpleCells $bare)
   $sb = [Text.StringBuilder]::new(); $vis = 0; $i = 0
   while ($i -lt $t.Length -and $vis -lt $n) {
     if ($t[$i] -eq [char]27) {
-      $m = $script:AnsiRx.Match($t, $i)
+      $m = $rx.Match($t, $i)
       if ($m.Success -and $m.Index -eq $i) { [void]$sb.Append($m.Value); $i += $m.Length; continue }
     }
-    [void]$sb.Append($t[$i]); $vis++; $i++
+    if ($plain) { [void]$sb.Append($t[$i]); $vis++; $i++; continue }
+    if ($simple) { $c = Get-CharCells $t[$i]; if ($vis + $c -gt $n) { break }; [void]$sb.Append($t[$i]); $vis += $c; $i++; continue }
+    $e = [Globalization.StringInfo]::GetNextTextElement($t, $i); $c = Get-ElementCells $e
+    if ($vis + $c -gt $n) { break }
+    [void]$sb.Append($e); $vis += $c; $i += $e.Length
   }
   [void]$sb.Append("$([char]27)[0m")
   return $sb.ToString()
+}
+# Everything ctop draws passes through here. Text from sessions (names, titles, paths, log entries) can
+# hold terminal commands: OSC 52 sets the clipboard, ESC[2J clears the screen, a newline splits a row.
+# Keep only the color codes ctop paints with (ESC [ digits ; m); drop any other ESC, and turn every
+# other control character, C0 and 8-bit C1, into a space.
+# (static [regex]::Replace caches its compiled patterns)
+function Protect-TerminalText([string]$text) {
+  if (-not $text) { return $text }
+  [regex]::Replace([regex]::Replace($text, '\x1b(?!\[[0-9;]*m)', ''), '[\x00-\x1A\x1C-\x1F\x7F-\x9F]', ' ')
 }
 function Write-Frame([object[]]$lines, [string]$Footer = '') {
   $w = [Console]::WindowWidth
@@ -213,13 +457,16 @@ function Write-Frame([object[]]$lines, [string]$Footer = '') {
   $n = 0
   foreach ($item in $lines) {
     if ($n -ge $h - 1) { break }
-    $text = if ($item -is [string]) { $item } else { [string]$item.Text }
+    $text = Protect-TerminalText $(if ($item -is [string]) { $item } else { [string]$item.Text })
     $styled = ($item -isnot [string]) -and ($item.Inverse -or $item.Select -or $item.Fg -or $item.Bg)
     # the selected row keeps its cell colors (tinted background); inverse/dim styles replace them
     $keepCells = $script:Color -and ($item -isnot [string]) -and $item.Select
     if ((-not $keepCells -and $styled) -or -not $script:Color) { $text = Strip-Ansi $text }
-    $vis = (Strip-Ansi $text).Length
-    if ($vis -gt $w - 1) { $text = if ($script:Color) { Truncate-Ansi $text ($w - 1) } else { (Strip-Ansi $text).Substring(0, $w - 1) }; $vis = $w - 1 }
+    $vis = Get-CellWidth (Strip-Ansi $text)
+    if ($vis -gt $w - 1) {
+      $text = if ($script:Color) { Truncate-Ansi $text ($w - 1) } else { Limit-Cells (Strip-Ansi $text) ($w - 1) }
+      $vis = Get-CellWidth (Strip-Ansi $text)   # a wide character that did not fit leaves a cell short
+    }
     $text += ' ' * ($w - 1 - $vis)
     if ($styled) {
       if ($script:Color) {
@@ -252,10 +499,13 @@ function Write-Frame([object[]]$lines, [string]$Footer = '') {
   while ($n -lt $h - 1) { [Console]::Write($blank); if ($n -lt $h - 2) { [Console]::Write("`n") }; $n++ }
   # footer on the last row; stop one column short so the terminal doesn't scroll
   [Console]::SetCursorPosition(0, $h - 1)
-  $f = $Footer
+  $f = Protect-TerminalText $Footer
   if (-not $script:Color) { $f = Strip-Ansi $f }
-  $fv = (Strip-Ansi $f).Length
-  if ($fv -gt $w - 1) { $f = if ($script:Color) { (Truncate-Ansi $f ($w - 1)) + "$E[90m" } else { (Strip-Ansi $f).Substring(0, $w - 1) }; $fv = $w - 1 }
+  $fv = Get-CellWidth (Strip-Ansi $f)
+  if ($fv -gt $w - 1) {
+    $f = if ($script:Color) { (Truncate-Ansi $f ($w - 1)) + "$E[90m" } else { Limit-Cells (Strip-Ansi $f) ($w - 1) }
+    $fv = Get-CellWidth (Strip-Ansi $f)
+  }
   $pad = ' ' * ($w - 1 - $fv)
   if ($script:Color) { [Console]::Write("$E[90m" + $f + $pad + "$E[0m") }
   else { [Console]::ForegroundColor = 'DarkGray'; [Console]::Write($f + $pad); [Console]::ForegroundColor = $fg0 }
@@ -362,7 +612,7 @@ function Get-Spawner([System.IO.FileInfo]$sf, $meta, [object[]]$siblings) {
   }
   if ($meta -and $meta.toolUseId -and [int]$meta.spawnDepth -ge 2) {   # fallback: find the Agent call by id
     foreach ($o in $siblings) {
-      if ($o.FullName -eq $k) { continue }
+      if ($o.FullName -ceq $k) { continue }
       if (Select-String -LiteralPath $o.FullName -Pattern ([regex]::Escape('"id":"' + $meta.toolUseId + '"')) -Quiet) { $result = 'sub:' + $o.FullName; break }
     }
   }
@@ -372,12 +622,12 @@ function Get-Spawner([System.IO.FileInfo]$sf, $meta, [object[]]$siblings) {
 
 # Subagent transcripts live in a sidecar dir beside the parent transcript:
 #   <project>/<sessionId>/subagents/agent-<hex>.jsonl
-# (third-party parser consensus, not official docs). Returns files active within $SubagentWindow.
+# (third-party parser consensus, not official docs). Returns the files to list (Test-SubagentListed).
 $script:AllAgents = @{}   # sessionId -> every agent-*.jsonl of that session (Find-Subagents)
-function Find-Subagents([System.IO.FileInfo]$parent, [string]$sessionId) {
+# Every agent transcript of a session, listed or not (recorded in AllAgents, for the tree's Σ cost).
+function Get-AgentFiles([System.IO.FileInfo]$parent, [string]$sessionId) {
   if (-not $sessionId -and $parent) { $sessionId = $parent.BaseName }
-  if (-not $sessionId) { return @() }
-  $cutoff = (Get-Date).AddSeconds(-$SubagentWindow)
+  if (-not $sessionId) { return ,@() }
   $found = @()
   # The sidecar can sit under a different project dir than the main transcript when the session
   # changed working directory (Claude Code files by cwd): search every project dir.
@@ -395,17 +645,39 @@ function Find-Subagents([System.IO.FileInfo]$parent, [string]$sessionId) {
     $found += @(Get-ChildItem -Path $dir -Filter 'agent-*.jsonl' -File -Recurse -ErrorAction SilentlyContinue)
   }
   $script:AllAgents[$sessionId] = $found   # every agent file, listed or not: for the tree's Σ cost
-  # An agent with a tool call in flight (working) is always shown, however long the call takes.
-  # Everything else ages out after -SubagentWindow (0 = never, i.e. until the parent goes away):
-  # stopped agents, and 'thinking' ones too, since a real generation doesn't go the whole window
-  # without writing anything; an old 'thinking' row means a transcript ending ctop misreads.
-  if ($SubagentWindow -gt 0) {
-    $found = @($found | Where-Object {
-      if ($_.LastWriteTime -gt $cutoff) { return $true }
-      $st = (Get-LastAction $_ ('sub:' + $_.FullName)).State
-      $st -eq 'working' -and -not (Test-Finished $_ (Get-SubagentMeta $_))
-    })
+  return ,$found
+}
+# Length and write time of each agent file found for a session: part of a gone row's cache key, so its
+# tree cost follows a subagent that carries on after the session left. One stat per known file; a new
+# agent file of a gone session is found when its own transcript changes, or at the next start.
+function Get-AgentSig([string]$sessionId) {
+  $sig = [Text.StringBuilder]::new()
+  foreach ($f in @($script:AllAgents[$sessionId])) {
+    if (-not $f) { continue }
+    $f.Refresh()
+    if ($f.Exists) { [void]$sig.Append($f.Length).Append('.').Append($f.LastWriteTimeUtc.Ticks).Append(',') } else { [void]$sig.Append('-,') }
   }
+  $sig.ToString()
+}
+# What a gone row was built from: its transcript (which file, compared case-sensitively: on Linux a.jsonl
+# and A.jsonl are two files; its size and write time), how it left, and its agent files (Get-AgentSig).
+function Get-GoneKey($gf, $e, [string]$sessionId) {
+  "$(if ($gf) { "$($gf.FullName)|$($gf.Length)|$($gf.LastWriteTimeUtc.Ticks)" })|$($e.Cleared)|$($e.Successor)|$($e.GoneAt.Ticks)|$(Get-AgentSig $sessionId)"
+}
+# The agent transcripts of a session that are listed as rows.
+function Find-Subagents([System.IO.FileInfo]$parent, [string]$sessionId) {
+  if (-not $sessionId -and $parent) { $sessionId = $parent.BaseName }
+  if (-not $sessionId) { return @() }
+  $now = Get-Date
+  $found = Get-AgentFiles $parent $sessionId
+  # Which agents are listed: Test-SubagentListed. Inside the keep window needs no transcript read;
+  # outside it only a live (working / thinking) agent can still be listed, so read the state then.
+  $found = @($found | Where-Object {
+    if (Test-KeepWindow $_.LastWriteTime $now $script:KeepMin) { return $true }
+    $st = (Get-LastAction $_ ('sub:' + $_.FullName)).State
+    if ($st -notin 'working', 'thinking') { return $false }
+    Test-SubagentListed -LastWrite $_.LastWriteTime -Now $now -KeepMinutes $script:KeepMin -State $st -Finished (Test-Finished $_ (Get-SubagentMeta $_))
+  })
   return ,$found
 }
 
@@ -417,6 +689,11 @@ function Find-Subagents([System.IO.FileInfo]$parent, [string]$sessionId) {
 # (input + cache reads + cache writes) is at most that many tokens (Haiku 5.5 is tiered at 100k).
 # Bump PriceVer whenever this table changes: cached cost totals from an older table are recomputed.
 $script:PriceVer = 2
+# Bump ScanVer when what a scan extracts changes: cached state from an older scan is redone once.
+# 2: titles are unescaped (\" was kept literally)
+# 3: a prompt that mentions tool_result counts as a turn (it was taken for a tool result)
+# 4: a first prompt needs three letters in a row of any script to be the title, not three ASCII letters
+$script:ScanVer = 4
 $script:Pricing = @(
   @{ Match = 'fable-5-1|mythos-5-1'; In = 10;  W5 = 12.5;  W1h = 20;  Read = 0.25; Out = 50 }
   @{ Match = 'fable-5|mythos-5';     In = 10;  W5 = 12.5;  W1h = 20;  Read = 1;    Out = 50 }
@@ -445,7 +722,7 @@ function Get-Price([string]$model, [long]$prompt = 0) {
 #                                     one line per content block, each repeating the usage)
 # Decode a JSON string body captured by regex. Never throws: a malformed escape returns the raw text.
 function Unescape-Json([string]$t) {
-  if (-not $t -or $t.IndexOf('\\') -lt 0) { return $t }
+  if (-not $t -or $t.IndexOf([char]92) -lt 0) { return $t }   # no backslash, nothing escaped ('\\' would be two)
   try { return (ConvertFrom-Json ('"' + $t + '"')) } catch { return $t }
 }
 
@@ -459,20 +736,33 @@ $script:ScanCache = @{}
 $script:ScanCachePath = Join-Path $ConfigDir 'ctop-scancache.json'
 $script:ScanVerified = @{}   # keys whose file was checked this run (never saved)
 $script:CacheDays = 2
+# ConvertFrom-Json -AsHashtable for Windows PowerShell 5.1, which lacks it: parsed objects become
+# hashtables, nested ones too; arrays and plain values are kept.
+function ConvertTo-Hashtable($o) {
+  if ($o -is [System.Management.Automation.PSCustomObject]) {
+    $h = @{}
+    foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = ConvertTo-Hashtable $p.Value }
+    return $h
+  }
+  if ($o -is [System.Collections.IList]) { return ,@(foreach ($x in $o) { ConvertTo-Hashtable $x }) }
+  return $o
+}
 function Load-ScanCache {
   try {
     if (-not (Test-Path -LiteralPath $script:ScanCachePath)) { return }
-    $h = Get-Content -LiteralPath $script:ScanCachePath -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
+    $raw = Get-Content -LiteralPath $script:ScanCachePath -Raw -Encoding UTF8
+    $h = if ($PSVersionTable.PSVersion.Major -ge 6) { $raw | ConvertFrom-Json -AsHashtable } else { ConvertTo-Hashtable ($raw | ConvertFrom-Json) }
     $cut = (Get-Date).ToUniversalTime().AddDays(-$script:CacheDays).Ticks
     foreach ($k in @($h.Keys)) {
       $e = $h[$k]
       # no Used stamp = written by a build before 2026.10.18.2: drop it (its sessions rescan once)
       if (-not $e.Path -or -not $e.Head -or -not $e.Used -or [long]$e.Used -lt $cut) { continue }
       if ([int]$e.PriceVer -ne $script:PriceVer) { continue }   # costs from an older price table: rescan
+      if ([int]$e.ScanVer -ne $script:ScanVer) { continue }     # extracted by an older scan: rescan
       if (-not $e.ToolCounts) { $e.ToolCounts = @{} }
       $script:ScanCache[$k] = $e
     }
-  } catch {}   # unreadable cache (or Windows PowerShell 5.1, no -AsHashtable): just scan from scratch
+  } catch {}   # unreadable cache: just scan from scratch
 }
 function Save-ScanCache {
   try {
@@ -485,17 +775,23 @@ function Save-ScanCache {
 # Identity of a transcript: its first 256 bytes (the opening entry never changes as the file grows,
 # and a replaced file starts differently). Creation time is not portable: on Linux .NET reports the
 # inode change time, which moves on every append.
-function Get-HeadPrint([string]$path) {
+function Get-HeadPrint([string]$path, [int]$max = 256) {
   $fs = $null
   try {
     $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
-    $b = New-Object byte[] ([math]::Min(256, $fs.Length)); $n = $fs.Read($b, 0, $b.Length)
+    $b = New-Object byte[] ([math]::Min($max, $fs.Length)); $n = $fs.Read($b, 0, $b.Length)
     return [Convert]::ToBase64String($b, 0, $n)
   } catch { return '' } finally { if ($fs) { $fs.Dispose() } }
 }
+# Does the file still start the way it did? Compares only as many bytes as were recorded: a head taken
+# while the file was under 256 bytes still matches once it has grown.
+function Test-SameHead([string]$path, [string]$head) {
+  $n = 0; try { $n = [Convert]::FromBase64String("$head").Length } catch { return $false }
+  return (Get-HeadPrint $path $n) -ceq $head   # Base64 is case-sensitive: YWJA (ab@) is not YWJa (abZ)
+}
 function New-ScanState([System.IO.FileInfo]$file) {
   @{ Path = $file.FullName; Head = (Get-HeadPrint $file.FullName)
-     PriceVer = $script:PriceVer; Offset = 0; Turns = 0; Tools = 0; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0;
+     PriceVer = $script:PriceVer; ScanVer = $script:ScanVer; Offset = 0; Turns = 0; Tools = 0; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0;
      LastId = ''; LastCost = 0.0; LastOut = 0; Model = '-'; AiTitle = ''; Summary = ''; Title = ''; First = ''; MsgSummary = ''; Cwd = ''; GitBranch = ''; ToolCounts = @{}
      Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; ToolLog = @() }
 }
@@ -503,16 +799,31 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
   $st = $script:ScanCache[$key]
   # first use this run of state restored from disk: is it still the same file? (one 256-byte read)
   if ($st -and -not $script:ScanVerified.ContainsKey($key)) {
-    if ($st.Path -ne $file.FullName -or $st.Head -ne (Get-HeadPrint $file.FullName)) { $st = $null }
+    if ($st.Path -cne $file.FullName -or -not (Test-SameHead $file.FullName $st.Head)) { $st = $null }
   }
-  # no state yet, or the file shrank / was replaced: start over from byte 0 with fresh totals
-  if (-not $st -or $file.Length -lt $st.Offset) {
+  # Is the state still this file's? Each check costs nothing, or one 256-byte read when there is new data
+  # to read anyway:
+  #   a different path         -> the session's transcript is now another file (it follows the cwd)
+  #   shorter than scanned     -> cut or replaced
+  #   same length, newer write -> rewritten in place (an append always grows the file)
+  #   longer, different head   -> replaced by a longer file
+  # Any of these: start over from byte 0 with fresh totals. Not caught: a longer rewrite that keeps the
+  # first 256 bytes reads as an append (Claude Code only appends to a transcript; telling them apart
+  # would mean re-reading what was already scanned).
+  $write = $file.LastWriteTimeUtc.Ticks
+  if ($st) {
+    $stale = $st.Path -cne $file.FullName -or $file.Length -lt $st.Offset -or   # paths: case-sensitive (Linux)
+             ($file.Length -eq $st.Offset -and $st.Write -and [long]$st.Write -ne $write) -or
+             ($file.Length -gt $st.Offset -and $st.Offset -gt 0 -and -not (Test-SameHead $file.FullName $st.Head))
+    if ($stale) { $st = $null }
+  }
+  if (-not $st) {
     $st = New-ScanState $file
     $script:ScanCache[$key] = $st
   }
   $script:ScanVerified[$key] = $true
   $st.Used = (Get-Date).ToUniversalTime().Ticks
-  if ($file.Length -eq $st.Offset) { return $st }
+  if ($file.Length -eq $st.Offset) { $st.Write = $write; return $st }
   $fs = $null
   try {
     $fs = [IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite')
@@ -523,6 +834,7 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
     $lastNl = [Array]::LastIndexOf($buf, [byte]10, $n - 1)
     if ($lastNl -lt 0) { return $st }                                 # no complete line yet
     $st.Offset += $lastNl + 1
+    $st.Write = $write
     $text = [Text.Encoding]::UTF8.GetString($buf, 0, $lastNl)
     foreach ($line in $text.Split("`n")) {
       if ($line.Length -lt 20) { continue }
@@ -558,12 +870,14 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
       }
       if ($line.Contains('"type":"user"')) {
         if ($line.Contains('"isCompactSummary":true')) { continue }   # machine-written summary, not a human turn
-        if (-not $line.Contains('tool_result')) {
+        # a tool_result content block, not the word: a prompt may well mention "tool_result" (inside a
+        # JSON string its quotes are escaped, so this pattern only matches the structure)
+        if (-not $line.Contains('"type":"tool_result"')) {
           $st.Turns++
           if (-not $st.First -and $line -match '"content":"((?:[^"\\]|\\.)*)"') {
             $f = ((Unescape-Json($Matches[1]) -replace '<[^>]+>', '') -replace '\s+', ' ').Trim()
             # only accept something that reads like a human prompt
-            if ($f.Length -ge 4 -and $f -notmatch '^[\[<{]' -and $f -notmatch 'toolu_|hook feedback|^Caveat:|^This session is being continued|^Another Claude session|^\[Request interrupted' -and $f -match '[a-zA-Z]{3}') { $st.First = $f }
+            if ($f.Length -ge 4 -and $f -notmatch '^[\[<{]' -and $f -notmatch 'toolu_|hook feedback|^Caveat:|^This session is being continued|^Another Claude session|^\[Request interrupted' -and $f -match '\p{L}{3}') { $st.First = $f }   # three letters in a row, any script ([a-zA-Z] left Hebrew, Chinese, Russian... untitled; marks between letters, as in Hindi, still break the run)
           }
           if ($line -match '"timestamp":"([^"]+)"') { try { $st.TurnStart = [datetime]$Matches[1] } catch {} }
         }
@@ -633,7 +947,8 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
   $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; ToolLog = @(); Handback = $false; Synthetic = $null; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0 }
   if (-not $file) { return $out }
   $stamp = $script:TailCache[$sessionId]
-  if ($stamp -and $stamp.Length -eq $file.Length -and $stamp.Write -eq $file.LastWriteTimeUtc) {
+  # the same file, unchanged: a session's transcript can become another file (it follows the cwd)
+  if ($stamp -and $stamp.Path -ceq $file.FullName -and $stamp.Length -eq $file.Length -and $stamp.Write -eq $file.LastWriteTimeUtc) {
     return $stamp.Result
   }
   # Read the tail by BYTES, not lines: Get-Content -Tail on a large transcript whose single lines
@@ -702,7 +1017,7 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
     $content = $msg.content
     if (-not $content) { continue }
     # content may be a string or an array of blocks
-    if ($content -is [string]) { $t = ($content -replace '\s+', ' ').Trim(); $out.LastFull = 'text: ' + $t; $out.Last = 'text: ' + $t.Substring(0, [math]::Min(120, $t.Length)); break }
+    if ($content -is [string]) { $t = ($content -replace '\s+', ' ').Trim(); $out.LastFull = 'text: ' + $t; $out.Last = 'text: ' + (Limit-Chars $t 120); break }
     $tool = $content | Where-Object { $_.type -eq 'tool_use' } | Select-Object -Last 1
     if ($tool -and $tool.name -eq 'SubagentHandback') {
       # Claude Code >= 2.1.271: a subagent delivers its report through SubagentHandback, then stops.
@@ -711,7 +1026,7 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
       $out.Handback = $true; $hbAt = $i
       $t = (([string]$tool.input.message) -replace '[\x00-\x1F\x7F]+', ' ') -replace '\s{2,}', ' '
       $out.LastFull = ('handback: ' + $t).Trim()
-      $out.Last = if ($out.LastFull.Length -gt 130) { $out.LastFull.Substring(0, 129) + '…' } else { $out.LastFull }
+      $out.Last = if ($out.LastFull.Length -gt 130) { (Limit-Chars $out.LastFull 129) + '…' } else { $out.LastFull }
       break
     }
     if ($tool) {
@@ -721,12 +1036,12 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
       }
       $arg = ($arg -replace '[\x00-\x1F\x7F]+', ' ') -replace '\s{2,}', ' '
       $out.LastFull = "$($tool.name) $arg".Trim()
-      if ($arg.Length -gt 120) { $arg = if ($keepTail) { '…' + $arg.Substring($arg.Length - 119) } else { $arg.Substring(0, 119) + '…' } }
+      if ($arg.Length -gt 120) { $arg = if ($keepTail) { '…' + (Last-Chars $arg 119) } else { (Limit-Chars $arg 119) + '…' } }
       $out.Last = "$($tool.name) $arg".Trim()
       break
     }
     $text = ($content | Where-Object { $_.type -eq 'text' } | Select-Object -Last 1).text
-    if ($text) { $t = ($text -replace '\s+', ' ').Trim(); $out.LastFull = 'text: ' + $t; $out.Last = 'text: ' + $t.Substring(0, [math]::Min(120, $t.Length)); break }
+    if ($text) { $t = ($text -replace '\s+', ' ').Trim(); $out.LastFull = 'text: ' + $t; $out.Last = 'text: ' + (Limit-Chars $t 120); break }
   }
   # the newest model entry handed back its report: the agent has stopped, whatever was logged after it
   # ...unless its spawner has since sent it a new message (SendMessage to a stopped agent resumes
@@ -769,7 +1084,7 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
   $out.Synthetic = [bool]$out.Synthetic
   # a Claude-Code-written notice that the turn could not run: usage limit or API error
   $out.SysError = $out.Synthetic -and ($out.LastFull -match '(?i)limit|error|overloaded|unavailable|too long|credit')
-  $script:TailCache[$sessionId] = @{ Length = $file.Length; Write = $file.LastWriteTimeUtc; Result = $out }
+  $script:TailCache[$sessionId] = @{ Path = $file.FullName; Length = $file.Length; Write = $file.LastWriteTimeUtc; Result = $out }
   return $out
 }
 
@@ -861,20 +1176,198 @@ function Test-Finished([System.IO.FileInfo]$sf, $meta) {
 
 # ---- clipboard ------------------------------------------------------------------
 $script:Flash = ''; $script:FlashUntil = [datetime]::MinValue
+# Windows: Set-Clipboard. Elsewhere PowerShell's Set-Clipboard needs xclip and a display; without them it
+# keeps the text inside this pwsh process and still reports success (PowerShell 7.6.9, Clipboard.cs), so
+# the text is also sent to the terminal as OSC 52, which reaches the machine you are looking at, over
+# SSH too. Whether the terminal accepts OSC 52 can't be known, so the flash doesn't claim it.
+function Get-ClipboardPlan([bool]$OnWindows, [string]$Display, [bool]$HasXclip) {
+  if ($OnWindows) { return 'native' }
+  if ($Display -and $HasXclip) { return 'xclip', 'osc52' }
+  return 'osc52'
+}
+function Format-Osc52([string]$Text) {
+  "$([char]27)]52;c;$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Text)))$([char]7)"
+}
+function Format-CopyFlash([string]$What, [string[]]$Used) {
+  $sys = @($Used | Where-Object { $_ -ne 'osc52' })
+  $osc = $Used -contains 'osc52'
+  if ($sys -and $osc) { return "copied $What to clipboard ($($sys -join ', ')) and sent it to the terminal (OSC 52)" }
+  if ($osc) { return "sent $What to the terminal clipboard (OSC 52; needs terminal support)" }
+  return "copied $What to clipboard"
+}
 function Copy-Text([string]$text, [string]$what) {
-  try { Set-Clipboard -Value $text; $script:Flash = "copied $what to clipboard"; }
-  catch { $script:Flash = "clipboard unavailable: $($_.Exception.Message)" }
+  $onWindows = $IsWindows -or $env:OS -eq 'Windows_NT'
+  $hasXclip = [bool](Get-Command xclip -CommandType Application -ErrorAction SilentlyContinue)
+  $used = @(); $err = ''
+  foreach ($m in @(Get-ClipboardPlan $onWindows ([string]$env:DISPLAY) $hasXclip)) {
+    try {
+      if ($m -eq 'osc52') { [Console]::Write((Format-Osc52 $text)) } else { Set-Clipboard -Value $text -ErrorAction Stop }
+      $used += $m
+    } catch { $err = $_.Exception.Message }
+  }
+  $script:Flash = if ($used) { Format-CopyFlash $what $used } else { "clipboard unavailable: $err" }
   $script:FlashUntil = (Get-Date).AddSeconds(3)
+}
+
+# ---- keep window ----------------------------------------------------------------------
+# How long gone sessions and stopped subagents stay listed, in minutes: 0 = drop at once,
+# -1 = forever (∞). One setting for both; + / - step through the ladder in Step-Keep at runtime.
+# Gone rows are never pruned by age (Update-Departed): the window is applied when drawing
+# (Get-KeptDeparted), so widening it brings older rows back, including ones from earlier runs
+# loaded from the closed-sessions log (Read-ClosedHistory).
+function ConvertTo-KeepMinutes([string]$Text) {
+  $t = "$Text".Trim().ToLowerInvariant()
+  if ($t -in 'inf', 'forever', 'all', '∞') { return -1 }
+  if ($t -match '^\d+(\.\d+)?$') { return [int][math]::Round([double]$t) }   # bare number = minutes
+  # one or more <number><unit> parts, e.g. 2h, 1d12h, 1h 30m; together they must cover the whole text
+  $unit = @{ m = 1; h = 60; d = 1440; w = 10080 }
+  $parts = [regex]::Matches($t, '(\d+(?:\.\d+)?)\s*([mhdw])\s*')
+  $covered = 0; $sum = 0.0
+  foreach ($p in $parts) { $covered += $p.Length; $sum += [double]$p.Groups[1].Value * $unit[$p.Groups[2].Value] }
+  if ($t -and $parts.Count -and $covered -eq $t.Length) { return [int][math]::Round($sum) }
+  throw "'$Text' is not a keep duration: use minutes (30), 45m, 2h, 1d12h, 1w, or inf"
+}
+function Format-Keep([int]$Minutes) {
+  if ($Minutes -lt 0) { return '∞' }
+  if ($Minutes -eq 0) { return '0' }
+  $d = [math]::Floor($Minutes / 1440); $h = [math]::Floor(($Minutes % 1440) / 60); $m = $Minutes % 60
+  return "$(if ($d) { "${d}d" })$(if ($h) { "${h}h" })$(if ($m) { "${m}m" })"
+}
+# 15-minute steps up to an hour, then growing, so a few presses reach days. A value set off the
+# ladder (-Keep 20) moves to the nearest step in the direction pressed.
+function Step-Keep([int]$Minutes, [int]$Direction) {
+  $ladder = @(0, 15, 30, 45, 60, 120, 240, 480, 720, 1440, 2880, 4320, 10080, 20160, 43200)
+  if ($Direction -gt 0) {
+    if ($Minutes -lt 0) { return -1 }
+    foreach ($s in $ladder) { if ($s -gt $Minutes) { return $s } }
+    return -1
+  }
+  if ($Minutes -lt 0) { return $ladder[-1] }
+  for ($i = $ladder.Count - 1; $i -ge 0; $i--) { if ($ladder[$i] -lt $Minutes) { return $ladder[$i] } }
+  return 0
+}
+# -Keep (alias -Linger) wins; otherwise the old -SubagentWindow seconds, whose 0 meant "until the
+# parent goes away" (now ∞); otherwise 15 minutes.
+function Resolve-Keep([string]$Keep, [Nullable[int]]$SubagentWindowSeconds) {
+  if ("$Keep".Trim()) { return ConvertTo-KeepMinutes $Keep }
+  if ($null -ne $SubagentWindowSeconds) {
+    if ($SubagentWindowSeconds -le 0) { return -1 }
+    return [int][math]::Ceiling($SubagentWindowSeconds / 60)   # never rounds a real window down to "nothing"
+  }
+  return 15
+}
+function Test-KeepWindow([datetime]$At, [datetime]$Now, [int]$KeepMinutes) {
+  if ($KeepMinutes -lt 0) { return $true }
+  if ($KeepMinutes -eq 0) { return $false }
+  return ($Now - $At).TotalMinutes -le $KeepMinutes   # a future stamp (clock skew) counts as inside
+}
+# A working agent is always listed, however long its tool call runs. A stopped one stays for the keep
+# window. A thinking one that writes nothing for 15 min is a transcript ending ctop misreads rather
+# than a real generation, so it stays for the window but at least 15 min (keep 0 must not drop a
+# live agent between two writes).
+function Test-SubagentListed([datetime]$LastWrite, [datetime]$Now, [int]$KeepMinutes, [string]$State, [bool]$Finished) {
+  if ($State -eq 'working' -and -not $Finished) { return $true }
+  if (Test-KeepWindow $LastWrite $Now $KeepMinutes) { return $true }
+  if ($State -eq 'thinking' -and -not $Finished) { return ($Now - $LastWrite).TotalMinutes -le 15 }
+  return $false
+}
+# The gone entries inside the window, most recently gone first (the order history rows are built and
+# listed in). Test-KeepWindow for each, with the cutoff worked out once: it runs every frame over the
+# whole history.
+# Which sessions ctop lists, live or from history: interactive ones, and every kind with -All.
+function Test-KindListed([string]$Kind, [bool]$All) { $All -or $Kind -eq 'interactive' }
+function Get-KeptDeparted([hashtable]$Departed, [datetime]$Now, [int]$KeepMinutes) {
+  if ($KeepMinutes -eq 0) { return }
+  $cut = if ($KeepMinutes -gt 0) { $Now.AddMinutes(-$KeepMinutes) } else { [datetime]::MinValue }
+  $kept = [object[]]@(foreach ($e in @($Departed.Values)) { if ($e.GoneAt -ge $cut) { $e } })
+  $keys = [long[]]::new($kept.Count)
+  for ($i = 0; $i -lt $kept.Count; $i++) { $keys[$i] = -([datetime]$kept[$i].GoneAt).Ticks }
+  # [Array] casts pick the non-generic, in-place Sort(Array, Array): without them PowerShell 7.6 binds the
+  # generic overload to converted copies; [Array]::Sort[long, object](…) needs PowerShell 7.3+
+  [Array]::Sort([Array]$keys, [Array]$kept)
+  $kept
+}
+# Who left the roster since the last good poll. Returns one record per newly departed session for
+# the closed log; a session id that is live again (resumed) is forgotten. Never prunes by age.
+function Update-Departed([hashtable]$Departed, [object[]]$OldRoster, [object[]]$Live, [datetime]$Now) {
+  $liveIds = @($Live | ForEach-Object { [string]$_.sessionId })
+  foreach ($old in $OldRoster) {
+    $id = [string]$old.sessionId
+    if ($id -in $liveIds -or $Departed.ContainsKey($id)) { continue }
+    # same process, new session id: a /clear (the process carries on as the new id)
+    $succ = $Live | Where-Object { $_.pid -and $_.pid -eq $old.pid -and [string]$_.sessionId -ne $id } | Select-Object -First 1
+    $succId = if ($succ) { [string]$succ.sessionId } else { '' }
+    $Departed[$id] = @{ Session = $old; GoneAt = $Now; Cleared = [bool]$succ; Successor = $succId }
+    [pscustomobject]@{ Session = $old; Why = $(if ($succ) { 'cleared' } else { 'closed' }); Successor = $succId }
+  }
+  foreach ($id in @($Departed.Keys)) { if ($id -in $liveIds) { $Departed.Remove($id) } }
+}
+# The closed-sessions log as Departed entries (newest line per session id), so gone rows from
+# earlier runs can be shown. Unreadable lines are skipped.
+function Read-ClosedHistory([string]$Path) {
+  $h = @{}
+  if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $h }
+  foreach ($l in [IO.File]::ReadAllLines($Path)) {   # ReadAllLines drops a UTF-8 BOM (Windows PowerShell writes one)
+    if (-not $l.Trim()) { continue }
+    try { $r = ConvertFrom-Json -InputObject $l -ErrorAction Stop } catch { continue }
+    $id = [string]$r.sessionId
+    if (-not $id -or -not $r.closedAt) { continue }
+    # PowerShell 7 turns an ISO date string into a [datetime] while parsing; older versions leave the string
+    $c = $r.closedAt
+    try {
+      $at = if ($c -is [datetime]) { if ($c.Kind -eq [DateTimeKind]::Utc) { $c.ToLocalTime() } else { $c } }
+            else { [DateTimeOffset]::Parse([string]$c, [Globalization.CultureInfo]::InvariantCulture).LocalDateTime }
+    } catch { continue }
+    if ($h.ContainsKey($id) -and $h[$id].GoneAt -ge $at) { continue }
+    $sess = [pscustomobject]@{ sessionId = $id; name = $r.name; title = $r.title; cwd = $r.cwd; pid = $r.pid; startedAt = $r.startedAt
+                               kind = $(if ($r.kind) { [string]$r.kind } else { 'interactive' }) }
+    $h[$id] = @{ Session = $sess; GoneAt = $at; Cleared = ($r.why -eq 'cleared'); Successor = $(if ($r.successor) { [string]$r.successor } else { '' }) }
+  }
+  return $h
+}
+# Peek's line for a gone row. Claude Code deletes transcripts after cleanupPeriodDays (30 by default),
+# so an old entry may no longer be resumable.
+function Format-GoneNote([string]$Ago, [bool]$Cleared, [string]$Successor, [bool]$HasTranscript) {
+  $gone = 'no longer on disk, so it cannot be resumed'
+  if ($Cleared) {
+    $as = if ($Successor) { "session $($Successor.Substring(0, [math]::Min(8, $Successor.Length)))…" } else { 'a new session id' }
+    if ($HasTranscript) { return "  CLEARED      /clear $Ago ago — the process continues as $as; this pre-clear conversation is still resumable (below)" }
+    return "  CLEARED      /clear $Ago ago — the process continued as $as; the pre-clear transcript is $gone"
+  }
+  if ($HasTranscript) { return "  GONE         left the roster $Ago ago (transcript still on disk; resume below)" }
+  return "  GONE         left the roster $Ago ago; its transcript is $gone"
+}
+
+# ---- poll result --------------------------------------------------------------------------
+# A failed poll is not an empty roster. Only a clean exit with a JSON array counts; anything else
+# keeps the last good roster (no row goes "gone", nothing is written to the closed log) and is
+# reported on the strip. A successful [] is a real empty roster.
+function ConvertFrom-RosterPoll([int]$ExitCode, [string]$Stdout, [string]$Stderr) {
+  $why = ''; $sessions = @()
+  if ($ExitCode -ne 0) {
+    $err = @("$Stderr" -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | Select-Object -First 1
+    $why = "exit $ExitCode" + $(if ($err) { ": $err" })
+    if ($why.Length -gt 120) { $why = (Limit-Chars $why 119) + '…' }
+  } elseif (-not "$Stdout".Trim()) { $why = 'no output' }
+  elseif (-not "$Stdout".TrimStart().StartsWith('[')) { $why = 'output is not a JSON array' }
+  else {
+    # foreach: PowerShell 7 enumerates the parsed array (nothing for [], the object for one entry),
+    # Windows PowerShell returns the array itself; both come out as a flat list
+    try { $parsed = ConvertFrom-Json -InputObject $Stdout -ErrorAction Stop; $sessions = @(foreach ($x in $parsed) { $x }) }
+    catch { $why = 'invalid JSON' }
+  }
+  if ($why) { return @{ Ok = $false; Why = $why; Sessions = @() } }
+  return @{ Ok = $true; Why = $null; Sessions = $sessions }
 }
 
 # ---- closed-sessions log ----------------------------------------------------------
 # Appended whenever a session leaves the roster; survives ctop restarts. Shown with 'x'.
-function Write-ClosedLog($sess, [datetime]$when, [string]$why = 'closed') {
+function Write-ClosedLog($sess, [datetime]$when, [string]$why = 'closed', [string]$successor = '') {
   try {
     $file  = Find-Transcript $sess.sessionId
     $title = Get-SessionTitle $sess.sessionId $file
     $rec = [ordered]@{ closedAt = $when.ToString('o'); why = $why; name = $sess.name; title = $title; sessionId = $sess.sessionId
-                       cwd = $sess.cwd; pid = $sess.pid; startedAt = $sess.startedAt }
+                       cwd = $sess.cwd; pid = $sess.pid; startedAt = $sess.startedAt; kind = $sess.kind; successor = $successor }
     Add-Content -LiteralPath $script:ClosedLogPath -Value ($rec | ConvertTo-Json -Compress) -Encoding UTF8
   } catch {}
 }
@@ -893,7 +1386,8 @@ function Show-Closed {
   if ($recs.Count -eq 0) { $lines += '  (none recorded yet — sessions are logged here when they leave the roster)' }
   foreach ($r in $recs) {
     $t = ([datetime]$r.closedAt).ToString('MM-dd HH:mm')
-    $lines += "  $t  $(if ($r.why -eq 'cleared') { 'clr' } else { '   ' })  $(([string]$r.name).PadRight(14))  $($r.title)"
+    $nm = [string]$r.name; $nm += ' ' * [math]::Max(0, 14 - (Get-CellWidth $nm))   # cells, not characters
+    $lines += "  $t  $(if ($r.why -eq 'cleared') { 'clr' } else { '   ' })  $nm  $($r.title)"
     $lines += "                              claude --resume $($r.sessionId)     $($r.cwd)"
   }
   $per = [math]::Max(4, [Console]::WindowHeight - 3)
@@ -1132,18 +1626,81 @@ function Update-JobMap {
   foreach ($k in @($script:JobCpuPrev.Keys)) { if (-not $live[$k.Split('@')[0]]) { $script:JobCpuPrev.Remove($k) } }
 }
 
+# End a poll's process and everything it started. PowerShell 7 (.NET Core 3+) has Kill($true). Windows
+# PowerShell 5.1 (.NET Framework) has only Kill(), which ends the process alone: claude.cmd's cmd.exe dies
+# and its node lives on, holding the output pipe. There the descendants are found by parent process id,
+# which Windows keeps after a parent exits, and stopped as well.
+function Stop-RosterPoll($p) {
+  if (-not $p) { return }
+  $proc = $p.Proc
+  if ($proc.GetType().GetMethod('Kill', [Type[]]@([bool]))) {
+    try { $proc.Kill($true) } catch {}
+  } else {
+    $since = (Get-Date) - $(if ($p.Started) { $p.Started.Elapsed } else { [TimeSpan]::Zero }) - [TimeSpan]::FromSeconds(1)
+    $tree = @(Get-ProcessDescendants $proc.Id $since)
+    try { $proc.Kill() } catch {}
+    foreach ($d in $tree) { Stop-IfSame $d }
+  }
+  try { $proc.Dispose() } catch {}
+}
+# Windows: every process descended from $rootId, by Win32_Process parent ids, as @{ Id; Created }.
+# Parent ids outlive their processes and pids are reused, so a link is followed only when the child was
+# created after its parent (an older process naming that pid had another parent of that number), and
+# only processes created since $since count at all. ($rootId itself cannot be reused while the caller
+# holds its Process object.)
+function Get-ProcessDescendants([int]$rootId, [datetime]$since) {
+  $kids = @{}; $born = @{ $rootId = $since }
+  foreach ($x in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CreationDate -ErrorAction SilentlyContinue)) {
+    if (-not $x.CreationDate -or $x.CreationDate -lt $since) { continue }
+    $id = [int]$x.ProcessId; $pp = [int]$x.ParentProcessId
+    if ($id -eq $rootId) { $born[$rootId] = $x.CreationDate; continue }
+    $born[$id] = $x.CreationDate
+    if (-not $kids.ContainsKey($pp)) { $kids[$pp] = [Collections.Generic.List[int]]::new() }
+    $kids[$pp].Add($id)
+  }
+  $out = [Collections.Generic.List[object]]::new(); $seen = @{}; $queue = [Collections.Generic.Queue[int]]::new(); $queue.Enqueue($rootId)
+  while ($queue.Count) {
+    $id = $queue.Dequeue()
+    if (-not $kids.ContainsKey($id)) { continue }
+    foreach ($c in $kids[$id]) {
+      if ($seen.ContainsKey($c) -or $born[$c] -lt $born[$id]) { continue }   # older than its parent: not its child
+      $seen[$c] = $true; $out.Add(@{ Id = $c; Created = $born[$c] }); $queue.Enqueue($c)
+    }
+  }
+  return $out.ToArray()
+}
+# Stop a process found by Get-ProcessDescendants only if its pid still names that process (same start
+# time): between the walk and the stop it may have exited and its pid been given to another.
+function Stop-IfSame($d) {
+  $gp = Get-Process -Id $d.Id -ErrorAction SilentlyContinue
+  if (-not $gp) { return }
+  $start = $null; try { $start = $gp.StartTime } catch { return }   # cannot tell: leave it
+  if ([math]::Abs(($start - $d.Created).TotalSeconds) -lt 1) { try { $gp.Kill() } catch {} }
+}
 function Read-Roster {
   $p = $script:Poll
   if (-not $p) { return $false }
-  if (-not ($p.Proc.HasExited -and $p.Out.IsCompleted)) { return $false }
+  if (-not ($p.Proc.HasExited -and $p.Out.IsCompleted)) {
+    # Past the deadline, a stuck claude (or a child of it still holding its output open) must not block
+    # every later poll: stop it, keep the last roster, count a failure, and poll again on schedule.
+    if ($p.Started.Elapsed.TotalSeconds -lt $script:PollTimeoutS) { return $false }
+    Stop-RosterPoll $p
+    $script:PollMs = [int]$p.Started.ElapsedMilliseconds; $script:PollAt = Get-Date; $script:Poll = $null
+    $script:PollFail = "timed out after $([int]$script:PollTimeoutS)s"; $script:PollFails++
+    return $false
+  }
   $script:PollMs   = [int]$p.Started.ElapsedMilliseconds
-  $script:RosterAt = Get-Date
+  $script:PollAt   = Get-Date
   $script:Poll     = $null
   $raw = $p.Out.Result
+  $exit = $p.Proc.ExitCode
   $p.Proc.Dispose()
-  $sessions = @()
-  if ($raw) { try { $sessions = @($raw | ConvertFrom-Json) } catch { $sessions = @() } }
-  if (-not $All) { $sessions = @($sessions | Where-Object { $_.kind -eq 'interactive' }) }
+  $res = ConvertFrom-RosterPoll -ExitCode $exit -Stdout $raw -Stderr $(if ($p.Err.IsCompleted) { $p.Err.Result } else { '' })
+  if (-not $res.Ok) { $script:PollFail = $res.Why; $script:PollFails++; return $false }
+  $script:PollFail = $null; $script:PollFails = 0
+  $script:RosterAt = $script:PollAt
+  $sessions = $res.Sessions
+  $sessions = @($sessions | Where-Object { Test-KindListed ([string]$_.kind) ([bool]$All) })
   $script:BranchCache = @{}
   Update-TranscriptIndex
   Start-ProcPoll
@@ -1162,19 +1719,9 @@ function Read-Roster {
   }
   $live = @($byPid.Values)
   $i = 0; foreach ($x in $live) { $x | Add-Member -NotePropertyName _order -NotePropertyValue $i -Force; $i++ }
-  # departed: anything we knew last poll that isn't in this one lingers for $Linger minutes
-  $now = Get-Date
-  $liveIds = @($live | ForEach-Object { [string]$_.sessionId })
-  foreach ($old in $script:Roster) {
-    $id = [string]$old.sessionId
-    if ($id -notin $liveIds -and -not $script:Departed.ContainsKey($id)) {
-      $successor = $live | Where-Object { $_.pid -and $_.pid -eq $old.pid -and [string]$_.sessionId -ne $id } | Select-Object -First 1
-      $script:Departed[$id] = @{ Session = $old; GoneAt = $now; Cleared = [bool]$successor; Successor = $(if ($successor) { [string]$successor.sessionId } else { '' }) }
-      Write-ClosedLog $old $now $(if ($successor) { 'cleared' } else { 'closed' })
-    }
-  }
-  foreach ($id in @($script:Departed.Keys)) {
-    if ($id -in $liveIds -or ($now - $script:Departed[$id].GoneAt).TotalMinutes -gt $Linger) { $script:Departed.Remove($id) }
+  # departed: anything we knew last poll that isn't in this one; listed while inside the keep window
+  foreach ($d in @(Update-Departed -Departed $script:Departed -OldRoster @($script:Roster) -Live $live -Now (Get-Date))) {
+    Write-ClosedLog $d.Session (Get-Date) $d.Why $d.Successor
   }
   $script:Roster = $live
   return $true
@@ -1199,15 +1746,84 @@ function Resolve-State($s, $act, $gone, $cleared = $false) {
   }
 }
 
+# A gone row's sparkline is sampled only while it still shows activity from when it was live (it scrolls
+# off); a history row has none, and sampling it would change every such row's cells every 2 s, so the
+# row cache would re-render them all.
+function Test-SampleActivity([bool]$Gone, [string]$History) { -not $Gone -or [bool]"$History".Trim() }
+function Format-Rate([double]$Cost, $Started, [datetime]$Now) {
+  if ($Cost -le 0 -or -not $Started) { return '-' }
+  $h = ($Now - [datetime]$Started).TotalHours
+  if ($h -gt 0.05) { '${0:N2}' -f ($Cost / $h) } else { '-' }
+}
+# Gone rows are rebuilt only when their transcript changes. Their clock-dependent cells (Update-GoneRow)
+# are refreshed only for the rows on screen: RefreshIds holds the ids drawn last frame (and the peeked
+# one), and a row that scrolls into view is caught up before the frame is drawn (main loop), so a
+# visible age is always current and an off-screen row costs next to nothing. sessionId -> @{ Key; Row }
+$script:GoneRows = @{}
+$script:GoneBuildMs = 120   # per frame, for building gone rows not built yet
+$script:GonePending = 0
+$script:RefreshIds = [System.Collections.Generic.HashSet[string]]::new()   # refresh these this frame
+$script:GoneCheckedAt = [datetime]::MinValue   # when every gone row's transcript was last checked
+$script:FreshIds   = [System.Collections.Generic.HashSet[string]]::new()   # refreshed this frame
+function Update-GoneRow($r) {
+  $s = $r._Src
+  $file = Find-Transcript $r._SessionId
+  $r.STATE    = Resolve-State $s $r._Act $r._Gone ([bool]$r._Cleared)
+  $r.AGE      = if ($s.startedAt) { Get-Age $s.startedAt } else { '-' }
+  $r.IDLE     = if ($file) { Get-Since $file.LastWriteTime } else { '-' }
+  $r.RATE     = Format-Rate ([double]$r._Act.Cost) $r._StartedAt (Get-Date)
+  $r.ACTIVITY = $script:History[$r._SessionId]
+  $r._Dirty   = $true   # Render-Table re-formats it
+}
 function Build-Rows {
+  if ($script:GoneRows.Count -gt $script:Departed.Count) {
+    foreach ($id in @($script:GoneRows.Keys)) { if (-not $script:Departed.ContainsKey($id)) { $script:GoneRows.Remove($id) } }
+  }
   $sample = ((Get-Date) - $script:HistoryAt).TotalSeconds -ge 2
   if ($sample) { $script:HistoryAt = Get-Date }
-  $all = @($script:Roster | ForEach-Object { @{ S = $_; Gone = $null; Cleared = $false; Successor = '' } })
-  if ($script:ShowGone) { $all += @($script:Departed.Values | ForEach-Object { @{ S = $_.Session; Gone = $_.GoneAt; Cleared = $_.Cleared; Successor = $_.Successor } }) }
+  # A gone row is built once (reading its transcript), then reused. Building is capped per frame so a
+  # long history (startup, or + widening the window) fills in over a few frames, newest first, instead
+  # of holding the screen; live sessions are always built. GonePending: rows still to build.
+  $budget = [Diagnostics.Stopwatch]::StartNew()
+  $script:GonePending = 0
+  $script:FreshIds.Clear()
+  # an off-screen gone row is passed through as built; whether its transcript changed (resumed elsewhere,
+  # or deleted by Claude Code's cleanup) is checked every frame for the rows on screen and every 30 s for
+  # all of them (a check of 300 rows costs ~60 ms: every roster poll it was a visible hitch)
+  $validate = ((Get-Date) - $script:GoneCheckedAt).TotalSeconds -ge 30
+  if ($validate) { $script:GoneCheckedAt = Get-Date }
+  $all = [System.Collections.Generic.List[object]]::new()
+  foreach ($x in $script:Roster) { $all.Add(@{ S = $x; Gone = $null; Cleared = $false; Successor = '' }) }
+  if ($script:ShowGone) { foreach ($d in $script:KeptGone) { $all.Add($d) } }   # Departed records: Session, GoneAt, Cleared, Successor
   foreach ($e in $all) {
-    $s = $e.S; $gone = $e.Gone; $cleared = $e.Cleared
+    if ($e.GoneAt) {
+      $id = [string]$e.Session.sessionId
+      $gc = $script:GoneRows[$id]
+      if ($gc -and -not $validate -and -not $script:RefreshIds.Contains($id)) {
+        if ($sample) { $h = $script:History[$id]; if ($h -and $h.Trim()) { Add-Sample $id $gc.Row.STATE 0 } }   # its activity scrolls off
+        $gc.Row; continue
+      }
+      $s = $e.Session; $gone = $e.GoneAt; $cleared = $e.Cleared
+    } else { $s = $e.S; $gone = $null; $cleared = $false }
+    if ($gone) {
+      $gf = Find-Transcript $s.sessionId
+      $gk = Get-GoneKey $gf $e $s.sessionId
+      $gc = $script:GoneRows[$s.sessionId]
+      if ($gc -and $gc.Key -ceq $gk) {
+        # a just-gone row's sparkline keeps scrolling its activity off, on screen or not
+        if ($sample -and (Test-SampleActivity $true $script:History[$s.sessionId])) { Add-Sample $s.sessionId $gc.Row.STATE 0 }
+        if ($script:RefreshIds.Contains([string]$s.sessionId)) { Update-GoneRow $gc.Row; [void]$script:FreshIds.Add([string]$s.sessionId) }
+        $gc.Row; continue
+      }
+      if ($budget.ElapsedMilliseconds -ge $script:GoneBuildMs) { $script:GonePending++; continue }
+      # (re)building: find its agent files first, then key the row on what is there BEFORE anything is
+      # read. A write that lands while it is built changes the files, so the next check rebuilds; a key
+      # taken after the build could take in that write and never count it.
+      $null = Get-AgentFiles $gf $s.sessionId
+      $gk = Get-GoneKey $gf $e $s.sessionId
+    }
     $proc = if ($s.pid -and -not $gone) { Get-Process -Id $s.pid } else { $null }
-    $file = Find-Transcript $s.sessionId
+    $file = if ($gone) { $gf } else { Find-Transcript $s.sessionId }   # a gone row reads the file its key names
     $act  = Get-LastAction $file $s.sessionId
     $cwd  = Normalize-Path $(if ($act.Cwd) { $act.Cwd } else { [string]$s.cwd })   # transcript knows where the session is now
     $git  = Get-GitInfo $cwd
@@ -1279,6 +1895,8 @@ function Build-Rows {
           _Desc       = if ($meta.description) { [string]$meta.description } else { '' }
           _Transcript = $sf.FullName
           _StartedAt  = $sf.CreationTime
+          _Group = $null; _TreeCost = $null; _LaunchCost = $null; _LaunchN = $null; _Launcher = $null; _LaunchedNames = $null; _TreeLast = $null   # Sort-Rows / Render-Table fill these
+      _Lines = $null; _LinesSig = $null; _Dirty = $true; _Widths = $null   # Render-Table's formatted lines and cell widths, reused while the row is unchanged
         }
       }
     }
@@ -1325,7 +1943,7 @@ function Build-Rows {
     $active = $state -in 'working','thinking','awaiting agent' -or $pollInTurn -or $state -like 'waiting*'   # awaiting agent: still its turn
     $prow = [pscustomobject]@{
       NAME     = if ($s.name) { $s.name } elseif ($s.id) { $s.id } else { '-' }
-      TITLE    = $($t = Get-SessionTitle $s.sessionId $file; if ($t) { $t } elseif ($file) { '(untitled)' } else { '' })
+      TITLE    = $($t = Get-SessionTitle $s.sessionId $file; if ($t) { $t } elseif ($file) { '(untitled)' } elseif ($s.title) { [string]$s.title } else { '' })   # title: logged one, for a gone row whose transcript was deleted
       KIND     = $s.kind
       STATE    = $state
       PID      = if ($s.pid) { $s.pid } else { '-' }
@@ -1341,8 +1959,8 @@ function Build-Rows {
       MODEL    = $act.Model
       BRANCH   = $($b = if ($act.GitBranch) { $act.GitBranch } else { $git.Branch }; if ($git.Worktree) { 'wt:' + $b } else { $b })
       COST     = if ($act.Cost -gt 0) { '${0:N2}' -f $act.Cost } else { '-' }
-      RATE     = if ($act.Cost -gt 0 -and $s.startedAt) { $h = ((Get-Date) - [DateTimeOffset]::FromUnixTimeMilliseconds($s.startedAt).LocalDateTime).TotalHours; if ($h -gt 0.05) { '${0:N2}' -f ($act.Cost / $h) } else { '-' } } else { '-' }
-      ACTIVITY = $(if ($sample) { Add-Sample $s.sessionId $state $act.Compacts }; $script:History[$s.sessionId])
+      RATE     = Format-Rate ([double]$act.Cost) (ConvertFrom-UnixMs $s.startedAt) (Get-Date)
+      ACTIVITY = $(if ($sample -and (Test-SampleActivity ([bool]$gone) $script:History[$s.sessionId])) { Add-Sample $s.sessionId $state $act.Compacts }; $script:History[$s.sessionId])
       'LAST ACTION' = $act.Last
       CWD      = $cwd
       # hidden (not in $script:Columns), used by sorting and the peek view
@@ -1361,15 +1979,21 @@ function Build-Rows {
       _LaunchedBy = $(if ($s.pid -and -not $gone) { $script:LaunchedBy[[int]$s.pid] } else { $null })   # @{ SessPid; JobPid; Label } or $null
       # the session's own cost plus every agent it ever ran, listed or aged out (each file's scan is
       # cached and incremental, so an unchanged agent costs one length check)
-      _AgentCost  = $(if ($gone) { 0.0 } else { $sum = 0.0; foreach ($af in @($script:AllAgents[$s.sessionId])) { if ($af) { $sum += [double](Update-Scan $af ('sub:' + $af.FullName)).Cost } }; $sum })
-      _AgentN     = $(if ($gone) { 0 } else { @($script:AllAgents[$s.sessionId] | Where-Object { $_ }).Count })
+      # gone or live, a session's subagents cost what they cost: a gone row is built once (then cached),
+      # so finding its agent files then is cheap; its agents are not listed as rows
+      _AgentCost  = $($sum = 0.0; foreach ($af in @($script:AllAgents[$s.sessionId])) { if ($af) { $sum += [double](Update-Scan $af ('sub:' + $af.FullName)).Cost } }; $sum)
+      _AgentN     = @($script:AllAgents[$s.sessionId] | Where-Object { $_ }).Count
       _Act        = $act
       _Transcript = if ($file) { $file.FullName } else { '-' }
-      _StartedAt  = if ($s.startedAt) { [DateTimeOffset]::FromUnixTimeMilliseconds($s.startedAt).LocalDateTime } else { $null }
+      _StartedAt  = ConvertFrom-UnixMs $s.startedAt
+      _Src        = $s
+      _Group = $null; _TreeCost = $null; _LaunchCost = $null; _LaunchN = $null; _Launcher = $null; _LaunchedNames = $null; _TreeLast = $null   # Sort-Rows / Render-Table fill these
+      _Lines = $null; _LinesSig = $null; _Dirty = $true; _Widths = $null   # Render-Table's formatted lines and cell widths, reused while the row is unchanged
     }
     $live = @($kids | Where-Object { $_.STATE -in 'working','thinking' -or $_.STATE -like 'awaiting*' }).Count
     # the +N badge stands in for hidden subagent rows; when the rows are shown they speak for themselves
     $prow | Add-Member -NotePropertyName _LiveKids -NotePropertyValue $(if ($script:ShowSubagents) { 0 } else { $live }) -Force
+    if ($gone) { $script:GoneRows[$s.sessionId] = @{ Key = $gk; Row = $prow }; [void]$script:FreshIds.Add([string]$s.sessionId) }
     $prow
     if ($script:ShowSubagents) { $kids }
   }
@@ -1382,6 +2006,13 @@ function Build-Rows {
 $script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx')
 $script:SortMode  = [array]::IndexOf($script:SortModes, $Sort)
 function Sort-Rows([object[]]$rows) {
+  # The fields filled in below. Build-Rows creates rows with them, so filling them is a plain assignment
+  # (Add-Member per row per frame was most of the sort time with a few hundred rows); rows built
+  # elsewhere (tests) get them here.
+  foreach ($r in $rows) {
+    if ($r.PSObject.Properties['_Group']) { continue }
+    foreach ($n in '_Group', '_TreeCost', '_LaunchCost', '_LaunchN', '_Launcher', '_LaunchedNames', '_TreeLast') { if (-not $r.PSObject.Properties[$n]) { $r.PSObject.Properties.Add([psnoteproperty]::new($n, $null)) } }
+  }
   $mode = $script:SortModes[$script:SortMode]
   $key = switch ($mode) {
     'activity' { { param($r) if ($r._Gone) { 3 } elseif ($r.STATE -like 'waiting*') { 0 } elseif ($r.STATE -in 'working','thinking' -or $r.STATE -like 'awaiting*' -or $r.STATE -eq 'polling') { 1 } elseif ($r.STATE -eq 'idle') { 2 } else { 2 } } }
@@ -1401,66 +2032,101 @@ function Sort-Rows([object[]]$rows) {
     if (-not $l -or $l._SessionId -eq $r._SessionId) { continue }
     if (-not $launchKids.ContainsKey($l._SessionId)) { $launchKids[$l._SessionId] = @() }
     $launchKids[$l._SessionId] += $r; $isLaunched[$r._SessionId] = $true
-    $r | Add-Member -NotePropertyName _Launcher -NotePropertyValue ([string]$l.NAME).Trim() -Force
+    $r._Launcher = ([string]$l.NAME).Trim()
   }
   foreach ($id in @($launchKids.Keys)) {
     $lr = $rows | Where-Object { $_._SessionId -eq $id -and -not $_._Parent } | Select-Object -First 1
-    if ($lr) { $lr | Add-Member -NotePropertyName _LaunchedNames -NotePropertyValue (@($launchKids[$id] | ForEach-Object { ([string]$_.NAME).Trim() }) -join ', ') -Force }
+    if ($lr) { $lr._LaunchedNames = @($launchKids[$id] | ForEach-Object { ([string]$_.NAME).Trim() }) -join ', ' }
   }
-  $parents = @($rows | Where-Object { -not $_._Parent -and -not $isLaunched.ContainsKey($_._SessionId) } |
-    Sort-Object @{ e = { if ($mode -ne 'activity' -and $_._Gone) { 1 } else { 0 } } },
-                @{ e = { & $key $_ } },
-                @{ e = { if ($_._StartedAt) { $_._StartedAt.Ticks } else { [long]::MaxValue } } },
-                @{ e = { $_._SessionId } })
+  # Live sessions sort on the mode's key. Gone ones always follow them, most recently gone first (ties,
+  # which one poll's departures share: session id), or on the mode's key in cost / ctx. Gone rows get a
+  # .NET sort on a string key: Sort-Object with script-block keys was most of the sort time with a long
+  # history.
+  $liveP = [System.Collections.Generic.List[object]]::new(); $goneP = [System.Collections.Generic.List[object]]::new()
+  foreach ($r in $rows) {
+    if ($r._Parent -or $isLaunched.ContainsKey($r._SessionId)) { continue }
+    if ($r._Gone) { $goneP.Add($r) } else { $liveP.Add($r) }
+  }
+  $parents = @($liveP | Sort-Object @{ e = { & $key $_ } },
+                                    @{ e = { if ($_._StartedAt) { $_._StartedAt.Ticks } else { [long]::MaxValue } } },
+                                    @{ e = { $_._SessionId } })
+  if ($mode -in 'cost', 'ctx') {
+    $parents += @($goneP | Sort-Object @{ e = { & $key $_ } }, @{ e = { -([datetime]$_._Gone).Ticks } }, @{ e = { $_._SessionId } })
+  } elseif ($goneP.Count) {
+    $gone = $goneP.ToArray(); $gk = [string[]]::new($gone.Count)
+    $max = [datetime]::MaxValue.Ticks
+    for ($i = 0; $i -lt $gone.Count; $i++) { $gk[$i] = '{0:D19}|{1}' -f ($max - ([datetime]$gone[$i]._Gone).Ticks), $gone[$i]._SessionId }
+    [Array]::Sort([Array]$gk, [Array]$gone, [Collections.IComparer][StringComparer]::Ordinal)   # in place; see Get-KeptDeparted
+    $parents += $gone
+  }
   # Σ: own + agents + (recursively) sessions it launched
   $sumSeen = @{}
   function Sum-Tree($p) {
     if ($sumSeen.ContainsKey($p._SessionId)) { return 0.0 }; $sumSeen[$p._SessionId] = $true
     $own = [double]$p._Act.Cost + [double]$p._AgentCost; $l = 0.0; $ln = 0
     foreach ($lk in @($launchKids[$p._SessionId])) { if ($lk) { $l += Sum-Tree $lk; $ln++ } }
-    $p | Add-Member -NotePropertyName _TreeCost -NotePropertyValue ($own + $l) -Force
-    $p | Add-Member -NotePropertyName _LaunchCost -NotePropertyValue $l -Force
-    $p | Add-Member -NotePropertyName _LaunchN -NotePropertyValue $ln -Force
+    $p._TreeCost = $own + $l; $p._LaunchCost = $l; $p._LaunchN = $ln
     return $own + $l
   }
-  foreach ($p in $parents) { [void](Sum-Tree $p) }
+  foreach ($p in $parents) {
+    # a gone row has no agents listed and launched nothing: its tree is itself (no call per row)
+    if ($p._Gone -and -not $launchKids.ContainsKey($p._SessionId)) { $p._TreeCost = [double]$p._Act.Cost + [double]$p._AgentCost; $p._LaunchCost = 0.0; $p._LaunchN = 0; continue }
+    [void](Sum-Tree $p)
+  }
+  # parent session id -> its agent rows, built once (a lookup per session was O(sessions × rows))
+  $kidsOf = @{}
+  foreach ($r in $rows) {
+    if (-not $r._Parent) { continue }
+    $pk = [string]$r._Parent
+    if (-not $kidsOf.ContainsKey($pk)) { $kidsOf[$pk] = [System.Collections.Generic.List[object]]::new() }
+    $kidsOf[$pk].Add($r)
+  }
   $out = [System.Collections.Generic.List[object]]::new(); $done = @{}
   # one session, its subagent tree, then the sessions it launched; $base = how deep the session sits
   function Emit-Group($p, [int]$base, [string]$rootId) {
     if ($done.ContainsKey($p._SessionId)) { return }; $done[$p._SessionId] = $true
-    $p | Add-Member -NotePropertyName _Group -NotePropertyValue $rootId -Force
+    $p._Group = $rootId
     if ($base -gt 0) {
       $p.NAME = ('  ' * $base) + '└ ' + ([string]$p.NAME).Trim()
       $p | Add-Member -NotePropertyName _Depth -NotePropertyValue $base -Force
     }
     $out.Add($p)
-    $kids = @($rows | Where-Object { $_._Parent -eq $p._SessionId })
-    $place = {   # a subagent row, shifted under a launched session
-      param($k)
-      $k | Add-Member -NotePropertyName _Group -NotePropertyValue $rootId -Force
-      if ($base -gt 0) { $k.NAME = ('  ' * $base) + [string]$k.NAME; $k._Depth = [int]$k._Depth + $base }
-      $out.Add($k)
+    # @(if …): an if's output unrolls, so one agent would come back as a bare object, and Windows
+    # PowerShell 5.1 gives a PSCustomObject no .Count
+    $kids = @(if ($kidsOf.ContainsKey([string]$p._SessionId)) { $kidsOf[[string]$p._SessionId] })
+    if ($kids.Count) {
+      $place = {   # a subagent row, shifted under a launched session
+        param($k)
+        $k._Group = $rootId
+        if ($base -gt 0) { $k.NAME = ('  ' * $base) + [string]$k.NAME; $k._Depth = [int]$k._Depth + $base }
+        $out.Add($k)
+      }
+      # depth-first: agents spawned by the session, each followed by the agents it spawned, and so on
+      $bySpawner = @{}
+      foreach ($k in $kids) { $sk = [string]$k._Spawner; if (-not $bySpawner.ContainsKey($sk)) { $bySpawner[$sk] = @() }; $bySpawner[$sk] += $k }
+      $stack = New-Object System.Collections.Generic.Stack[object]
+      $roots = @($bySpawner[''] | Sort-Object @{ e = { $_._StartedAt.Ticks } }, @{ e = { $_._SessionId } })
+      for ($i = $roots.Count - 1; $i -ge 0; $i--) { $stack.Push($roots[$i]) }
+      $seen = @{}
+      while ($stack.Count -gt 0) {
+        $k = $stack.Pop()
+        & $place $k; $seen[$k._SessionId] = $true
+        $children = @($bySpawner[[string]$k._SessionId] | Sort-Object @{ e = { $_._StartedAt.Ticks } }, @{ e = { $_._SessionId } })
+        for ($i = $children.Count - 1; $i -ge 0; $i--) { $stack.Push($children[$i]) }
+      }
+      # anything whose spawner couldn't be resolved still gets listed
+      foreach ($k in @($kids | Where-Object { -not $seen.ContainsKey($_._SessionId) } | Sort-Object @{ e = { $_._StartedAt.Ticks } })) { & $place $k }
     }
-    # depth-first: agents spawned by the session, each followed by the agents it spawned, and so on
-    $bySpawner = @{}
-    foreach ($k in $kids) { $sk = [string]$k._Spawner; if (-not $bySpawner.ContainsKey($sk)) { $bySpawner[$sk] = @() }; $bySpawner[$sk] += $k }
-    $stack = New-Object System.Collections.Generic.Stack[object]
-    $roots = @($bySpawner[''] | Sort-Object @{ e = { $_._StartedAt.Ticks } }, @{ e = { $_._SessionId } })
-    for ($i = $roots.Count - 1; $i -ge 0; $i--) { $stack.Push($roots[$i]) }
-    $seen = @{}
-    while ($stack.Count -gt 0) {
-      $k = $stack.Pop()
-      & $place $k; $seen[$k._SessionId] = $true
-      $children = @($bySpawner[[string]$k._SessionId] | Sort-Object @{ e = { $_._StartedAt.Ticks } }, @{ e = { $_._SessionId } })
-      for ($i = $children.Count - 1; $i -ge 0; $i--) { $stack.Push($children[$i]) }
-    }
-    # anything whose spawner couldn't be resolved still gets listed
-    foreach ($k in @($kids | Where-Object { -not $seen.ContainsKey($_._SessionId) } | Sort-Object @{ e = { $_._StartedAt.Ticks } })) { & $place $k }
-    foreach ($lk in @($launchKids[$p._SessionId] | Sort-Object @{ e = { if ($_._StartedAt) { $_._StartedAt.Ticks } else { [long]::MaxValue } } }, @{ e = { $_._SessionId } })) {
-      Emit-Group $lk ($base + 1) $rootId
+    if ($launchKids.ContainsKey($p._SessionId)) {
+      foreach ($lk in @($launchKids[$p._SessionId] | Sort-Object @{ e = { if ($_._StartedAt) { $_._StartedAt.Ticks } else { [long]::MaxValue } } }, @{ e = { $_._SessionId } })) {
+        Emit-Group $lk ($base + 1) $rootId
+      }
     }
   }
-  foreach ($p in $parents) { Emit-Group $p 0 $p._SessionId }
+  foreach ($p in $parents) {
+    if ($p._Gone -and -not $kidsOf.ContainsKey([string]$p._SessionId) -and -not $launchKids.ContainsKey($p._SessionId)) { $p._Group = $p._SessionId; $out.Add($p); continue }
+    Emit-Group $p 0 $p._SessionId
+  }
   return $out.ToArray()   # unrolled: the caller wraps it in @()
 }
 
@@ -1498,10 +2164,12 @@ function Cell-Color([string]$col, $r) {
     default    { '' }
   }
 }
-# "45s" / "12m" / "6h38m" -> minutes
+# An age as Format-Since writes it ("45s", "12m", "6h", "1d1h", "40d") -> minutes, for the color
+# thresholds (2 / 10 / 30 min). Days count too: a "1d" read as 0 turned a day-old stall green.
 function Minutes([string]$t) {
   if (-not $t) { return 0 }
   $m = 0.0
+  if ($t -match '(\d+)d') { $m += 1440 * [int]$Matches[1] }
   if ($t -match '(\d+)h') { $m += 60 * [int]$Matches[1] }
   if ($t -match '(\d+)m') { $m += [int]$Matches[1] }
   if ($t -match '^(\d+)s$') { $m += [int]$Matches[1] / 60 }
@@ -1553,10 +2221,13 @@ function Clean([string]$text) {
   ($text -replace '[\x00-\x1F\x7F]+', ' ') -replace '(?<=\S)\s{2,}', ' '
 }
 
+# Exactly $width cells: cut with … when longer, padded when shorter.
 function Fit([string]$text, [int]$width, [string]$align) {
   $text = Clean $text
-  if ($text.Length -gt $width) { $text = $text.Substring(0, [math]::Max(0, $width - 1)) + '…' }
-  if ($align -eq 'R') { $text.PadLeft($width) } else { $text.PadRight($width) }
+  $w = Get-CellWidth $text
+  if ($w -gt $width) { $text = (Limit-Cells $text ([math]::Max(0, $width - 1))) + '…'; $w = Get-CellWidth $text }
+  $pad = ' ' * [math]::Max(0, $width - $w)
+  if ($align -eq 'R') { $pad + $text } else { $text + $pad }
 }
 
 # Shorten a path to fit: ~ for home, then keep the tail (the part that identifies a worktree).
@@ -1564,8 +2235,8 @@ function Fit-Path([string]$path, [int]$width) {
   if (-not $path) { return ''.PadRight($width) }
   $p = Clean $path
   if ($HOME -and $p.StartsWith($HOME, [StringComparison]::OrdinalIgnoreCase)) { $p = '~' + $p.Substring($HOME.Length) }
-  if ($p.Length -gt $width) { $p = '…' + $p.Substring($p.Length - ($width - 1)) }
-  $p.PadRight($width)
+  if ((Get-CellWidth $p) -gt $width) { $p = '…' + (Last-Cells $p ($width - 1)) }
+  $p + ' ' * [math]::Max(0, $width - (Get-CellWidth $p))
 }
 
 # Allocate widths for a set of columns inside $avail. Returns the visible columns (declared
@@ -1594,7 +2265,13 @@ function Layout-Columns([object[]]$candidates, [object[]]$rows, [int]$avail, [st
     if ($c.Auto) { $c.Fixed = Auto-Width $c.Name $c.Floor $rows; $c.Natural = $c.Fixed; continue }
     if ($c.Fixed -gt 0) { $c.Natural = $c.Fixed; continue }
     $seen = $c.Min
-    foreach ($r in $rows) { $l = ([string]$r.($c.Name)).Length; if ($l -gt $seen) { $seen = $l } }
+    foreach ($r in $rows) {
+      # widths in cells, kept on the row while it is unchanged (off-screen rows are measured once)
+      if ($r._Dirty -or $null -eq $r._Widths) { $r._Widths = @{} }
+      $l = $r._Widths[$c.Name]
+      if ($null -eq $l) { $l = Get-CellWidth ([string]$r.($c.Name)); $r._Widths[$c.Name] = $l }
+      if ($l -gt $seen) { $seen = $l }
+    }
     $hw = $script:HighWater[$c.Name]
     if (-not $hw -or $seen -gt $hw) { $script:HighWater[$c.Name] = $seen; $hw = $seen }
     $wrap = $script:Layouts[$script:LayoutMode] -eq 'wrap'
@@ -1649,22 +2326,36 @@ function Layout-Columns([object[]]$candidates, [object[]]$rows, [int]$avail, [st
 function Wrap-Cell([string]$text, [int]$width, [int]$maxLines, [bool]$isPath) {
   $text = Clean $text
   if ($isPath -and $HOME -and $text.StartsWith($HOME, [StringComparison]::OrdinalIgnoreCase)) { $text = '~' + $text.Substring($HOME.Length) }
-  if ($text.Length -le $width) { return ,@($text) }
-  if ($maxLines -le 1) { return ,@($text.Substring(0, $width - 1) + '…') }
+  if ((Get-CellWidth $text) -le $width) { return ,@($text) }
+  if ($maxLines -le 1) { return ,@((Limit-Cells $text ($width - 1)) + '…') }
   if ($isPath) {
-    $room = $width * $maxLines
-    if ($text.Length -gt $room) { $text = '…' + $text.Substring($text.Length - ($room - 1)) }
-    $parts = @(); for ($i = 0; $i -lt $text.Length; $i += $width) { $parts += $text.Substring($i, [math]::Min($width, $text.Length - $i)) }
+    # keep the tail (it identifies a worktree) in at most $maxLines lines. A wide character that does not
+    # fit at a line end leaves that cell empty, so width × lines may not hold: give up a cell and retry.
+    $full = $text
+    for ($room = $width * $maxLines; $room -ge 1; $room--) {
+      $text = if ((Get-CellWidth $full) -gt $room) { '…' + (Last-Cells $full ($room - 1)) } else { $full }
+      $parts = @(); $rest = $text
+      while ($rest) {
+        $head = Limit-Cells $rest $width
+        if (-not $head) { $head = [Globalization.StringInfo]::GetNextTextElement($rest, 0) }   # wider than the column
+        $parts += $head; $rest = $rest.Substring($head.Length)
+      }
+      if ($parts.Count -le $maxLines) { break }
+    }
     return ,$parts
   }
   $parts = @(); $rest = $text
-  while ($rest.Length -gt $width -and $parts.Count -lt $maxLines - 1) {
-    $cut = $rest.LastIndexOf(' ', $width)
-    if ($cut -lt [math]::Floor($width * 0.5)) { $cut = $width }
+  while ((Get-CellWidth $rest) -gt $width -and $parts.Count -lt $maxLines - 1) {
+    # the most that fits, back to its last space if that keeps at least half the width
+    $head = Limit-Cells $rest $width
+    if (-not $head) { $head = [Globalization.StringInfo]::GetNextTextElement($rest, 0) }
+    $cut = $head.Length
+    $sp = $head.LastIndexOf(' ')
+    if ($sp -gt 0 -and (Get-CellWidth $head.Substring(0, $sp)) -ge [math]::Floor($width * 0.5)) { $cut = $sp }
     $parts += $rest.Substring(0, $cut).TrimEnd()
     $rest = $rest.Substring($cut).TrimStart()
   }
-  if ($rest.Length -gt $width) { $rest = $rest.Substring(0, $width - 1) + '…' }
+  if ((Get-CellWidth $rest) -gt $width) { $rest = (Limit-Cells $rest ($width - 1)) + '…' }
   $parts += $rest
   return ,$parts
 }
@@ -1700,13 +2391,15 @@ function Format-Row([object[]]$cols, $r, [string]$sep, [int]$maxLines) {
   for ($i = 0; $i -lt $height; $i++) {
     $lines += ($cols | ForEach-Object {
       $piece = if ($i -lt $cells[$_.Name].Count) { $cells[$_.Name][$i] } else { '' }
-      $padded = if ($_.Align -eq 'R') { $piece.PadLeft($_.Width) } else { $piece.PadRight($_.Width) }
+      $gap = ' ' * [math]::Max(0, $_.Width - (Get-CellWidth $piece))   # in cells: a CJK name takes two per character
+      $padded = if ($_.Align -eq 'R') { $gap + $piece } else { $piece + $gap }
       $color = Cell-Color $_.Name $r
       if ($_.Name -eq 'STATE' -and $r._LiveKids -gt 0 -and $i -eq 0) {
         # rollup badge: the session's own state in its usual color, then +N live subagents in green
         $own = [string]$r.STATE; $badge = " +$($r._LiveKids)"
-        if ($own.Length + $badge.Length -le $_.Width) {
-          (Paint $own $color) + (Paint $badge 'green') + (' ' * ($_.Width - $own.Length - $badge.Length))
+        $used = (Get-CellWidth $own) + $badge.Length   # cells: a state can carry wide text
+        if ($used -le $_.Width) {
+          (Paint $own $color) + (Paint $badge 'green') + (' ' * ($_.Width - $used))
         } else { Paint $padded $color }
       }
       elseif ($color -eq 'spark') { Paint-Spark $padded } else { Paint $padded $color }
@@ -1757,9 +2450,9 @@ function Render-Table([object[]]$rows, [string]$selectedId) {
   if ($script:Compact) { $cands = @($cands | Where-Object { $_.Priority -ge 60 }) }
   $maxLines = if ($script:Layouts[$script:LayoutMode] -eq 'wrap') { [math]::Max(1, $WrapLines) } else { 1 }
   $cols = Layout-Columns $cands $rows $avail $sep
-  $out = @()
-  $out += ($cols | ForEach-Object { Fit $_.Name $_.Width $_.Align }) -join $sep
-  $out += ($cols | ForEach-Object { '-' * $_.Width }) -join $sep
+  $out = [System.Collections.Generic.List[object]]::new()   # a List: += on an array copies it every time
+  $out.Add((($cols | ForEach-Object { Fit $_.Name $_.Width $_.Align }) -join $sep))
+  $out.Add((($cols | ForEach-Object { '-' * $_.Width }) -join $sep))
   # tree shape: a child is the last at its level if no later sibling (same session, same depth)
   # appears before the group ends or climbs back above its depth
   for ($i = 0; $i -lt $rows.Count; $i++) {
@@ -1772,7 +2465,7 @@ function Render-Table([object[]]$rows, [string]$selectedId) {
       if ([int]$n._Depth -lt [int]$r._Depth) { break }
       if ([int]$n._Depth -eq [int]$r._Depth) { $last = $false; break }
     }
-    $r | Add-Member -NotePropertyName _TreeLast -NotePropertyValue $last -Force
+    $r._TreeLast = $last
   }
   # a faint rule between session groups, only while child rows are on screen
   $grouped = @($rows | Where-Object { $_._Parent -or $_._Depth }).Count -gt 0
@@ -1782,14 +2475,18 @@ function Render-Table([object[]]$rows, [string]$selectedId) {
   # for scrolling: which body lines belong to the selected row, and which row each line belongs to
   $script:SelSpan = $null; $script:LineRow = [System.Collections.Generic.List[int]]::new(); $ord = 0
   foreach ($r in $rows) {
-    if ($grouped -and -not $r._Parent -and -not $r._Depth -and -not $first) { $out += @{ Text = ('╌' * $ruleW); Fg = 'DarkGray' }; $script:LineRow.Add(-1) }
+    if ($grouped -and -not $r._Parent -and -not $r._Depth -and -not $first) { $out.Add(@{ Text = ('╌' * $ruleW); Fg = 'DarkGray' }); $script:LineRow.Add(-1) }
     $first = $false
     $start = $out.Count
-    foreach ($line in (Get-RowLines $cols $r $sep $maxLines $sig)) { $out += Style-Line $line $r $selectedId $false; $script:LineRow.Add($ord) }
+    # an unchanged row (a gone row off screen, say) reuses its lines without even building its cache key
+    if ($r._Dirty -or $r._LinesSig -ne $sig -or $null -eq $r._Lines) {
+      $r._Lines = Get-RowLines $cols $r $sep $maxLines $sig; $r._LinesSig = $sig; $r._Dirty = $false
+    }
+    foreach ($line in $r._Lines) { $out.Add($line); $script:LineRow.Add($ord) }   # styled by the main loop, on screen only
     if ($selectedId -and $r._SessionId -eq $selectedId) { $script:SelSpan = @(($start - 2), ($out.Count - 3)) }   # body-relative
     $ord++
   }
-  return $out
+  return $out.ToArray()
 }
 
 # ---- peek view ------------------------------------------------------------------
@@ -1808,8 +2505,7 @@ function Build-Peek([object]$r) {
     '',
     "  NAME         $($r.NAME.Trim())",
     $(if ($r.TITLE) { Peek-Block 'TITLE' $r.TITLE $pw } else { $null }),
-    $(if ($r._Gone -and $r._Cleared) { "  CLEARED      /clear $(Get-Since $r._Gone) ago — the process continues as session $($r._Successor.Substring(0,8))…; this pre-clear conversation is still resumable (below)" }
-      elseif ($r._Gone) { "  GONE         left the roster $(Get-Since $r._Gone) ago (was still on disk; resume below)" } else { $null }),
+    $(if ($r._Gone) { Format-GoneNote -Ago (Get-Since $r._Gone) -Cleared ([bool]$r._Cleared) -Successor ([string]$r._Successor) -HasTranscript ($r._Transcript -and $r._Transcript -ne '-') } else { $null }),
     "  KIND         $($r.KIND)",
     "  STATE        $(Paint $r.STATE (Cell-Color 'STATE' $r))$(if ($r._SupStatus) { "      supervisor says: $($r._SupStatus)" })",
     $(if ($r.STATE -eq 'polling') { "  POLLING      a wait loop: idle until something external changes (a file, a log marker, another process)" } else { $null }),
@@ -1850,6 +2546,7 @@ function Build-Peek([object]$r) {
     "  TRANSCRIPT   $($r._Transcript)",
     '',
     $(if ($r._Parent) { "  (subagents run inside the parent session; resume the parent:  claude --resume $($r._Parent))" }
+      elseif ($r._Gone -and -not ($r._Transcript -and $r._Transcript -ne '-')) { $null }
       else { "  resume in a terminal:   claude --resume $($r._SessionId)" })
   )
   $flat = @(); foreach ($l in $lines) { if ($null -eq $l) { continue }; if ($l -is [array]) { $flat += $l } else { $flat += $l } }
@@ -1875,7 +2572,7 @@ function Build-Footer {
     @((Lamp 'c' 'compact'   $script:Compact), 0),
     @((Lamp 's' 'subagents' $script:ShowSubagents), 0),
     @((Lamp 'g' 'gone'      $script:ShowGone), 0),
-    @(' x closed ', 7), @(' t/y copy ', 8), @(' r poll ', 9), @(' +/- tick ', 10), @(' h help ', 0), @(' q quit ', 0)
+    @(' x closed ', 7), @(' t/y copy ', 8), @(' r poll ', 9), @((Mode '+/-' "keep $(Format-Keep $script:KeepMin)"), 2), @(' h help ', 0), @(' q quit ', 0)
   )
   $limit = [Console]::WindowWidth - 1
   $keep = @($items)
@@ -1895,10 +2592,16 @@ function Show-Help {
     '',
     'HEADER',
     '  title bar   clock; live sessions / working / idle; live subagents (stopped, orphaned); gone sessions',
-    '  tick        display refresh period (ms). +/- adjust by 50ms; floor 50',
-    '  frame       measured ms to build + draw the last frame — the real floor for tick',
-    '  roster age  time since the last `claude agents --json` result; * = poll in flight',
-    '  last poll   measured ms that call took (runs async; display never waits on it)',
+    '  tick        display refresh period (ms). [ / ] adjust by 50ms; floor 50',
+    '  frame       measured ms of the last pass: roster / process harvest, cache save, build and draw',
+    '              (not the wait for keys) — the real floor for tick',
+    '  roster age  time since the last good `claude agents --json` result; * = poll in flight',
+    '  last poll   measured ms that call took (runs async; display never waits on it). FAILED×N: the',
+    '              last N polls failed (non-zero exit, no output, not a JSON array, or no answer within',
+    '              5 s / 5 roster intervals, after which it is stopped and tried again); the previous',
+    '              roster stays on screen unchanged and nothing is marked gone until a poll succeeds',
+    '  keep        the keep window (+/-): how long gone sessions and stopped subagents stay listed',
+    '  gone N      gone sessions inside the keep window (hidden: g has them switched off)',
     '  hidden N cols  columns the window is too narrow for (low priority first). Peek shows everything.',
     '',
     'ROWS',
@@ -1941,21 +2644,22 @@ function Show-Help {
     '             or an API error, not a model reply. Red; LAST ACTION has the text',
     '  waiting: <reason>  the supervisor''s own word for blocked on your input (newer Claude Code).',
     '             Red, sorted to the top',
-    '  gone <t>   the session left the roster <t> ago (you closed it, or it ended). Kept -Linger min,',
-    '             dimmed; peek gives the resume command; x lists it permanently',
+    '  gone <t>   the session left the roster <t> ago (you closed it, or it ended): this run, or an earlier',
+    '             one (from the closed log). Listed while inside the keep window (+/-), dimmed; peek gives',
+    '             the resume command, or says its transcript is gone; x lists every closed session',
     '  cleared <t>  a /clear: the same process carries on as a NEW session id (the bright row with the',
     '             same NAME). The pre-clear conversation is still resumable; peek shows how',
     '  anything else  a supervisor status ctop does not recognise, shown verbatim — tell the author',
     '',
     'STATE — subagent rows',
     '  working / thinking  as above. A subagent on a long tool call (working) is always listed, however',
-    '             old; a thinking one that writes nothing for -SubagentWindow drops off like a stopped one',
+    '             old; a thinking one that writes nothing for the keep window (at least 15 min) drops off',
     '  stopped    it returned its result: its transcript ends in text, or (Claude Code 2.1.271+) in a',
     '             SubagentHandback call, whose report LAST ACTION shows as handback: <report>. A subagent',
     '             never waits on you, so',
     '             this is "finished" — but the parent can resume it with SendMessage and it picks up',
-    '             its full history; ctop shows it working again if so. Dimmed; drops off after',
-    '             -SubagentWindow s (15 min; 0 = keep until the parent goes)',
+    '             its full history; ctop shows it working again if so. Dimmed; drops off when it leaves',
+    '             the keep window (+/-; 0 = at once, ∞ = never)',
     '  error      as for sessions: it stopped on a limit / API-error notice, not a result. Red, not dimmed',
     '  awaiting job  a stopped subagent whose background job is still running: not done. A job is',
     '             credited to the agent (session or subagent) whose Bash / PowerShell call is closest in',
@@ -2030,7 +2734,10 @@ function Show-Help {
     '       s subagent rows   g gone/cleared rows   (a toggle that is ON is lit in the footer)',
     '       x closed-sessions log: everything that left the roster, newest first, with title and resume',
     '         command; persists across runs (<config>/ctop-closed.jsonl). clr = replaced by /clear',
-    '       r poll the roster now   +/- tick   h this help   q quit',
+    '       + / - keep window: how long gone sessions and stopped subagents stay listed. Steps 0 · 15m ·',
+    '         30m · 45m · 1h · 2h · 4h · 8h · 12h · 1d · 2d · 3d · 7d · 14d · 30d · ∞ (shown as keep on the strip',
+    '         and in the footer). Gone sessions from earlier runs come from the closed log',
+    '       r poll the roster now   [ / ] tick   h this help   q quit',
     '',
     'LAYOUT   the table fills the window (cap with -MaxWidth). Extra width widens TITLE / LAST ACTION / CWD',
     '  toward their full text; MODEL / BRANCH / KIND / STATE size to content (shrink is delayed ~5 s).',
@@ -2065,12 +2772,23 @@ function Show-Help {
 # The header shows real numbers: measured poll latency, roster age, and how long the
 # last frame took to build+draw, so you can see where the time actually goes.
 $script:Roster   = @()
-$script:Departed = @{}     # sessionId -> @{ Session; GoneAt }
 $script:ClosedLogPath = if ($ClosedLog) { $ClosedLog } else { Join-Path $ConfigDir 'ctop-closed.jsonl' }
+try { $script:KeepMin = Resolve-Keep -Keep $Keep -SubagentWindowSeconds $(if ($PSBoundParameters.ContainsKey('SubagentWindow')) { $SubagentWindow } else { $null }) }
+catch { [Console]::Error.WriteLine("ctop: -Keep $($_.Exception.Message)"); exit 2 }
+# sessionId -> @{ Session; GoneAt; Cleared; Successor }: every session that left, this run or an earlier
+# one (closed log); the keep window picks which are drawn. Sessions that are live again drop out on the
+# first poll.
+$script:Departed = Read-ClosedHistory $script:ClosedLogPath
+# the same rule as for the live roster: background sessions only with -All
+foreach ($id in @($script:Departed.Keys)) { if (-not (Test-KindListed ([string]$script:Departed[$id].Session.kind) ([bool]$All))) { $script:Departed.Remove($id) } }
 $script:ShowGone = $true
 $script:Poll     = $null
 $script:PollMs   = 0
-$script:RosterAt = $null
+$script:RosterAt = $null   # when the last GOOD roster landed (roster age, empty-roster message)
+$script:PollAt   = $null   # when the last poll finished, good or failed (schedules the next one)
+$script:PollFail = $null   # why the last poll failed; $null after a good one
+$script:PollFails = 0      # consecutive failed polls
+$script:PollTimeoutS = [math]::Max(5, 5 * $RosterInterval)   # a poll running longer is stopped and counted as failed
 $selectedId = $null       # session id of the highlighted row
 $script:ScrollTop = 0     # first visible body line when the list is taller than the window
 $script:PageRows = 10     # rows per screenful, for PgUp / PgDn
@@ -2131,7 +2849,7 @@ function Enable-Mouse {
     if (-not ('CtopCon.Con' -as [type])) {
       # compiled once to a DLL beside the caches: compiling on every start would cost ~1 s
       # named by a hash of the source (String.GetHashCode is randomized per process in .NET Core)
-      $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($script:ConSrc)), 0, 4) -replace '-'
+      $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:ConSrc)), 0, 4) -replace '-'
       $dll = Join-Path $ConfigDir "ctop-con-$h.dll"
       if (-not (Test-Path -LiteralPath $dll)) { Add-Type -TypeDefinition $script:ConSrc -OutputAssembly $dll -OutputType Library -ErrorAction Stop }
       Add-Type -Path $dll -ErrorAction Stop
@@ -2205,7 +2923,7 @@ $origOutEnc = [Console]::OutputEncoding
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {}
 try {
   [Console]::CursorVisible = $false
-  Clear-Host
+  Clear-Screen
   $Host.UI.RawUI.WindowTitle = 'ctop'
   Enable-Mouse
   Update-TranscriptIndex
@@ -2216,31 +2934,38 @@ try {
   $lastSave = Get-Date
   $winW = [Console]::WindowWidth; $winH = [Console]::WindowHeight
   while ($true) {
+    # "frame" on the strip times this whole pass (cache save, roster / process harvest, build, draw), so
+    # it is the cost the tick has to cover; only the wait for input below is left out
+    $frameSw.Restart()
     if (((Get-Date) - $lastSave).TotalSeconds -ge 60) { Save-ScanCache; $lastSave = Get-Date }
     $loopStart = [System.Diagnostics.Stopwatch]::StartNew()
     if ([Console]::WindowWidth -ne $winW -or [Console]::WindowHeight -ne $winH) {
       $winW = [Console]::WindowWidth; $winH = [Console]::WindowHeight
-      Clear-Host   # the terminal reflows old lines on resize; wipe them, including the last column
+      Clear-Screen   # the terminal reflows old lines on resize; wipe them, including the last column
     }
 
     # feed: harvest a finished poll, and (re)start one if it's time
     $fresh = Read-Roster
     Read-ProcPoll
-    if (-not $script:Poll -and $script:RosterAt -and
-        ((Get-Date) - $script:RosterAt).TotalSeconds -ge $RosterInterval) { Start-RosterPoll }
+    if (-not $script:Poll -and $script:PollAt -and
+        ((Get-Date) - $script:PollAt).TotalSeconds -ge $RosterInterval) { Start-RosterPoll }
 
     # display
-    $frameSw.Restart()
+    $script:KeptGone = @(Get-KeptDeparted $script:Departed (Get-Date) $script:KeepMin)   # once per frame: rows and the strip's count
     $rows = @(Build-Rows)
-    $top     = @($rows | Where-Object { -not $_._Parent -and -not $_._Gone })
-    $goneN   = @($rows | Where-Object { $_._Gone }).Count
-    $subs    = @($rows | Where-Object { $_._Parent -and -not $_._Done }).Count
-    $subsDone = @($rows | Where-Object { $_._Parent -and $_._Done }).Count
-    $subsOrph = @($rows | Where-Object { $_._Parent -and $_._Orphaned }).Count
+    # one pass (five Where-Object pipelines over a long history cost more than the rest of the header)
+    $topL = [System.Collections.Generic.List[object]]::new(); $goneN = 0; $subs = 0; $subsDone = 0; $subsOrph = 0
+    foreach ($r in $rows) {
+      if ($r._Parent) { if ($r._Done) { $subsDone++ } else { $subs++ }; if ($r._Orphaned) { $subsOrph++ } }
+      elseif ($r._Gone) { $goneN++ }
+      else { $topL.Add($r) }
+    }
+    $top = $topL.ToArray()
     $working = @($top | Where-Object { $_.STATE -in 'working','thinking' -or $_.STATE -like 'waiting*' }).Count
     $idle    = @($top | Where-Object { $_.STATE -eq 'idle' }).Count
     $await   = @($top | Where-Object { $_.STATE -like 'awaiting*' -or $_.STATE -eq 'polling' }).Count
     $rosterAge = if ($script:RosterAt) { Get-Since $script:RosterAt } else { '…' }
+    $keptGone  = $script:KeptGone.Count
     $pollFlag  = if ($script:Poll) { '*' } else { ' ' }
     $w = if ($MaxWidth -gt 0) { [math]::Min([Console]::WindowWidth, $MaxWidth + 1) } else { [Console]::WindowWidth }
     # title bar: name + clock on the left, counts right-aligned (within MaxWidth)
@@ -2258,52 +2983,77 @@ try {
     $strip = '  ' + (Cell 'tick'   "${tick}ms"        14) + '│ ' +
                     (Cell 'frame'  "${lastFrameMs}ms" 14) + '│ ' +
                     (Cell 'roster' "$rosterAge$pollFlag" 12) + '│ ' +
-                    (Cell 'poll'   "$($script:PollMs)ms" 12) +
+                    $(if ($script:PollFail) { Cell 'poll' "FAILED×$($script:PollFails)" 16 } else { Cell 'poll' "$($script:PollMs)ms" 16 }) +
              $(if ($script:Compact) { '│ compact ' }) +
              $(if ($script:HiddenCols.Count) { '│ ' + (Cell 'hidden' "$($script:HiddenCols.Count) cols" 14) }) +
-             $(if ($script:Departed.Count) { '│ ' + (Cell 'gone' "$($script:Departed.Count)$(if (-not $script:ShowGone) { ' hidden' })" 14) }) +
+             '│ ' + (Cell 'keep' (Format-Keep $script:KeepMin) 12) +
+             $(if ($keptGone) { '│ ' + (Cell 'gone' $(if ($script:GonePending -and $script:ShowGone) { "$($keptGone - $script:GonePending)/$keptGone" } else { "$keptGone$(if (-not $script:ShowGone) { ' hidden' })" }) 14) }) +
              '│ ' + (Cell 'build' $script:CtopVersion 20)   # labeled and away from the clock: a bare date beside it reads as "now"
     $frame = @()
     $frame += @{ Text = $title; Inverse = $true }
     $frame += @{ Text = $strip; Fg = 'DarkCyan' }
     $frame += ''
-    if ($top.Count -eq 0) {
-      $script:BodyMap = $null
-      $frame += if ($script:RosterAt) { "(no interactive sessions reported by 'claude agents --json')" } else { '(polling…)' }
+    if ($rows.Count -eq 0) {
+      # nothing to draw, live or gone: no row can be selected, peeked or copied
+      $script:BodyMap = $null; $sorted = @(); $selectedId = $null; $script:PeekId = $null
+      $hiddenGone = if (-not $script:ShowGone -and $script:KeptGone.Count) { "; g shows $($script:KeptGone.Count) gone" } else { '' }
+      $frame += if ($script:RosterAt) { "(no interactive sessions reported by 'claude agents --json'$hiddenGone)" }
+                elseif ($script:PollFail) { "('claude agents --json' failed: $($script:PollFail); retrying every $RosterInterval s)" }
+                else { '(polling…)' }
     } else {
       $sorted = @(Sort-Rows $rows)
       if (-not $selectedId -or -not ($sorted._SessionId -contains $selectedId)) { $selectedId = $sorted[0]._SessionId }
-      $tbl  = @(Render-Table $sorted $selectedId)
-      $head = @($tbl[0..1]); $body = if ($tbl.Count -gt 2) { @($tbl[2..($tbl.Count - 1)]) } else { @() }
-      # rows left for the body: the footer takes the last line, the title/strip/blank and the column
-      # header take the rest
-      $room = [math]::Max(3, [Console]::WindowHeight - 1 - $frame.Count - $head.Count)
-      $script:BodyY0 = $frame.Count + $head.Count   # screen line of the first body line (for mouse clicks)
-      if ($body.Count -le $room) { $script:ScrollTop = 0; $script:PageRows = [math]::Max(1, $sorted.Count); $script:BodyMap = $script:LineRow }
-      else {
-        # scroll just enough to keep every line of the selected row visible
-        if ($script:SelSpan) {
-          if ($script:SelSpan[0] -lt $script:ScrollTop) { $script:ScrollTop = $script:SelSpan[0] }
-          if ($script:SelSpan[1] -ge $script:ScrollTop + $room) { $script:ScrollTop = $script:SelSpan[1] - $room + 1 }
+      # Render, then see which rows are on screen. A gone row that scrolled into view since the last frame
+      # was not refreshed by Build-Rows (only last frame's visible rows are): refresh it and render once
+      # more (only changed rows are re-formatted), so a visible age is never stale, even for one frame.
+      for ($pass = 0; $pass -lt 2; $pass++) {
+        $tbl  = @(Render-Table $sorted $selectedId)
+        # @(if …): an if's output unrolls, and a one-line body would come back as a bare string that the
+        # styling loop below then indexed character by character (a lone one-line row drew nothing)
+        $head = @($tbl[0..1]); $body = @(if ($tbl.Count -gt 2) { $tbl[2..($tbl.Count - 1)] })
+        # rows left for the body: the footer takes the last line, the title/strip/blank and the column
+        # header take the rest
+        $room = [math]::Max(3, [Console]::WindowHeight - 1 - $frame.Count - $head.Count)
+        $script:BodyY0 = $frame.Count + $head.Count   # screen line of the first body line (for mouse clicks)
+        $vis = @(); $where = ''
+        if ($body.Count -le $room) {
+          $script:ScrollTop = 0; $script:PageRows = [math]::Max(1, $sorted.Count); $script:BodyMap = $script:LineRow; $vis = @(0..($sorted.Count - 1))
+          $body = @(for ($li = 0; $li -lt $body.Count; $li++) { $x = $body[$li]; $rowOf = $script:LineRow[$li]; if ($x -is [string] -and $rowOf -ge 0) { Style-Line $x $sorted[$rowOf] $selectedId $false } else { $x } })
         }
-        $script:ScrollTop = [math]::Max(0, [math]::Min($script:ScrollTop, $body.Count - $room))
-        $vTop = $script:ScrollTop; $end = $vTop + $room - 1
-        # a wrapped row cut by the window edge would read as a shorter row: leave it out entirely
-        $cutTop = if ($vTop -gt 0 -and $script:LineRow[$vTop] -ge 0 -and $script:LineRow[$vTop - 1] -eq $script:LineRow[$vTop]) { $script:LineRow[$vTop] } else { -2 }
-        $cutEnd = if ($end + 1 -lt $script:LineRow.Count -and $script:LineRow[$end] -ge 0 -and $script:LineRow[$end + 1] -eq $script:LineRow[$end]) { $script:LineRow[$end] } else { -2 }
-        $slice = @(); $visRows = @()
-        $script:BodyMap = [System.Collections.Generic.List[int]]::new()
-        for ($li = $vTop; $li -le $end -and $li -lt $body.Count; $li++) {
-          $rowOf = $script:LineRow[$li]
-          if ($rowOf -ge 0 -and ($rowOf -eq $cutTop -or $rowOf -eq $cutEnd)) { $slice += ''; $script:BodyMap.Add(-1); continue }
-          $slice += $body[$li]; $script:BodyMap.Add($rowOf); if ($rowOf -ge 0) { $visRows += $rowOf }
+        else {
+          # scroll just enough to keep every line of the selected row visible
+          if ($script:SelSpan) {
+            if ($script:SelSpan[0] -lt $script:ScrollTop) { $script:ScrollTop = $script:SelSpan[0] }
+            if ($script:SelSpan[1] -ge $script:ScrollTop + $room) { $script:ScrollTop = $script:SelSpan[1] - $room + 1 }
+          }
+          $script:ScrollTop = [math]::Max(0, [math]::Min($script:ScrollTop, $body.Count - $room))
+          $vTop = $script:ScrollTop; $end = $vTop + $room - 1
+          # a wrapped row cut by the window edge would read as a shorter row: leave it out entirely
+          $cutTop = if ($vTop -gt 0 -and $script:LineRow[$vTop] -ge 0 -and $script:LineRow[$vTop - 1] -eq $script:LineRow[$vTop]) { $script:LineRow[$vTop] } else { -2 }
+          $cutEnd = if ($end + 1 -lt $script:LineRow.Count -and $script:LineRow[$end] -ge 0 -and $script:LineRow[$end + 1] -eq $script:LineRow[$end]) { $script:LineRow[$end] } else { -2 }
+          $slice = [System.Collections.Generic.List[object]]::new(); $visRows = [System.Collections.Generic.List[int]]::new()
+          $script:BodyMap = [System.Collections.Generic.List[int]]::new()
+          for ($li = $vTop; $li -le $end -and $li -lt $body.Count; $li++) {
+            $rowOf = $script:LineRow[$li]
+            if ($rowOf -ge 0 -and ($rowOf -eq $cutTop -or $rowOf -eq $cutEnd)) { $slice.Add(''); $script:BodyMap.Add(-1); continue }
+            $x = $body[$li]; if ($x -is [string] -and $rowOf -ge 0) { $x = Style-Line $x $sorted[$rowOf] $selectedId $false }
+            $slice.Add($x); $script:BodyMap.Add($rowOf); if ($rowOf -ge 0) { $visRows.Add($rowOf) }
+          }
+          $vis = @($visRows | Select-Object -Unique)
+          $vMin = ($vis | Measure-Object -Minimum).Minimum; $vMax = ($vis | Measure-Object -Maximum).Maximum
+          $script:PageRows = [math]::Max(1, $vMax - $vMin)
+          $body = $slice.ToArray()
+          $where = "   │ rows $($vMin + 1)–$($vMax + 1) of $($sorted.Count)"   # where we are, in the instrument strip
         }
-        $vis = @($visRows | Select-Object -Unique)
-        $script:PageRows = [math]::Max(1, ($vis | Measure-Object -Maximum).Maximum - ($vis | Measure-Object -Minimum).Minimum)
-        $body = $slice
-        # where we are, in the instrument strip
-        $frame[1].Text = $frame[1].Text.TrimEnd() + "   │ rows $(($vis | Measure-Object -Minimum).Minimum + 1)–$(($vis | Measure-Object -Maximum).Maximum + 1) of $($sorted.Count)"
+        $stale = @(foreach ($i in $vis) { $r = $sorted[$i]; if ($r._Gone -and -not $script:FreshIds.Contains([string]$r._SessionId)) { $r } })
+        foreach ($r in $stale) { Update-GoneRow $r; [void]$script:FreshIds.Add([string]$r._SessionId) }
+        if (-not $stale) { break }
       }
+      # next frame refreshes what is on screen now, and the peeked row
+      $script:RefreshIds.Clear()
+      foreach ($i in $vis) { [void]$script:RefreshIds.Add([string]$sorted[$i]._SessionId) }
+      if ($script:PeekId) { [void]$script:RefreshIds.Add([string]$script:PeekId) }
+      if ($where) { $frame[1].Text = $frame[1].Text.TrimEnd() + $where }
       $frame += $head + $body
     }
     $foot = Build-Footer
@@ -2320,18 +3070,20 @@ try {
     }
     $lastFrameMs = [int]$frameSw.ElapsedMilliseconds
 
-    # sleep the *remainder* of the tick (actual-time based), servicing keys meanwhile
-    while ($loopStart.ElapsedMilliseconds -lt $tick) {
+    # Service input, then sleep out the rest of the tick. Every key already typed is handled before the
+    # next frame however long the last one took: a frame slower than the tick must never stop ctop
+    # reading the keyboard (q included). A burst (+ + +) is applied together and drawn once.
+    $repaint = $false
+    while ($true) {
       $inp = Next-Input
       if ($null -ne $inp) {
         $idx = [array]::IndexOf(@($sorted._SessionId), $selectedId)
-        $repaint = $false
         $k = $inp
         if ($inp -isnot [ConsoleKeyInfo]) {   # a mouse event
           $act = Resolve-Mouse $inp $(if ($script:PeekId) { $pf } else { $foot }) ([bool]$script:PeekId) $idx
           if (-not $act) { continue }
           if ($null -ne $act.Select -and $act.Select -lt $sorted.Count) { $selectedId = $sorted[$act.Select]._SessionId; $idx = $act.Select; $repaint = $true }
-          if (-not $act.Key) { break }
+          if (-not $act.Key) { continue }
           $k = $act.Key
         }
         # NOTE: in PowerShell, break/continue inside `switch` only leave the switch, not the
@@ -2350,8 +3102,11 @@ try {
         switch ($k.KeyChar) {
           'q' { if ($script:PeekId) { $script:PeekId = $null; $repaint = $true } else { return } }
           'r' { if (-not $script:Poll) { Start-RosterPoll } }
-          '+' { $tick = [math]::Max(50,   $tick - 50); $repaint = $true }
-          '-' { $tick = [math]::Min(5000, $tick + 50); $repaint = $true }
+          '+' { $script:KeepMin = Step-Keep $script:KeepMin 1;  $repaint = $true }
+          '=' { $script:KeepMin = Step-Keep $script:KeepMin 1;  $repaint = $true }   # + without Shift
+          '-' { $script:KeepMin = Step-Keep $script:KeepMin -1; $repaint = $true }
+          ']' { $tick = [math]::Max(50,   $tick - 50); $repaint = $true }
+          '[' { $tick = [math]::Min(5000, $tick + 50); $repaint = $true }
           'h' { Show-Help; $repaint = $true }
           's' { $script:ShowSubagents = -not $script:ShowSubagents; $repaint = $true }
           'c' { $script:Compact = -not $script:Compact; $repaint = $true }
@@ -2362,8 +3117,9 @@ try {
           't' { $sel = $sorted | Where-Object _SessionId -eq $selectedId | Select-Object -First 1; if ($sel -and $sel._Transcript -ne '-') { Copy-Text $sel._Transcript 'transcript path' } }
           'y' { $sel = $sorted | Where-Object _SessionId -eq $selectedId | Select-Object -First 1; if ($sel) { $id = if ($sel._Parent) { $sel._Parent } else { $sel._SessionId }; Copy-Text "claude --resume $id" 'resume command' } }
         }
-        if ($repaint) { break }
+        continue   # drain everything already typed before drawing
       }
+      if ($repaint -or $loopStart.ElapsedMilliseconds -ge $tick) { break }
       # if a poll just finished mid-sleep, repaint now rather than waiting out the tick
       if ($script:Poll -and $script:Poll.Proc.HasExited -and $script:Poll.Out.IsCompleted) { break }
       Start-Sleep -Milliseconds ([math]::Min(20, [math]::Max(1, $tick - $loopStart.ElapsedMilliseconds)))
@@ -2374,7 +3130,7 @@ catch {
   $script:Fatal = $_
 }
 finally {
-  if ($script:Poll) { try { $script:Poll.Proc.Kill(); $script:Poll.Proc.Dispose() } catch {} }
+  Stop-RosterPoll $script:Poll
   Disable-Mouse   # give the console its QuickEdit / mouse mode back, crash or not
   [Console]::CursorVisible = $true
   if ($script:ProcJob) { Remove-Job $script:ProcJob -Force -ErrorAction SilentlyContinue }
@@ -2384,7 +3140,12 @@ finally {
   [Console]::SetCursorPosition(0, [Console]::WindowHeight - 1)
   Write-Host ''
   if ($script:Fatal) {
-    Write-Host "ctop $script:CtopVersion stopped: $($script:Fatal.Exception.GetType().Name): $($script:Fatal.Exception.Message)" -ForegroundColor Red
+    Write-Host (Protect-TerminalText "ctop $script:CtopVersion stopped: $($script:Fatal.Exception.GetType().Name): $($script:Fatal.Exception.Message)") -ForegroundColor Red
     Write-Host $script:Fatal.ScriptStackTrace -ForegroundColor DarkGray
   }
+}
+# a crash is a failure to whoever ran ctop (a wrapper, a test): say so on stderr and in the exit status
+if ($script:Fatal) {
+  [Console]::Error.WriteLine((Protect-TerminalText "ctop $script:CtopVersion stopped: $($script:Fatal.Exception.GetType().Name): $($script:Fatal.Exception.Message)"))
+  exit 1
 }
