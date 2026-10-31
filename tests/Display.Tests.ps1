@@ -1,4 +1,4 @@
-# Display helpers: how ages read, and where gone rows sort.
+﻿# Display helpers: how ages read, and where gone rows sort.
 BeforeAll { . (Join-Path $PSScriptRoot 'Import-Ctop.ps1') }
 
 Describe 'Format-Since' {

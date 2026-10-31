@@ -62,12 +62,11 @@ jobs:
           $c.Output.Verbosity = 'Detailed'
           Invoke-Pester -Configuration $c
 
-  # Windows PowerShell 5.1, the version built into Windows. Informational (it does not fail the run):
-  # ctop.ps1 is UTF-8 without a byte-order mark, which 5.1 reads as ANSI. The first steps check the
-  # script as committed; the rest run it, and the unit tests, from copies saved with a BOM.
+  # Windows PowerShell 5.1, the version built into Windows: the script as committed (UTF-8 with BOM,
+  # which 5.1 needs to read its non-ASCII characters), and the unit tests. The end-to-end tests need
+  # tmux, so they run on Linux only.
   windows-powershell-5:
     runs-on: windows-latest
-    continue-on-error: true
     defaults:
       run:
         shell: powershell
@@ -77,7 +76,7 @@ jobs:
       - name: PowerShell version
         run: $PSVersionTable
 
-      - name: Parse (as committed)
+      - name: Parse
         run: |
           $t = $null; $e = $null
           $null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path .\ctop.ps1), [ref]$t, [ref]$e)
@@ -85,37 +84,12 @@ jobs:
           $e | Select-Object -First 5 | ForEach-Object { "  line $($_.Extent.StartLineNumber): $($_.Message)" }
           if ($e) { exit 1 }
 
-      - name: -Version (as committed)
-        if: always()
+      - name: -Version
         run: |
           powershell -NoProfile -File .\ctop.ps1 -Version
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-      - name: Re-save script and tests as UTF-8 with BOM
-        if: always()
-        run: |
-          foreach ($f in @(Get-Item .\ctop.ps1) + @(Get-ChildItem .\tests\*.ps1)) {
-            $text = [IO.File]::ReadAllText($f.FullName, [Text.Encoding]::UTF8)
-            [IO.File]::WriteAllText($f.FullName, $text, [Text.UTF8Encoding]::new($true))
-          }
-
-      - name: Parse (with BOM)
-        if: always()
-        run: |
-          $t = $null; $e = $null
-          $null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path .\ctop.ps1), [ref]$t, [ref]$e)
-          "parse errors: $(@($e).Count)"
-          $e | Select-Object -First 5 | ForEach-Object { "  line $($_.Extent.StartLineNumber): $($_.Message)" }
-          if ($e) { exit 1 }
-
-      - name: -Version (with BOM)
-        if: always()
-        run: |
-          powershell -NoProfile -File .\ctop.ps1 -Version
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-
-      - name: Unit tests (with BOM)
-        if: always()
+      - name: Unit tests (Pester)
         run: |
           Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
           Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser -Force -SkipPublisherCheck

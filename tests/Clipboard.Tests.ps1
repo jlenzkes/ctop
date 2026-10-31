@@ -1,4 +1,4 @@
-# t / y copy: how text reaches a clipboard on each platform. PowerShell's Set-Clipboard on Linux needs
+﻿# t / y copy: how text reaches a clipboard on each platform. PowerShell's Set-Clipboard on Linux needs
 # xclip and a display; without them it keeps the text inside the pwsh process (PowerShell 7.6.9,
 # Clipboard.cs: _internalClipboard) and reports success, so ctop sends OSC 52 to the terminal instead.
 BeforeAll { . (Join-Path $PSScriptRoot 'Import-Ctop.ps1') }

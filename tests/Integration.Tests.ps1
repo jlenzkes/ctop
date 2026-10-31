@@ -1,4 +1,4 @@
-# End to end: the real ctop.ps1 in a terminal (tmux), against a fake `claude` that prints a fixed roster
+﻿# End to end: the real ctop.ps1 in a terminal (tmux), against a fake `claude` that prints a fixed roster
 # and a scratch config dir holding synthetic transcripts and a closed-sessions history.
 # Needs tmux (Linux). Run alone with:  Invoke-Pester ./tests -TagFilter Integration
 BeforeDiscovery { $script:noTmux = -not (Get-Command tmux -ErrorAction SilentlyContinue) -or $IsWindows }
@@ -29,7 +29,7 @@ BeforeAll {
   # closed session per entry of $closedAt, each with its transcript on disk. A transcript stops changing
   # when its session closes, so its write time is set to the close time (IDLE then reads like real
   # history). Returns what Start-Ctop needs, plus each history row's name -> close time.
-  function New-Fixture([string]$root, [DateTimeOffset[]]$closedAt) {
+  function New-Fixture([string]$root, [DateTimeOffset[]]$closedAt, [string]$PathTail = $env:PATH) {
     $cfg = Join-Path $root 'cfg'; $bin = Join-Path $root 'bin'
     New-Item -ItemType Directory -Force -Path $bin, (Join-Path $cfg 'projects/-w') | Out-Null
     $live = @{ pid = $PID; cwd = $root; kind = 'interactive'; startedAt = [DateTimeOffset]::UtcNow.AddHours(-1).ToUnixTimeMilliseconds()
@@ -54,7 +54,7 @@ BeforeAll {
     }
     $closedLog = Join-Path $root 'closed.jsonl'
     [IO.File]::WriteAllLines($closedLog, [string[]]$log)
-    return @{ Cfg = $cfg; Log = $closedLog; Env = "CLAUDE_CONFIG_DIR='$cfg' PATH='${bin}:$env:PATH'"; Closed = $closed }
+    return @{ Cfg = $cfg; Log = $closedLog; Env = "CLAUDE_CONFIG_DIR='$cfg' PATH='${bin}:$PathTail'"; Closed = $closed }
   }
 
   $script:ErrFile = @{}   # tmux session -> the file holding ctop's stderr
@@ -216,6 +216,25 @@ Describe 'ages on rows that scroll into view' -Tag Integration -Skip:$script:noT
       $expected = [int][math]::Floor(($at - $fx2.Closed['h059']).TotalSeconds)
       Write-Host "    h059 shows gone $($Matches[1])s, expected ~$($expected)s"
       [math]::Abs([int]$Matches[1] - $expected) | Should -BeLessOrEqual 1
+    } finally { Stop-Ctop $s }
+  }
+}
+
+Describe 'portability' -Tag Integration -Skip:$script:noTmux {
+  It 'starts on a system without the clear command (minimal Fedora / RHEL images have none)' {
+    # PATH: the fake claude, plus only cat (which it runs) and ps. PowerShell's Clear-Host on Linux runs
+    # the external clear program and fails with "The expression after '&' ..." when there is none.
+    $tools = Join-Path $TestDrive 'tools'
+    New-Item -ItemType Directory -Force -Path $tools | Out-Null
+    foreach ($t in 'cat', 'ps') {
+      $src = (Get-Command $t -CommandType Application | Select-Object -First 1).Source
+      New-Item -ItemType SymbolicLink -Path (Join-Path $tools $t) -Target $src | Out-Null
+    }
+    $fx3 = New-Fixture (Join-Path $TestDrive 'nc') @([DateTimeOffset]::UtcNow.AddMinutes(-5)) $tools
+    $s = Start-Ctop $fx3 ''
+    try {
+      Wait-Screen $s 'live-one' 30 | Should -Not -BeNullOrEmpty
+      (Get-Screen $s) | Should -Not -Match 'stopped:'
     } finally { Stop-Ctop $s }
   }
 }

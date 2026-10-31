@@ -1,4 +1,4 @@
-# The "keep" window: how long gone sessions and stopped subagents stay listed. One setting for both,
+﻿# The "keep" window: how long gone sessions and stopped subagents stay listed. One setting for both,
 # adjusted at runtime with + / -, seeded at startup from the closed-sessions log.
 #   0  = keep nothing (rows go the moment they stop / leave)
 #   -1 = keep forever (shown as ∞)

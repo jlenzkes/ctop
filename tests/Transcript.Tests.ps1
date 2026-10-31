@@ -1,4 +1,4 @@
-# Reading transcripts: JSON string values pulled out by regex must be unescaped, and cached scan state
+﻿# Reading transcripts: JSON string values pulled out by regex must be unescaped, and cached scan state
 # from an older scan format is redone.
 BeforeAll { . (Join-Path $PSScriptRoot 'Import-Ctop.ps1') }
 
@@ -49,5 +49,20 @@ Describe 'Load-ScanCache: scan format version' {
   It 'keeps entries of the current scan version and drops older ones (they are rescanned once)' {
     Load-ScanCache
     @($script:ScanCache.Keys | Sort-Object) | Should -Be @('current')
+  }
+}
+
+Describe 'ConvertTo-Hashtable (Windows PowerShell 5.1 has no ConvertFrom-Json -AsHashtable)' {
+  It 'turns parsed JSON objects into hashtables, nested ones too, and keeps arrays and values' {
+    $j = '{"a":{"Path":"/x","Used":5,"ToolCounts":{"Bash":2}},"b":{"List":[1,2],"Empty":{}}}' | ConvertFrom-Json
+    $h = ConvertTo-Hashtable $j
+    $h | Should -BeOfType [hashtable]
+    $h.a | Should -BeOfType [hashtable]
+    $h.a.Path | Should -Be '/x'
+    $h.a.Used | Should -Be 5
+    $h.a.ToolCounts | Should -BeOfType [hashtable]
+    $h.a.ToolCounts.Bash | Should -Be 2
+    @($h.b.List) | Should -Be @(1, 2)
+    $h.b.Empty | Should -BeOfType [hashtable]
   }
 }

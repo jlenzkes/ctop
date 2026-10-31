@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   A top(1)-style live view of *interactive* Claude Code sessions.
 
@@ -81,9 +81,17 @@
   Print ctop's version and exit.
 
 .NOTES
-  VERSION 2026.10.31.4 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.10.31.5 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.10.31.5
+    - Linux without the clear program (minimal Fedora / RHEL images): ctop stopped at once with "The
+      expression after '&' …": PowerShell's Clear-Host runs clear. The screen is cleared with the same
+      escape sequences instead
+    - Windows PowerShell 5.1 runs it again (unit tests pass there in CI): the file is UTF-8 with a BOM
+      (5.1 read it as ANSI and could not parse it); no [Array]::Sort[T](…) generic-call syntax (7.3+);
+      a session with exactly one subagent listed it again on 5.1; the scan cache loads on 5.1 too
+      (it needed ConvertFrom-Json -AsHashtable, so every start rescanned every transcript)
   2026.10.31.4
     - only rows on screen are refreshed and styled each frame: a gone row off screen costs next to nothing
       (300 gone rows now cost about what the visible screenful does: ~25–35 ms a frame, was ~140 ms).
@@ -189,7 +197,7 @@ param(
   [switch]$NoMouse,
   [switch]$Version
 )
-$script:CtopVersion = '2026.10.31.4'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.10.31.5'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -224,6 +232,14 @@ function Format-Since([timespan]$span) {
   if ($span.TotalHours -ge 1)   { return '{0}h' -f [int][math]::Floor($span.TotalHours) }
   if ($span.TotalMinutes -ge 1) { return '{0}m' -f [int][math]::Floor($span.TotalMinutes) }
   return '{0}s' -f [int][math]::Floor($span.TotalSeconds)
+}
+
+# Clear the screen and its scrollback. PowerShell's Clear-Host on Linux / macOS runs the external clear
+# program (& (Get-Command clear).Definition) and fails when there is none, as in minimal Fedora / RHEL
+# images; the escape sequences clear writes do the same without it: home, erase screen, erase scrollback.
+function Clear-Screen {
+  if ($IsWindows -or $env:OS -eq 'Windows_NT') { Clear-Host; return }
+  [Console]::Write("$([char]27)[H$([char]27)[2J$([char]27)[3J")
 }
 
 # ---- frame writer -----------------------------------------------------------
@@ -500,10 +516,22 @@ $script:ScanCache = @{}
 $script:ScanCachePath = Join-Path $ConfigDir 'ctop-scancache.json'
 $script:ScanVerified = @{}   # keys whose file was checked this run (never saved)
 $script:CacheDays = 2
+# ConvertFrom-Json -AsHashtable for Windows PowerShell 5.1, which lacks it: parsed objects become
+# hashtables, nested ones too; arrays and plain values are kept.
+function ConvertTo-Hashtable($o) {
+  if ($o -is [System.Management.Automation.PSCustomObject]) {
+    $h = @{}
+    foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = ConvertTo-Hashtable $p.Value }
+    return $h
+  }
+  if ($o -is [System.Collections.IList]) { return ,@(foreach ($x in $o) { ConvertTo-Hashtable $x }) }
+  return $o
+}
 function Load-ScanCache {
   try {
     if (-not (Test-Path -LiteralPath $script:ScanCachePath)) { return }
-    $h = Get-Content -LiteralPath $script:ScanCachePath -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
+    $raw = Get-Content -LiteralPath $script:ScanCachePath -Raw -Encoding UTF8
+    $h = if ($PSVersionTable.PSVersion.Major -ge 6) { $raw | ConvertFrom-Json -AsHashtable } else { ConvertTo-Hashtable ($raw | ConvertFrom-Json) }
     $cut = (Get-Date).ToUniversalTime().AddDays(-$script:CacheDays).Ticks
     foreach ($k in @($h.Keys)) {
       $e = $h[$k]
@@ -514,7 +542,7 @@ function Load-ScanCache {
       if (-not $e.ToolCounts) { $e.ToolCounts = @{} }
       $script:ScanCache[$k] = $e
     }
-  } catch {}   # unreadable cache (or Windows PowerShell 5.1, no -AsHashtable): just scan from scratch
+  } catch {}   # unreadable cache: just scan from scratch
 }
 function Save-ScanCache {
   try {
@@ -1749,7 +1777,9 @@ function Sort-Rows([object[]]$rows) {
       $p | Add-Member -NotePropertyName _Depth -NotePropertyValue $base -Force
     }
     $out.Add($p)
-    $kids = if ($kidsOf.ContainsKey([string]$p._SessionId)) { @($kidsOf[[string]$p._SessionId]) } else { @() }
+    # @(if …): an if's output unrolls, so one agent would come back as a bare object, and Windows
+    # PowerShell 5.1 gives a PSCustomObject no .Count
+    $kids = @(if ($kidsOf.ContainsKey([string]$p._SessionId)) { $kidsOf[[string]$p._SessionId] })
     if ($kids.Count) {
       $place = {   # a subagent row, shifted under a launched session
         param($k)
@@ -2547,7 +2577,7 @@ $origOutEnc = [Console]::OutputEncoding
 try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {}
 try {
   [Console]::CursorVisible = $false
-  Clear-Host
+  Clear-Screen
   $Host.UI.RawUI.WindowTitle = 'ctop'
   Enable-Mouse
   Update-TranscriptIndex
@@ -2562,7 +2592,7 @@ try {
     $loopStart = [System.Diagnostics.Stopwatch]::StartNew()
     if ([Console]::WindowWidth -ne $winW -or [Console]::WindowHeight -ne $winH) {
       $winW = [Console]::WindowWidth; $winH = [Console]::WindowHeight
-      Clear-Host   # the terminal reflows old lines on resize; wipe them, including the last column
+      Clear-Screen   # the terminal reflows old lines on resize; wipe them, including the last column
     }
 
     # feed: harvest a finished poll, and (re)start one if it's time
