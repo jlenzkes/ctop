@@ -93,9 +93,10 @@
       the key but not into the cost, so the cost never caught up
     - paths compare case-sensitively in every cache: on Linux a.jsonl and A.jsonl are two files
     - a combining mark outside the BMP (a surrogate pair) is kept with its letter when text is cut
-    - a first prompt in Hebrew, Chinese, Russian or any other non-Latin script becomes the title
-      (it needed three ASCII letters; such sessions read "(untitled)"). Cached scans are redone once
-      (ScanVer 4)
+    - a first prompt in Hebrew, Chinese, Russian and other scripts becomes the title: it needed three
+      ASCII letters (such sessions read "(untitled)"), now three letters in a row of any script. Not
+      every script has those: Hindi or Tamil, which write vowels as marks between letters, can still
+      read "(untitled)". Cached scans are redone once (ScanVer 4)
     - titles in Hebrew, Arabic, Armenian, Georgian, Chinese, Japanese, Korean and other scripts without
       combining marks are measured at the speed of ASCII: a screen of Hebrew titles took a frame from
       ~55 ms to ~175 ms
@@ -691,7 +692,7 @@ $script:PriceVer = 2
 # Bump ScanVer when what a scan extracts changes: cached state from an older scan is redone once.
 # 2: titles are unescaped (\" was kept literally)
 # 3: a prompt that mentions tool_result counts as a turn (it was taken for a tool result)
-# 4: a first prompt in any script can be the title (it needed three ASCII letters)
+# 4: a first prompt needs three letters in a row of any script to be the title, not three ASCII letters
 $script:ScanVer = 4
 $script:Pricing = @(
   @{ Match = 'fable-5-1|mythos-5-1'; In = 10;  W5 = 12.5;  W1h = 20;  Read = 0.25; Out = 50 }
@@ -876,7 +877,7 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
           if (-not $st.First -and $line -match '"content":"((?:[^"\\]|\\.)*)"') {
             $f = ((Unescape-Json($Matches[1]) -replace '<[^>]+>', '') -replace '\s+', ' ').Trim()
             # only accept something that reads like a human prompt
-            if ($f.Length -ge 4 -and $f -notmatch '^[\[<{]' -and $f -notmatch 'toolu_|hook feedback|^Caveat:|^This session is being continued|^Another Claude session|^\[Request interrupted' -and $f -match '\p{L}{3}') { $st.First = $f }   # letters of any script: [a-zA-Z] left Hebrew, Chinese, Russian... untitled
+            if ($f.Length -ge 4 -and $f -notmatch '^[\[<{]' -and $f -notmatch 'toolu_|hook feedback|^Caveat:|^This session is being continued|^Another Claude session|^\[Request interrupted' -and $f -match '\p{L}{3}') { $st.First = $f }   # three letters in a row, any script ([a-zA-Z] left Hebrew, Chinese, Russian... untitled; marks between letters, as in Hindi, still break the run)
           }
           if ($line -match '"timestamp":"([^"]+)"') { try { $st.TurnStart = [datetime]$Matches[1] } catch {} }
         }
