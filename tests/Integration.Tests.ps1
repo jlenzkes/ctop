@@ -60,7 +60,7 @@ BeforeAll {
     $closedLog = Join-Path $root 'closed.jsonl'
     [IO.File]::WriteAllLines($closedLog, [string[]]@($log | Where-Object { $_ }))   # none: an empty log
     return @{ Cfg = $cfg; Log = $closedLog; Env = "CLAUDE_CONFIG_DIR='$cfg' PATH='${bin}:$PathTail'"; Closed = $closed
-              RosterFile = $rosterFile; LiveJson = $liveJson }
+              RosterFile = $rosterFile; LiveJson = $liveJson; Fake = $fake }
   }
 
   $script:ErrFile = @{}   # tmux session -> the file holding ctop's stderr
@@ -382,6 +382,97 @@ Describe 'bad roster data' -Tag Integration -Skip:$script:noTmux {
       (Get-Screen $s) | Should -Not -Match 'stopped:|CTOP-EXITED'
       & tmux send-keys -t $s q
       Test-CleanExit (Wait-Exit $s 5) | Should -BeTrue
+    } finally { Stop-Ctop $s }
+  }
+}
+
+Describe 'a roster poll that hangs' -Tag Integration -Skip:$script:noTmux {
+  It 'gives up on it, keeps the last roster, says so, and recovers when polls work again' {
+    $fx = New-Fixture (Join-Path $TestDrive 'hang') @()
+    $flag = Join-Path $TestDrive 'hang/hang-now'
+    # hangs while the flag file exists (as a stuck claude agents --json would), answers otherwise
+    Set-Content -LiteralPath $fx.Fake -Value "#!/bin/sh`nif [ -e '$flag' ]; then exec sleep 600; fi`ncat '$($fx.RosterFile)'"
+    $s = Start-Ctop $fx '-RosterInterval 0.5'
+    try {
+      Wait-Screen $s '(?m)^live-one ' 30 | Should -Not -BeNullOrEmpty
+      New-Item -ItemType File -Path $flag | Out-Null
+      Wait-Screen $s 'poll FAILED' 20 | Should -Not -BeNullOrEmpty -Because 'a hung poll must time out (it blocked every later poll)'
+      (Get-Screen $s) | Should -Match '(?m)^live-one '          # the last good roster stays
+      Remove-Item -LiteralPath $flag
+      Wait-Screen $s 'poll +\d+ms' 20 | Should -Not -BeNullOrEmpty -Because 'polls resume once claude answers again'
+      (Get-Screen $s) | Should -Match '(?m)^live-one '
+    } finally { Stop-Ctop $s; Remove-Item -LiteralPath $flag -ErrorAction SilentlyContinue }
+  }
+}
+
+Describe 'hostile session text' -Tag Integration -Skip:$script:noTmux {
+  It 'does not let a title run terminal commands in peek or the closed log (OSC 52 sets the clipboard)' {
+    $fx = New-Fixture (Join-Path $TestDrive 'osc') @() -NoLive
+    $payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('pwned-by-title'))
+    $title = "evil $([char]27)]52;c;$payload$([char]7) title"
+    $rec = @{ closedAt = [DateTimeOffset]::UtcNow.AddMinutes(-3).ToString('o'); why = 'closed'; name = 'evil-one'; title = $title
+              sessionId = 'eeeeeeee-0000-4000-8000-000000000001'; cwd = "/tmp/$([char]27)[2J"; pid = 1; startedAt = 1793400000000; kind = 'interactive' }
+    Set-Content -LiteralPath $fx.Log -Value ($rec | ConvertTo-Json -Compress)
+    & tmux start-server
+    & tmux set-option -g set-clipboard on
+    & tmux delete-buffer -b pwned 2>$null
+    $s = Start-Ctop $fx '-Keep inf'
+    try {
+      Wait-Screen $s '(?m)^evil-one ' 30 | Should -Not -BeNullOrEmpty
+      & tmux send-keys -t $s Enter                 # peek: the title and cwd, in full
+      Wait-Screen $s 'ctop — evil-one' 5 | Should -Not -BeNullOrEmpty
+      Start-Sleep -Milliseconds 600
+      & tmux send-keys -t $s Escape; Start-Sleep -Milliseconds 400
+      & tmux send-keys -t $s x                     # the closed-sessions log
+      Wait-Screen $s 'closed sessions' 5 | Should -Not -BeNullOrEmpty
+      Start-Sleep -Milliseconds 600
+      $buffers = (& tmux list-buffers -F '#{buffer_sample}' 2>$null) -join "`n"
+      $buffers | Should -Not -Match 'pwned-by-title'
+    } finally { Stop-Ctop $s; & tmux set-option -g set-clipboard external }
+  }
+}
+
+Describe 'wide characters in a row' -Tag Integration -Skip:$script:noTmux {
+  It 'keeps the columns after a CJK name in line with the other rows (a wide character takes two cells)' {
+    $fx = New-Fixture (Join-Path $TestDrive 'cjk') @() -NoLive
+    $at = [DateTimeOffset]::UtcNow.AddMinutes(-3).ToString('o')
+    $recs = foreach ($n in 'plain-name', "$([char]0x65E5)$([char]0x672C)$([char]0x8A9E)-name") {
+      @{ closedAt = $at; why = 'closed'; name = $n; title = 't'; sessionId = [guid]::NewGuid().ToString(); cwd = '/w'
+         pid = 1; startedAt = 1793400000000; kind = 'interactive' } | ConvertTo-Json -Compress
+    }
+    [IO.File]::WriteAllLines($fx.Log, [string[]]$recs, [Text.UTF8Encoding]::new($false))
+    $s = Start-Ctop $fx '-Keep inf'
+    try {
+      Wait-Screen $s '(?m)^plain-name ' 30 | Should -Not -BeNullOrEmpty
+      Wait-Screen $s '(?m)^\S+-name .*gone[\s\S]*^\S+-name .*gone' 10 | Should -Not -BeNullOrEmpty
+      $lines = (Get-Screen $s) -split "`n"
+      $plain = @($lines | Where-Object { $_ -like 'plain-name *' })[0]
+      $wide = @($lines | Where-Object { $_ -like "$([char]0x65E5)*" })[0]
+      # three wide characters: three characters fewer in the text for the same cell position on screen
+      ($wide.IndexOf('gone') + 3) | Should -Be $plain.IndexOf('gone') -Because "`n$plain`n$wide"
+    } finally { Stop-Ctop $s }
+  }
+}
+
+Describe 'tree cost of a session that leaves' -Tag Integration -Skip:$script:noTmux {
+  It 'still counts its subagents once it is gone (the subagent part dropped to $0)' {
+    $fx = New-Fixture (Join-Path $TestDrive 'tc') @()
+    # a subagent transcript of the live session, with priced usage
+    $sid = '11111111-1111-4111-8111-111111111111'
+    $sub = Join-Path $fx.Cfg "projects/-w/$sid/subagents"
+    New-Item -ItemType Directory -Force -Path $sub | Out-Null
+    New-Transcript (Join-Path $sub 'agent-a1b2c3d4.jsonl') $sid 5
+    $s = Start-Ctop $fx '-Keep inf -RosterInterval 0.5'
+    try {
+      Wait-Screen $s '(?m)^live-one ' 30 | Should -Not -BeNullOrEmpty
+      & tmux send-keys -t $s Home Enter
+      Wait-Screen $s 'TREE COST .*1 subagent' 10 | Should -Not -BeNullOrEmpty   # while live
+      & tmux send-keys -t $s Escape
+      Set-Content -LiteralPath $fx.RosterFile -Value '[]'               # it leaves
+      Wait-Screen $s '(?m)^live-one +.*gone' 15 | Should -Not -BeNullOrEmpty
+      & tmux send-keys -t $s Home Enter
+      Wait-Screen $s 'ctop — live-one' 5 | Should -Not -BeNullOrEmpty
+      Wait-Screen $s 'TREE COST .*1 subagent' 5 | Should -Not -BeNullOrEmpty -Because 'its subagents still cost what they cost'
     } finally { Stop-Ctop $s }
   }
 }

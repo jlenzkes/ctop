@@ -88,7 +88,7 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release not
 | Parameter         | Default            | Description |
 |-------------------|--------------------|-------------|
 | `-Tick`           | `250`              | Display refresh period in ms. Adjust at runtime with `[` / `]`. |
-| `-RosterInterval` | `2`                | Seconds between `claude agents --json` polls. The poll is asynchronous and never blocks the display. |
+| `-RosterInterval` | `2`                | Seconds between `claude agents --json` polls. The poll is asynchronous and never blocks the display. A poll still running after max(5 s, 5 × this) is stopped and counted as failed; the last roster stays on screen. |
 | `-NoSubagents`    |                    | Don't scan for or show subagent rows. Toggle with `s`. |
 | `-Compact`        |                    | Essential columns only, whatever the window width. Toggle with `c`. |
 | `-Sort`           | `activity`         | `activity`, `roster`, `start`, `cost` or `ctx`. Cycle with `o`. |
@@ -222,6 +222,10 @@ The cache and the DLL are rebuilt as needed and can be deleted at any time. Dele
   **not** documented. The columns ctop takes from transcripts (STATE details, LAST ACTION, CTX,
   COST, and others) are read defensively and show `-` if the format changes, but a Claude Code
   update can still break them.
+- Text from sessions (titles, paths, tool arguments) is drawn with control characters and escape
+  sequences removed, so a title can't move the cursor or set the clipboard. Widths are measured in
+  terminal cells, so CJK, emoji and accented names line up; ctop's width table covers the common wide
+  ranges, and a terminal that disagrees about a character's width will shift that row.
 - COST is computed at API list price from per-turn token usage, the same basis as `/usage`. It
   is not your plan's billing.
 
@@ -237,18 +241,23 @@ Release notes are kept in the script's `.NOTES` help section. When cutting a bui
 
 Tests use [Pester](https://pester.dev) 5:
 
-- `tests/Keep.Tests.ps1`, `tests/Display.Tests.ps1`: unit tests. They load the functions from
-  `ctop.ps1` without running it (`tests/Import-Ctop.ps1`), so they need no `claude` and no terminal.
+- `tests/Keep.Tests.ps1`, `Display.Tests.ps1`, `Transcript.Tests.ps1`, `Clipboard.Tests.ps1`,
+  `Encoding.Tests.ps1`: unit tests. They load the functions from `ctop.ps1` without running it
+  (`tests/Import-Ctop.ps1`), so they need no `claude` and no terminal.
 - `tests/Integration.Tests.ps1` (tag `Integration`): drives the real ctop in tmux against a fake
   `claude` and a 300-session history, checking that keys are never dropped, that frames stay within the
   tick, that off-screen history is nearly free, that a row scrolled into view shows its current age,
-  and that the live sessions show before the history has loaded. Linux, with `tmux`.
+  and that the live sessions show before the history has loaded; also sessions coming and going, a hung
+  roster poll, hostile session text, wide characters and a clean exit. Linux, with `tmux`.
 
 ```powershell
 Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser
-Invoke-Pester ./tests -ExcludeTagFilter Integration   # unit tests
-Invoke-Pester ./tests -TagFilter Integration          # end to end (needs tmux)
+./tests/Run-Tests.ps1                     # everything; fails if the integration tests are skipped
+./tests/Run-Tests.ps1 -Integration Skip   # unit tests only (Windows, or no tmux)
 ```
+
+`Run-Tests.ps1` is what CI runs. It prints how many unit and integration tests passed, failed and were
+skipped, and fails a job that expects the integration tests but didn't run them.
 
 The [CI workflow](.github/workflows/ci.yml) runs the platforms in [Tested on](#tested-on). It checks
 that the script parses and that `-Version` works (and matches `.NOTES`), runs

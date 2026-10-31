@@ -4,7 +4,7 @@
 # Prints how many ran, failed and were skipped, by kind. Needs Pester 5.9.1.
 param([ValidateSet('Expect', 'Skip')][string]$Integration = 'Expect')
 
-Import-Module Pester -RequiredVersion 5.9.1
+Import-Module Pester -RequiredVersion 5.9.1 -ErrorAction Stop
 $c = New-PesterConfiguration
 $c.Run.Path = Join-Path $PSScriptRoot '.'
 $c.Run.PassThru = $true

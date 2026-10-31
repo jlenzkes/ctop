@@ -22,7 +22,6 @@ Describe 'Unescape-Json' {
 Describe 'Update-Scan: titles' {
   BeforeAll {
     $script:ScanCache = @{}; $script:ScanVerified = @{}; $script:PriceVer = 2; $script:ScanVer = 2
-    $script:Prices = @{}
   }
   It 'reads a first prompt containing quotes as plain text' {
     $f = Join-Path $TestDrive 's1.jsonl'
@@ -64,5 +63,95 @@ Describe 'ConvertTo-Hashtable (Windows PowerShell 5.1 has no ConvertFrom-Json -A
     $h.a.ToolCounts.Bash | Should -Be 2
     @($h.b.List) | Should -Be @(1, 2)
     $h.b.Empty | Should -BeOfType [hashtable]
+  }
+}
+
+Describe 'Update-Scan: what counts as a human prompt' {
+  BeforeAll { $script:ScanVerified = @{}; $script:PriceVer = 2; $script:ScanVer = 2 }
+  BeforeEach { $script:ScanCache = @{} }
+  It 'counts a prompt that mentions tool_result as a turn, with its start and title' {
+    $f = Join-Path $TestDrive 'p1.jsonl'
+    Set-Content -LiteralPath $f -Value (@{ type = 'user'; sessionId = 'p1'; timestamp = '2026-10-31T05:19:00Z'; message = @{ role = 'user'; content = 'explain the tool_result field' } } | ConvertTo-Json -Compress -Depth 5)
+    $st = Update-Scan (Get-Item -LiteralPath $f) 'p1'
+    $st.Turns | Should -Be 1
+    $st.TurnStart | Should -Not -BeNullOrEmpty
+    $st.First | Should -Be 'explain the tool_result field'
+  }
+  It 'does not count a tool result as a turn' {
+    $f = Join-Path $TestDrive 'p2.jsonl'
+    $lines = @(
+      (@{ type = 'user'; sessionId = 'p2'; timestamp = '2026-10-31T05:19:00Z'; message = @{ role = 'user'; content = 'list the files' } } | ConvertTo-Json -Compress -Depth 5)
+      (@{ type = 'user'; sessionId = 'p2'; timestamp = '2026-10-31T05:19:05Z'; message = @{ role = 'user'; content = @(@{ type = 'tool_result'; tool_use_id = 't1'; content = 'a b c' }) } } | ConvertTo-Json -Compress -Depth 6)
+    )
+    Set-Content -LiteralPath $f -Value $lines
+    (Update-Scan (Get-Item -LiteralPath $f) 'p2').Turns | Should -Be 1
+  }
+}
+
+Describe 'Update-Scan: a transcript that is replaced, cut, or moves' {
+  BeforeAll {
+    $script:PriceVer = 2; $script:ScanVer = 2
+    function Prompt([string]$text, [string]$ts = '2026-10-31T05:19:00Z') {
+      @{ type = 'user'; sessionId = 's'; timestamp = $ts; message = @{ role = 'user'; content = $text } } | ConvertTo-Json -Compress -Depth 5
+    }
+    function Write-Lines([string]$path, [string[]]$lines, [datetime]$when) {
+      [IO.File]::WriteAllText($path, (($lines -join "`n") + "`n"))
+      [IO.File]::SetLastWriteTimeUtc($path, $when)
+    }
+  }
+  BeforeEach { $script:ScanCache = @{}; $script:ScanVerified = @{} }
+
+  It 'rescans a file replaced by one of the same length' {
+    $f = Join-Path $TestDrive 'eq.jsonl'
+    Write-Lines $f @(Prompt 'first prompt alpha') ([datetime]::UtcNow.AddMinutes(-2))
+    (Update-Scan (Get-Item -LiteralPath $f) 'eq').First | Should -Be 'first prompt alpha'
+    Write-Lines $f @(Prompt 'secnd prompt betaa') ([datetime]::UtcNow)   # same length, rewritten
+    (Get-Item -LiteralPath $f).Length | Should -Be ([Text.Encoding]::UTF8.GetByteCount((Prompt 'first prompt alpha')) + 1)
+    (Update-Scan (Get-Item -LiteralPath $f) 'eq').First | Should -Be 'secnd prompt betaa'
+  }
+  It 'rescans a file replaced by a longer one with a different start' {
+    $f = Join-Path $TestDrive 'gt.jsonl'
+    Write-Lines $f @(Prompt 'first prompt alpha') ([datetime]::UtcNow.AddMinutes(-2))
+    Update-Scan (Get-Item -LiteralPath $f) 'gt' | Out-Null
+    Write-Lines $f @((Prompt 'another opening' '2026-10-31T06:00:00Z'), (Prompt 'and more text here' '2026-10-31T06:01:00Z')) ([datetime]::UtcNow)
+    $st = Update-Scan (Get-Item -LiteralPath $f) 'gt'
+    $st.First | Should -Be 'another opening'
+    $st.Turns | Should -Be 2
+  }
+  It 'keeps counting an appended file without rescanning it' {
+    $f = Join-Path $TestDrive 'ap.jsonl'
+    Write-Lines $f @(Prompt 'first message') ([datetime]::UtcNow.AddMinutes(-2))   # under 256 bytes: a short head
+    $st1 = Update-Scan (Get-Item -LiteralPath $f) 'ap'
+    [IO.File]::AppendAllText($f, (Prompt 'second message' '2026-10-31T05:20:00Z') + "`n")
+    $st = Update-Scan (Get-Item -LiteralPath $f) 'ap'
+    [object]::ReferenceEquals($st1, $st) | Should -BeTrue -Because 'an append continues the scan, it does not start over'
+    $st.Turns | Should -Be 2
+    $st.First | Should -Be 'first message'
+  }
+  It 'rescans a truncated file' {
+    $f = Join-Path $TestDrive 'tr.jsonl'
+    Write-Lines $f @((Prompt 'one'), (Prompt 'two')) ([datetime]::UtcNow.AddMinutes(-2))
+    (Update-Scan (Get-Item -LiteralPath $f) 'tr').Turns | Should -Be 2
+    Write-Lines $f @(Prompt 'one') ([datetime]::UtcNow)
+    (Update-Scan (Get-Item -LiteralPath $f) 'tr').Turns | Should -Be 1
+  }
+  It 'starts over when the session''s transcript is now a different file' {
+    $a = Join-Path $TestDrive 'mv-a.jsonl'; $b = Join-Path $TestDrive 'mv-b.jsonl'
+    Write-Lines $a @(Prompt 'in the first directory') ([datetime]::UtcNow.AddMinutes(-2))
+    Write-Lines $b @((Prompt 'in the second directory'), (Prompt 'still here')) ([datetime]::UtcNow)
+    Update-Scan (Get-Item -LiteralPath $a) 'mv' | Out-Null
+    $st = Update-Scan (Get-Item -LiteralPath $b) 'mv'
+    $st.Path | Should -Be (Get-Item -LiteralPath $b).FullName
+    $st.First | Should -Be 'in the second directory'
+    $st.Turns | Should -Be 2
+  }
+  It 'does not read an unchanged file again' {
+    $f = Join-Path $TestDrive 'un.jsonl'
+    Write-Lines $f @(Prompt 'still the same') ([datetime]::UtcNow.AddMinutes(-2))
+    $st1 = Update-Scan (Get-Item -LiteralPath $f) 'un'
+    $off = $st1.Offset
+    $st2 = Update-Scan (Get-Item -LiteralPath $f) 'un'
+    [object]::ReferenceEquals($st1, $st2) | Should -BeTrue
+    $st2.Offset | Should -Be $off
   }
 }

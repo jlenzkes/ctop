@@ -186,3 +186,107 @@ Describe 'ConvertFrom-UnixMs (roster startedAt, which ctop does not control)' {
     ConvertFrom-UnixMs $Ms | Should -BeNullOrEmpty
   }
 }
+
+Describe 'Protect-TerminalText (everything drawn goes through it)' {
+  BeforeAll { $E = [char]27; $BEL = [char]7 }
+  It 'keeps the color codes ctop paints with' {
+    Protect-TerminalText "$E[31mred$E[0m plain" | Should -BeExactly "$E[31mred$E[0m plain"
+  }
+  It 'neutralizes <Name>' -ForEach @(
+    @{ Name = 'OSC 52 (set the clipboard)'; Text = "a$([char]27)]52;c;QUJD$([char]7)b" }
+    @{ Name = 'OSC 0 (set the title)';     Text = "a$([char]27)]0;owned$([char]27)\b" }
+    @{ Name = 'a cursor move';             Text = "a$([char]27)[2;5Hb" }
+    @{ Name = 'clear screen';              Text = "a$([char]27)[2Jb" }
+    @{ Name = 'an 8-bit CSI (C1)';         Text = "a$([char]0x9B)2Jb" }
+    @{ Name = 'BEL';                       Text = "a$([char]7)b" }
+  ) {
+    $out = Protect-TerminalText $Text
+    $out | Should -Not -Match "[\x00-\x1A\x1C-\x1F\x7F-\x9F]"
+    # any ESC left must start a color code
+    ([regex]::Matches($out, "\x1b(?!\[[0-9;]*m)")).Count | Should -Be 0
+  }
+  It 'turns line breaks and tabs into spaces (a break would split the row)' {
+    Protect-TerminalText "one`ntwo`r`nthree`tfour" | Should -BeExactly 'one two  three four'
+  }
+}
+
+Describe 'terminal cell widths' {
+  BeforeAll {
+    $cjk = [string]::new([char[]]@([char]0x754C, [char]0x754C))                 # 界界
+    $acute = "e$([char]0x0301)"                                                   # e + combining acute
+    $grin = [char]::ConvertFromUtf32(0x1F600)                                     # 😀 (a surrogate pair)
+    function NoLoneSurrogate([string]$s) {
+      for ($i = 0; $i -lt $s.Length; $i++) {
+        if ([char]::IsHighSurrogate($s[$i])) { if ($i + 1 -ge $s.Length -or -not [char]::IsLowSurrogate($s[$i + 1])) { return $false }; $i++ }
+        elseif ([char]::IsLowSurrogate($s[$i])) { return $false }
+      }
+      $true
+    }
+  }
+  It 'measures <Name> as <Cells> cells' -ForEach @(
+    @{ Name = 'ASCII';                       Text = 'abc';                                   Cells = 3 }
+    @{ Name = 'nothing';                     Text = '';                                      Cells = 0 }
+    @{ Name = 'two CJK characters';          Text = [string]::new([char[]]@([char]0x754C, [char]0x754C)); Cells = 4 }
+    @{ Name = 'a combining accent';          Text = "e$([char]0x0301)";                      Cells = 1 }
+    @{ Name = 'an emoji (surrogate pair)';   Text = [char]::ConvertFromUtf32(0x1F600);        Cells = 2 }
+    @{ Name = 'a zero-width joiner';         Text = "a$([char]0x200D)b";                     Cells = 2 }
+    @{ Name = 'ctop''s own symbols';         Text = '█▒·▁░▼∞→│…Σ';                           Cells = 11 }
+    @{ Name = 'Hangul';                      Text = [string]::new([char[]]@([char]0xD55C, [char]0xAE00)); Cells = 4 }
+    @{ Name = 'fullwidth letters';           Text = [string]::new([char[]]@([char]0xFF21, [char]0xFF22)); Cells = 4 }
+  ) {
+    Get-CellWidth $Text | Should -Be $Cells
+  }
+  It 'Fit makes exactly <Width> cells of <Name>, without splitting a character' -ForEach @(
+    @{ Name = 'two CJK in 4';  Text = [string]::new([char[]]@([char]0x754C, [char]0x754C)); Width = 4 }
+    @{ Name = 'three CJK in 4'; Text = [string]::new([char[]]@([char]0x754C, [char]0x754C, [char]0x754C)); Width = 4 }
+    @{ Name = 'three CJK in 5'; Text = [string]::new([char[]]@([char]0x754C, [char]0x754C, [char]0x754C)); Width = 5 }
+    @{ Name = 'emoji in 2';    Text = ([char]::ConvertFromUtf32(0x1F600) * 3); Width = 2 }
+    @{ Name = 'emoji in 3';    Text = ([char]::ConvertFromUtf32(0x1F600) * 3); Width = 3 }
+    @{ Name = 'accents in 3';  Text = ("e$([char]0x0301)" * 5); Width = 3 }
+    @{ Name = 'ASCII in 4';    Text = 'abcdefgh'; Width = 4 }
+  ) {
+    foreach ($align in 'L', 'R') {
+      $out = Fit $Text $Width $align
+      Get-CellWidth $out | Should -Be $Width
+      NoLoneSurrogate $out | Should -BeTrue
+    }
+  }
+  It 'Fit keeps short text as is, padded: <Name>' -ForEach @(
+    @{ Name = 'CJK'; Text = [string]::new([char[]]@([char]0x754C, [char]0x754C)); Width = 6; Want = ([string]::new([char[]]@([char]0x754C, [char]0x754C)) + '  ') }
+  ) {
+    Fit $Text $Width 'L' | Should -BeExactly $Want
+  }
+  It 'Limit-Cells cuts on whole characters: <Name>' -ForEach @(
+    @{ Name = 'CJK in 3';       Text = [string]::new([char[]]@([char]0x754C, [char]0x754C)); Cells = 3; Want = [string][char]0x754C }
+    @{ Name = 'accent kept';    Text = "e$([char]0x0301)x"; Cells = 1; Want = "e$([char]0x0301)" }
+    @{ Name = 'emoji not half'; Text = ([char]::ConvertFromUtf32(0x1F600) + 'x'); Cells = 1; Want = '' }
+    @{ Name = 'ASCII';          Text = 'abcdef'; Cells = 2; Want = 'ab' }
+  ) {
+    Limit-Cells $Text $Cells | Should -BeExactly $Want
+  }
+  It 'Wrap-Cell keeps every piece within the width: <Name>' -ForEach @(
+    @{ Name = 'a CJK title'; Text = ([string]::new([char[]]@([char]0x6F22, [char]0x5B57, [char]0x306E, [char]0x30BF, [char]0x30A4, [char]0x30C8, [char]0x30EB)) * 4); Width = 9; Lines = 3; Path = $false }
+    @{ Name = 'a CJK path';  Text = ('/home/u/' + ([string]::new([char[]]@([char]0x6F22, [char]0x5B57)) * 10)); Width = 9; Lines = 2; Path = $true }
+    @{ Name = 'emoji words'; Text = (([char]::ConvertFromUtf32(0x1F600) * 3 + ' ') * 6); Width = 7; Lines = 3; Path = $false }
+  ) {
+    foreach ($piece in (Wrap-Cell $Text $Width $Lines $Path)) {
+      Get-CellWidth $piece | Should -BeLessOrEqual $Width
+      NoLoneSurrogate $piece | Should -BeTrue
+    }
+  }
+  It 'Format-Row pads every cell to its column in cells, so the next column lines up (<Align>)' -ForEach @(@{ Align = 'L' }, @{ Align = 'R' }) {
+    $cols = @([pscustomobject]@{ Name = 'NAME'; Width = 12; Align = $Align; Fixed = 0 },
+              [pscustomobject]@{ Name = 'KIND'; Width = 5; Align = 'L'; Fixed = 5 })
+    $wide = [pscustomobject]@{ NAME = ([string]::new([char[]]@([char]0x65E5, [char]0x672C, [char]0x8A9E)) + '-x'); KIND = 'k' }
+    $plain = [pscustomobject]@{ NAME = 'plain-x'; KIND = 'k' }
+    foreach ($r in $wide, $plain) {
+      $line = @(Format-Row $cols $r '  ' 1)[0]
+      Get-CellWidth (Strip-Ansi $line) | Should -Be (12 + 2 + 5) -Because "[$line]"
+    }
+  }
+  It 'Truncate-Ansi stops at <N> cells, with color codes around' {
+    $E = [char]27; $t = "$E[31m" + ([string][char]0x754C * 5) + "$E[0m"
+    $out = Truncate-Ansi $t 5
+    Get-CellWidth (Strip-Ansi $out) | Should -BeLessOrEqual 5
+  }
+}
