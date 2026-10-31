@@ -112,6 +112,8 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release not
 | `Enter` / `Space`    | Peek: a live detail screen for the selected session (`↑` `↓` switch session, `Esc` closes) |
 | `t`                  | Copy the selected row's transcript path (see [Copying](#copying)) |
 | `y`                  | Copy its `claude --resume <id>` command |
+| `n`                  | Copy its contact, to reach it from another Claude session (see [Contacts](#contacts)) |
+| `d`                  | Copy its session ID (a subagent: its agent ID) |
 | `o`                  | Cycle sort: activity, roster, start, cost, ctx |
 | `v`                  | Toggle layout: wrap / truncate |
 | `c`                  | Toggle compact columns |
@@ -132,6 +134,16 @@ terminals accept it; inside tmux it needs `set -g set-clipboard on` (tmux's defa
 it from applications). With a display and `xclip` installed, the system clipboard is set as well.
 (PowerShell's own `Set-Clipboard` on Linux needs `xclip`; without it, it keeps the text inside the
 PowerShell process and still reports success, so ctop doesn't rely on it.)
+
+### Contacts
+
+`n` copies the selected session's contact: its name and `@` address, session ID, kind, state, working
+directory, machine, transcript path, and its `claude attach` command (background sessions) or
+`claude --resume` command (sessions that are gone). Paste it into another Claude Code session on the
+same machine and ask it to message that session: Claude Code's own cross-session messaging delivers it,
+by name ([docs](https://code.claude.com/docs/en/cross-session-messaging)). ctop itself sends nothing. A
+session without a name has no address; give it one with `/rename`. A subagent's contact points at its
+parent session. `d` copies just the session ID.
 
 ### Mouse
 

@@ -81,9 +81,14 @@
   Print ctop's version and exit.
 
 .NOTES
-  VERSION 2026.10.31.8 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.10.31.9 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.10.31.9
+    - n copies the selected session's contact (name and @address, session ID, kind, state, directory,
+      machine, transcript, attach or resume command) to paste into another Claude session, which can
+      message it by name with Claude Code's own messaging. ctop sends nothing. d copies the session ID
+      (a subagent's agent ID). From cxtop's contact and ID keys
   2026.10.31.8 — the validation's second round
     - Windows PowerShell 5.1: stopping a poll could stop an unrelated process after a pid was reused
       (a parent id names whichever process had that pid). A child is followed only if it was created
@@ -261,7 +266,7 @@ param(
   [switch]$NoMouse,
   [switch]$Version
 )
-$script:CtopVersion = '2026.10.31.8'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.10.31.9'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -1207,6 +1212,54 @@ function Copy-Text([string]$text, [string]$what) {
   }
   $script:Flash = if ($used) { Format-CopyFlash $what $used } else { "clipboard unavailable: $err" }
   $script:FlashUntil = (Get-Date).AddSeconds(3)
+}
+
+# n: a session's contact, as text to paste into another Claude session, which can then reach it with
+# Claude Code's own messaging (SendMessage, by name; same machine). ctop itself sends nothing.
+# Session text (names, paths) is cleaned of control characters and escape sequences first.
+# session text for the contact: escape sequences out whole (an OSC 52 payload too), then the rest of the
+# control characters (Clean)
+function Get-ContactText($v) { return (Clean ([regex]::Replace([string]$v, '\x1b(\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)?)?', ''))) }   # (not 'Clean' first: clean is a keyword in PowerShell 7.3+)
+function Format-Contact($r, [string]$machine = [Environment]::MachineName) {
+  $c = ${function:Get-ContactText}
+  $lines = [Collections.Generic.List[string]]::new()
+  $row = { param($label, $value) $lines.Add(('{0,-16}{1}' -f ($label + ':'), $value)) }
+  if ($r._Parent) {
+    $agentId = [IO.Path]::GetFileNameWithoutExtension([string]$r._Transcript) -replace '^agent-', ''
+    $lines.Add('Claude Code subagent')
+    & $row 'Agent' (& $c (([string]$r.NAME) -replace '^[\s└├│]+', ''))
+    & $row 'Agent ID' (& $c $agentId)
+    & $row 'Parent session' (& $c $r._Parent)
+    & $row 'State' (& $c $r.STATE)
+    & $row 'Machine' (& $c $machine)
+    if ($r._Transcript -and $r._Transcript -ne '-') { & $row 'Transcript' (& $c $r._Transcript) }
+    $lines.Add('A subagent is reached through its parent session: message that session about it.')
+    return ($lines -join "`n")
+  }
+  $src = $r._Src
+  $name = if ($src -and $src.name) { & $c $src.name } elseif ($r.NAME -and $r.NAME -ne '-') { & $c $r.NAME } else { '' }
+  $lines.Add('Claude Code session')
+  & $row 'Name' $(if ($name -and -not $r._Gone) { "$name   (address: @$name)" } elseif ($name) { $name } else { '(none)' })
+  & $row 'Session ID' (& $c $r._SessionId)
+  & $row 'Kind' (& $c $r.KIND)
+  & $row 'State' (& $c $r.STATE)
+  if ($r.CWD -and $r.CWD -ne '-') { & $row 'Directory' (& $c $r.CWD) }
+  & $row 'Machine' (& $c $machine)
+  if ($r._Transcript -and $r._Transcript -ne '-') { & $row 'Transcript' (& $c $r._Transcript) }
+  if ($r._Gone) {
+    & $row 'Resume' "claude --resume $(& $c $r._SessionId)"
+    $lines.Add('It is not running: messages need it running. Resume it first.')
+  } else {
+    if ($src -and $src.kind -eq 'background' -and $src.id) { & $row 'Attach' "claude attach $(& $c $src.id)" }
+    if ($name) { $lines.Add("To reach it, ask Claude in another session on $(& $c $machine) to message @$name.") }
+    else { $lines.Add('It has no name to message it by: give it one with /rename in that session.') }
+  }
+  return ($lines -join "`n")
+}
+# d: the id to copy: a session's full id, or a subagent's agent id
+function Get-CopyId($r) {
+  if ($r._Parent) { return @{ Text = ([IO.Path]::GetFileNameWithoutExtension([string]$r._Transcript) -replace '^agent-', ''); What = 'agent ID' } }
+  return @{ Text = [string]$r._SessionId; What = 'session ID' }
 }
 
 # ---- keep window ----------------------------------------------------------------------
@@ -2572,7 +2625,7 @@ function Build-Footer {
     @((Lamp 'c' 'compact'   $script:Compact), 0),
     @((Lamp 's' 'subagents' $script:ShowSubagents), 0),
     @((Lamp 'g' 'gone'      $script:ShowGone), 0),
-    @(' x closed ', 7), @(' t/y copy ', 8), @(' r poll ', 9), @((Mode '+/-' "keep $(Format-Keep $script:KeepMin)"), 2), @(' h help ', 0), @(' q quit ', 0)
+    @(' x closed ', 7), @(' t/y/n/d copy ', 8), @(' r poll ', 9), @((Mode '+/-' "keep $(Format-Keep $script:KeepMin)"), 2), @(' h help ', 0), @(' q quit ', 0)
   )
   $limit = [Console]::WindowWidth - 1
   $keep = @($items)
@@ -2728,6 +2781,10 @@ function Show-Help {
     '         does not all fit)   PgUp/PgDn a screenful   Home/End first / last row',
     '       Enter or Space toggle peek (a live detail screen; ↑/↓ inside it switch',
     '         session; Esc/Enter/q close)   t copy the row''s transcript path   y copy its resume command',
+    '       n copy its contact: name and @address, session ID, kind, state, directory, machine, transcript,',
+    '         and how to reach it. Paste it into another Claude session on this machine and ask it to message',
+    '         that session (Claude Code''s own messaging, by name; ctop sends nothing). A subagent''s contact',
+    '         points at its parent session.   d copy the session ID (a subagent: its agent ID)',
     '       o sort: activity (active above idle, oldest first) | roster (as claude agents lists them) |',
     '         start (never moves) | cost | ctx.   v layout: wrap (long cells continue on the next line',
     '         of their column) | truncate.   c compact (essential columns only)',
@@ -3061,7 +3118,7 @@ try {
     if ($script:PeekId) {
       $pr = $sorted | Where-Object _SessionId -eq $script:PeekId | Select-Object -First 1
       if ($pr) {
-        $pf = "  live peek   ↑↓ other session   esc/enter close   t copy transcript path   y copy resume   h help"
+        $pf = "  live peek   ↑↓ other session   esc/enter close   t path   y resume   n contact   d ID   h help"
         if ((Get-Date) -lt $script:FlashUntil) { $pf = "  ► $($script:Flash)" }
         Write-Frame (Build-Peek $pr) $pf
       } else { $script:PeekId = $null; Write-Frame $frame $foot }
@@ -3115,6 +3172,8 @@ try {
           'g' { $script:ShowGone = -not $script:ShowGone; $repaint = $true }
           'x' { Show-Closed; $repaint = $true }
           't' { $sel = $sorted | Where-Object _SessionId -eq $selectedId | Select-Object -First 1; if ($sel -and $sel._Transcript -ne '-') { Copy-Text $sel._Transcript 'transcript path' } }
+          'n' { $sel = $sorted | Where-Object _SessionId -eq $selectedId | Select-Object -First 1; if ($sel) { Copy-Text (Format-Contact $sel) 'contact' } }
+          'd' { $sel = $sorted | Where-Object _SessionId -eq $selectedId | Select-Object -First 1; if ($sel) { $cid = Get-CopyId $sel; Copy-Text $cid.Text $cid.What } }
           'y' { $sel = $sorted | Where-Object _SessionId -eq $selectedId | Select-Object -First 1; if ($sel) { $id = if ($sel._Parent) { $sel._Parent } else { $sel._SessionId }; Copy-Text "claude --resume $id" 'resume command' } }
         }
         continue   # drain everything already typed before drawing

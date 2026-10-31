@@ -515,6 +515,35 @@ Describe 'hostile session text' -Tag Integration -Skip:$script:noTmux {
   }
 }
 
+Describe 'copying a contact' -Tag Integration -Skip:$script:noTmux {
+  It 'puts the selected session''s contact on the clipboard with n, and its ID with d (OSC 52 into tmux)' {
+    $fx = New-Fixture (Join-Path $TestDrive 'contact') @()
+    $script:n++; $hold = "ctop-it-$PID-$($script:n)-hold"
+    & tmux new-session -d -s $hold -x 80 -y 10 'sleep 120'    # a server, so the option below sticks
+    $prev = & tmux show-options -gv set-clipboard; $s = $null
+    $buffers = { (& tmux list-buffers -F '#{buffer_name}' 2>$null) | ForEach-Object { (& tmux show-buffer -b $_ 2>$null) -join "`n" } }
+    try {
+      & tmux set-option -g set-clipboard on
+      & tmux show-options -gv set-clipboard | Should -Be 'on'
+      $s = Start-Ctop $fx '-Keep inf'
+      Wait-Screen $s '(?m)^live-one ' 30 | Should -Not -BeNullOrEmpty
+      & tmux send-keys -t $s Home n
+      $sw = [Diagnostics.Stopwatch]::StartNew(); $got = ''
+      while ($sw.Elapsed.TotalSeconds -lt 5 -and $got -notmatch 'Claude Code session') { $got = (& $buffers) -join "`n---`n"; Start-Sleep -Milliseconds 100 }
+      $got | Should -Match '(?m)^Name: +live-one +\(address: @live-one\)'
+      $got | Should -Match '(?m)^Session ID: +11111111-1111-4111-8111-111111111111'
+      Wait-Screen $s '(copied|sent) contact' 5 | Should -Not -BeNullOrEmpty   # the flash says what was copied
+      & tmux send-keys -t $s d
+      $sw.Restart()
+      while ($sw.Elapsed.TotalSeconds -lt 5 -and -not ((& $buffers) -contains '11111111-1111-4111-8111-111111111111')) { Start-Sleep -Milliseconds 100 }
+      (& $buffers) | Should -Contain '11111111-1111-4111-8111-111111111111'
+    } finally {
+      & tmux set-option -g set-clipboard $prev
+      if ($s) { Stop-Ctop $s }; Stop-Ctop $hold
+    }
+  }
+}
+
 Describe 'wide characters in a row' -Tag Integration -Skip:$script:noTmux {
   It 'keeps the columns after a CJK name in line with the other rows (a wide character takes two cells)' {
     $fx = New-Fixture (Join-Path $TestDrive 'cjk') @() -NoLive
