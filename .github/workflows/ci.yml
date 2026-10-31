@@ -128,13 +128,15 @@ jobs:
           Invoke-Pester -Configuration $c
 
   # The script on other Linux distributions, with PowerShell 7.6.9 from Microsoft's packages: the deb
-  # from the GitHub release on Ubuntu, Microsoft's RHEL 9 rpm on UBI 9 (RHEL 9) and on Fedora (which
-  # Microsoft's install docs do not list as supported).
+  # from the GitHub release on Ubuntu / Debian, Microsoft's RHEL 9 rpm on the RHEL 9 family and on Fedora
+  # (which Microsoft's install docs do not list as supported).
   linux-distros:
     strategy:
       fail-fast: false
       matrix:
-        image: ['ubuntu:22.04', 'registry.access.redhat.com/ubi9/ubi:latest', 'fedora:latest']
+        # Debian family: Ubuntu 22.04, Debian 12. Fedora family: RHEL 9 (UBI 9: Red Hat's own packages, but
+        # no tmux, so no end-to-end tests), AlmaLinux 9 (a RHEL 9 rebuild with tmux), Fedora.
+        image: ['ubuntu:22.04', 'debian:12', 'registry.access.redhat.com/ubi9/ubi:latest', 'almalinux:9', 'fedora:latest']
     runs-on: ubuntu-latest
     container: ${{ matrix.image }}
     steps:

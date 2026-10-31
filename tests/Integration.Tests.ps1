@@ -57,10 +57,13 @@ BeforeAll {
     return @{ Cfg = $cfg; Log = $closedLog; Env = "CLAUDE_CONFIG_DIR='$cfg' PATH='${bin}:$env:PATH'"; Closed = $closed }
   }
 
+  $script:ErrFile = @{}   # tmux session -> the file holding ctop's stderr
   function Start-Ctop($fx, [string]$ctopArgs, [int]$height = 50) {
     $script:n++
     $s = "ctop-it-$PID-$($script:n)"
-    $cmd = "$($fx.Env) '$($script:pwsh)' -NoProfile -File '$($script:ctop)' -ClosedLog '$($fx.Log)' -NoColor $ctopArgs; echo CTOP-EXITED; sleep 60"
+    $err = Join-Path ([IO.Path]::GetTempPath()) "$s.err"
+    $script:ErrFile[$s] = $err
+    $cmd = "$($fx.Env) '$($script:pwsh)' -NoProfile -File '$($script:ctop)' -ClosedLog '$($fx.Log)' -NoColor $ctopArgs 2>'$err'; echo CTOP-EXITED `$?; sleep 60"
     & tmux new-session -d -s $s -x 200 -y $height $cmd
     return $s
   }
@@ -71,6 +74,11 @@ BeforeAll {
       if ((Get-Screen $s) -match $pattern) { return $sw.Elapsed.TotalSeconds }
       Start-Sleep -Milliseconds 100
     }
+    # timed out: show what was there instead, so a failure on another machine can be read from its log
+    Write-Host "    waited $seconds s for /$pattern/ on $s; tmux $(& tmux -V), pane TERM $(& tmux display -p -t $s '#{client_termname}' 2>$null) / default-terminal $(& tmux show -gv default-terminal 2>$null)"
+    Write-Host "    --- screen:"; (Get-Screen $s) -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 15 | ForEach-Object { Write-Host "    | $_" }
+    $err = $script:ErrFile[$s]
+    if ($err -and (Test-Path -LiteralPath $err)) { Write-Host "    --- ctop stderr:"; Get-Content -LiteralPath $err -TotalCount 20 | ForEach-Object { Write-Host "    ! $_" } }
     return $null
   }
   function Stop-Ctop([string]$s) { & tmux kill-session -t $s 2>$null }

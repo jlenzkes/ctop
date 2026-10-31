@@ -1007,7 +1007,9 @@ function Get-KeptDeparted([hashtable]$Departed, [datetime]$Now, [int]$KeepMinute
   $kept = [object[]]@(foreach ($e in @($Departed.Values)) { if ($e.GoneAt -ge $cut) { $e } })
   $keys = [long[]]::new($kept.Count)
   for ($i = 0; $i -lt $kept.Count; $i++) { $keys[$i] = -([datetime]$kept[$i].GoneAt).Ticks }
-  [Array]::Sort[long, object]($keys, $kept)   # explicit types: plain [Array]::Sort($keys, $kept) sorts copies in PowerShell 7.6
+  # [Array] casts pick the non-generic, in-place Sort(Array, Array): without them PowerShell 7.6 binds the
+  # generic overload to converted copies; [Array]::Sort[long, object](…) needs PowerShell 7.3+
+  [Array]::Sort([Array]$keys, [Array]$kept)
   $kept
 }
 # Who left the roster since the last good poll. Returns one record per newly departed session for
@@ -1712,7 +1714,7 @@ function Sort-Rows([object[]]$rows) {
     $gone = $goneP.ToArray(); $gk = [string[]]::new($gone.Count)
     $max = [datetime]::MaxValue.Ticks
     for ($i = 0; $i -lt $gone.Count; $i++) { $gk[$i] = '{0:D19}|{1}' -f ($max - ([datetime]$gone[$i]._Gone).Ticks), $gone[$i]._SessionId }
-    [Array]::Sort[string, object]($gk, $gone, [StringComparer]::Ordinal)
+    [Array]::Sort([Array]$gk, [Array]$gone, [Collections.IComparer][StringComparer]::Ordinal)   # in place; see Get-KeptDeparted
     $parents += $gone
   }
   # Σ: own + agents + (recursively) sessions it launched
