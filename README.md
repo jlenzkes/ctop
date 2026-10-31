@@ -163,16 +163,17 @@ The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meani
 
 ## Tested on
 
-What has actually been run, as of build `2026.10.31.5`. Anything not listed here is untested.
+What has actually been run, as of build `2026.10.31.6`. Anything not listed here is untested.
 
-**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (157).
-*End to end*: the integration tests (9), which drive the real ctop in tmux against a fake `claude`
-and a 300-session history.
+**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (222).
+*End to end*: the integration tests (24), which drive the real ctop in tmux against a fake `claude`
+and a 300-session history, sessions coming and going, a hung roster poll, hostile session text and
+wide characters. Each job fails if a test it is meant to run was skipped (`tests/Run-Tests.ps1`).
 
 | Platform | PowerShell | Unit | End to end |
 |---|---|---|---|
-| Windows Server 2025 (GitHub `windows-latest`) | Windows PowerShell 5.1.26100 | ✅ | not run (needs tmux) |
-| Windows Server 2025 (GitHub `windows-latest`) | 7.6.7 | ✅ | not run (needs tmux) |
+| Windows Server 2025 (GitHub `windows-latest`) | Windows PowerShell 5.1.26100.33648 | ✅ | not run (needs tmux) |
+| Windows Server 2025 (GitHub `windows-latest`) | 7.6.9 | ✅ | not run (needs tmux) |
 | Ubuntu 24.04 (GitHub `ubuntu-latest`) | 7.6.9 | ✅ | ✅ |
 | Ubuntu 22.04.5 (container) | 7.6.9 | ✅ | ✅ tmux 3.2a |
 | Debian 12 bookworm (container) | 7.6.9 | ✅ | ✅ tmux 3.3a |
