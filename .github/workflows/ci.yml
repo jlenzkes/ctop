@@ -46,3 +46,18 @@ jobs:
           $r = Invoke-ScriptAnalyzer -Path ./ctop.ps1 -Settings ./PSScriptAnalyzerSettings.psd1
           $r | Format-Table -AutoSize
           if ($r) { exit 1 }
+
+      - name: tmux (integration tests)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -y -q tmux)
+
+      - name: Tests (Pester)
+        run: |
+          Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          Import-Module Pester -RequiredVersion 5.9.1
+          $c = New-PesterConfiguration
+          $c.Run.Path = './tests'
+          $c.Run.Exit = $true
+          $c.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $c

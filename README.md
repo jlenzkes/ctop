@@ -66,7 +66,7 @@ Unblock-File ./ctop.ps1
 ./ctop.ps1                      # interactive sessions, default settings
 ./ctop.ps1 -All                 # include background sessions too
 ./ctop.ps1 -Sort cost -Compact  # most expensive first, essential columns only
-./ctop.ps1 -NoSubagents -Linger 60
+./ctop.ps1 -NoSubagents -Keep 1d      # also list sessions that closed in the last day
 ./ctop.ps1 -Version
 ```
 
@@ -77,16 +77,15 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release not
 
 | Parameter         | Default            | Description |
 |-------------------|--------------------|-------------|
-| `-Tick`           | `250`              | Display refresh period in ms. Adjust at runtime with `+` / `-`. |
+| `-Tick`           | `250`              | Display refresh period in ms. Adjust at runtime with `[` / `]`. |
 | `-RosterInterval` | `2`                | Seconds between `claude agents --json` polls. The poll is asynchronous and never blocks the display. |
-| `-SubagentWindow` | `900`              | Seconds a *stopped* subagent stays listed after its last write. `0` = until its parent goes away. Live subagents are always listed. |
 | `-NoSubagents`    |                    | Don't scan for or show subagent rows. Toggle with `s`. |
 | `-Compact`        |                    | Essential columns only, whatever the window width. Toggle with `c`. |
 | `-Sort`           | `activity`         | `activity`, `roster`, `start`, `cost` or `ctx`. Cycle with `o`. |
 | `-Layout`         | `wrap`             | `wrap` (long cells wrap inside their column) or `truncate`. Toggle with `v`. |
 | `-WrapLines`      | `2`                | Maximum lines a wrapped cell may use. |
 | `-MaxWidth`       | `0`                | Cap the table width in columns. `0` = the whole window. |
-| `-Linger`         | `15`               | Minutes a session stays listed (dimmed, `gone`) after it leaves the roster. Toggle with `g`. |
+| `-Keep`           | `15m`              | How long gone sessions and stopped subagents stay listed (see [Keep window](#keep-window)). Minutes, or `45m`, `2h`, `1d12h`, `1w`; `0` = drop at once; `inf` = forever. Adjust at runtime with `+` / `-`. Alias: `-Linger`. |
 | `-HighlightModel` | `fable\|mythos`    | Regex. Matching MODEL cells are shown in magenta, so a session on an unintended model stands out. |
 | `-ClosedLog`      | `<config>/ctop-closed.jsonl` | Where sessions that leave the roster are logged. View with `x`. |
 | `-SelectBg`       | `48;5;238`         | ANSI SGR parameters for the selected row's background. Try `48;5;254` on a light theme, or `7` for inverse video. |
@@ -110,7 +109,8 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release not
 | `g`                  | Toggle gone / cleared rows |
 | `x`                  | Closed-sessions log, newest first, with resume commands |
 | `r`                  | Poll the roster now |
-| `+` / `-`            | Faster / slower refresh |
+| `+` / `-`            | Widen / narrow the keep window |
+| `[` / `]`            | Slower / faster refresh |
 | `h`                  | Help |
 | `q`                  | Quit (or close peek) |
 
@@ -121,6 +121,26 @@ again or double-click to peek, scroll with the wheel, and click footer items. Qu
 switched off for the duration, so hold **Shift** while dragging to select text. The console
 mode is restored on exit. Use `-NoMouse` to keep the terminal's own mouse behavior.
 
+### Keep window
+
+One setting decides how long rows that are no longer live stay on screen: gone sessions (dimmed,
+`gone 5m`) and stopped subagents. `+` and `-` step through
+
+```
+0 · 15m · 30m · 45m · 1h · 2h · 4h · 8h · 12h · 1d · 2d · 3d · 7d · 14d · 30d · ∞
+```
+
+and the current value is shown as `keep` on the status strip and in the footer. `0` drops them at once;
+`∞` keeps everything. A working subagent is always listed, and a thinking one for at least 15 minutes.
+
+Gone sessions from earlier runs are read from the closed-sessions log at startup, so a window of a day
+or more shows yesterday's sessions too, most recently gone first. Claude Code deletes transcripts older
+than `cleanupPeriodDays` (30 by default); peek says so for a session whose transcript is gone, since it
+can no longer be resumed. A long history loads in slices, newest first, so live sessions show at once;
+the strip reads `gone 120/300` until it is all in.
+
+The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meaning (forever).
+
 ## Files it writes
 
 All in the Claude config directory: `$env:CLAUDE_CONFIG_DIR` if set, otherwise `~/.claude`.
@@ -128,7 +148,7 @@ All in the Claude config directory: `$env:CLAUDE_CONFIG_DIR` if set, otherwise `
 | File                       | Purpose |
 |----------------------------|---------|
 | `ctop-scancache.json`      | Running totals per transcript, so a restart doesn't rescan every file from the start |
-| `ctop-closed.jsonl`        | The closed-sessions log (`x`). Path set by `-ClosedLog` |
+| `ctop-closed.jsonl`        | The closed-sessions log (`x`), also the source of gone rows from earlier runs. Path set by `-ClosedLog` |
 | `ctop-con-<hash>.dll`      | Windows only: the compiled console-input helper used for mouse support |
 
 The cache and the DLL are rebuilt as needed and can be deleted at any time. Deleting
@@ -154,10 +174,24 @@ Release notes are kept in the script's `.NOTES` help section. When cutting a bui
 
 ## Development
 
-The [CI workflow](.github/workflows/ci.yml) runs on Windows and Linux. It checks that the
-script parses, that `-Version` works and matches `.NOTES`, and runs
-[PSScriptAnalyzer](https://github.com/PowerShell/PSScriptAnalyzer) for error-level findings. To
-run the analyzer locally:
+Tests use [Pester](https://pester.dev) 5:
+
+- `tests/Keep.Tests.ps1`, `tests/Display.Tests.ps1`: unit tests. They load the functions from
+  `ctop.ps1` without running it (`tests/Import-Ctop.ps1`), so they need no `claude` and no terminal.
+- `tests/Integration.Tests.ps1` (tag `Integration`): drives the real ctop in tmux against a fake
+  `claude` and a 300-session history, checking that keys are never dropped, that frames stay within the
+  tick, and that the live sessions show before the history has loaded. Linux, with `tmux`.
+
+```powershell
+Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser
+Invoke-Pester ./tests -ExcludeTagFilter Integration   # unit tests
+Invoke-Pester ./tests -TagFilter Integration          # end to end (needs tmux)
+```
+
+The [CI workflow](.github/workflows/ci.yml) runs on Windows and Linux. It checks that the script
+parses, that `-Version` works and matches `.NOTES`, runs
+[PSScriptAnalyzer](https://github.com/PowerShell/PSScriptAnalyzer) for error-level findings, and runs
+the unit tests (and, on Linux, the integration tests). To run the analyzer locally:
 
 ```powershell
 Install-Module PSScriptAnalyzer -Scope CurrentUser
