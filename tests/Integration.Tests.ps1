@@ -2,11 +2,18 @@
 # and a scratch config dir holding synthetic transcripts and a closed-sessions history.
 # Needs tmux (Linux). Run alone with:  Invoke-Pester ./tests -TagFilter Integration
 BeforeDiscovery { $script:noTmux = -not (Get-Command tmux -ErrorAction SilentlyContinue) -or $IsWindows }
+AfterAll { if ($script:tmuxExe) { & $script:tmuxExe -L $script:tmuxSock kill-server 2>$null } }
 
 BeforeAll {
   $script:ctop = Join-Path (Split-Path -Parent $PSScriptRoot) 'ctop.ps1'
   $script:pwsh = (Get-Process -Id $PID).Path
   $script:n = 0
+
+  # Every tmux call below goes to a private server for this run (tmux -L): the tests never touch your own
+  # sessions or options. A function wins over the program of the same name, so `& tmux …` lands here.
+  $script:tmuxExe = (Get-Command tmux -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+  $script:tmuxSock = "ctop-it-$PID"
+  function tmux { & $script:tmuxExe -L $script:tmuxSock @args }
 
   # a synthetic transcript: prompt, tool call + result, reply; repeated to ~60 KB
   function New-Transcript([string]$path, [string]$sid, [int]$turns = 25) {
@@ -413,22 +420,40 @@ Describe 'hostile session text' -Tag Integration -Skip:$script:noTmux {
     $rec = @{ closedAt = [DateTimeOffset]::UtcNow.AddMinutes(-3).ToString('o'); why = 'closed'; name = 'evil-one'; title = $title
               sessionId = 'eeeeeeee-0000-4000-8000-000000000001'; cwd = "/tmp/$([char]27)[2J"; pid = 1; startedAt = 1793400000000; kind = 'interactive' }
     Set-Content -LiteralPath $fx.Log -Value ($rec | ConvertTo-Json -Compress)
-    & tmux start-server
-    & tmux set-option -g set-clipboard on
-    & tmux delete-buffer -b pwned 2>$null
-    $s = Start-Ctop $fx '-Keep inf'
+    # A server must exist before its options can be set (an empty one exits): a holder session first.
+    $script:n++; $hold = "ctop-it-$PID-$($script:n)-hold"
+    & tmux new-session -d -s $hold -x 80 -y 10 'sleep 120'
+    $s = $null; $prev = & tmux show-options -gv set-clipboard
     try {
+      & tmux set-option -g set-clipboard on
+      $LASTEXITCODE | Should -Be 0
+      & tmux show-options -gv set-clipboard | Should -Be 'on'
+      # positive control: with this setting an application's OSC 52 does land in a tmux buffer
+      $ctl = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('control-payload'))
+      & tmux new-window -d -t $hold "printf '\033]52;c;$ctl\a'; sleep 60"
+      $sw = [Diagnostics.Stopwatch]::StartNew(); $seen = ''
+      while ($sw.Elapsed.TotalSeconds -lt 5 -and $seen -notmatch 'control-payload') {
+        $seen = (& tmux list-buffers -F '#{buffer_sample}' 2>$null) -join "`n"; Start-Sleep -Milliseconds 100
+      }
+      $seen | Should -Match 'control-payload' -Because 'the terminal must accept OSC 52, or a clean result below proves nothing'
+      $s = Start-Ctop $fx '-Keep inf'
       Wait-Screen $s '(?m)^evil-one ' 30 | Should -Not -BeNullOrEmpty
+      # the clipboard is checked after each view has had time to draw, before anything is read off the
+      # screen: an unsanitized ESC[2J would wreck the screen and fail a screen check first, hiding this one
+      $buffers = { (& tmux list-buffers -F '#{buffer_sample}' 2>$null) -join "`n" }
       & tmux send-keys -t $s Enter                 # peek: the title and cwd, in full
+      Start-Sleep -Milliseconds 1500
+      & $buffers | Should -Not -Match 'pwned-by-title' -Because 'peek drew the title'
       Wait-Screen $s 'ctop — evil-one' 5 | Should -Not -BeNullOrEmpty
-      Start-Sleep -Milliseconds 600
       & tmux send-keys -t $s Escape; Start-Sleep -Milliseconds 400
       & tmux send-keys -t $s x                     # the closed-sessions log
+      Start-Sleep -Milliseconds 1500
+      & $buffers | Should -Not -Match 'pwned-by-title' -Because 'the closed log drew the title'
       Wait-Screen $s 'closed sessions' 5 | Should -Not -BeNullOrEmpty
-      Start-Sleep -Milliseconds 600
-      $buffers = (& tmux list-buffers -F '#{buffer_sample}' 2>$null) -join "`n"
-      $buffers | Should -Not -Match 'pwned-by-title'
-    } finally { Stop-Ctop $s; & tmux set-option -g set-clipboard external }
+    } finally {
+      & tmux set-option -g set-clipboard $prev   # later tests share this private server
+      if ($s) { Stop-Ctop $s }; Stop-Ctop $hold
+    }
   }
 }
 
@@ -455,24 +480,36 @@ Describe 'wide characters in a row' -Tag Integration -Skip:$script:noTmux {
 }
 
 Describe 'tree cost of a session that leaves' -Tag Integration -Skip:$script:noTmux {
-  It 'still counts its subagents once it is gone (the subagent part dropped to $0)' {
-    $fx = New-Fixture (Join-Path $TestDrive 'tc') @()
-    # a subagent transcript of the live session, with priced usage
+  BeforeAll {
+    # Expected dollars, worked out by hand rather than with ctop's code: a New-Transcript turn holds two
+    # claude-sonnet-5-5 replies (list price per million: in $2, out $10, cache read $0.10, 5-minute cache
+    # write $2.50), with no message id, so each counts once:
+    #   (10+10)·2 + (200+300)·10 + (30000+31000)·0.1 + (500+200)·2.5 = 12,890 per million = $0.01289 a turn
+    function Usd([int]$turns) { '${0:N2}' -f ($turns * 0.01289) }
+  }
+  It 'still counts its subagents once it is gone, and follows a subagent transcript that grows after it left' {
+    $fx = New-Fixture (Join-Path $TestDrive 'tc') @()    # the session's own transcript: 25 turns
     $sid = '11111111-1111-4111-8111-111111111111'
     $sub = Join-Path $fx.Cfg "projects/-w/$sid/subagents"
     New-Item -ItemType Directory -Force -Path $sub | Out-Null
-    New-Transcript (Join-Path $sub 'agent-a1b2c3d4.jsonl') $sid 5
+    $agent = Join-Path $sub 'agent-a1b2c3d4.jsonl'
+    New-Transcript $agent $sid 5                          # its subagent: 5 turns
+    $tree = { param($own, $agentTurns) [regex]::Escape("TREE COST    $(Usd ($own + $agentTurns)) at list price:  this session $(Usd $own) · 1 subagent $(Usd $agentTurns)") }
     $s = Start-Ctop $fx '-Keep inf -RosterInterval 0.5'
     try {
       Wait-Screen $s '(?m)^live-one ' 30 | Should -Not -BeNullOrEmpty
       & tmux send-keys -t $s Home Enter
-      Wait-Screen $s 'TREE COST .*1 subagent' 10 | Should -Not -BeNullOrEmpty   # while live
+      Wait-Screen $s (& $tree 25 5) 10 | Should -Not -BeNullOrEmpty -Because 'while live'
       & tmux send-keys -t $s Escape
       Set-Content -LiteralPath $fx.RosterFile -Value '[]'               # it leaves
       Wait-Screen $s '(?m)^live-one +.*gone' 15 | Should -Not -BeNullOrEmpty
       & tmux send-keys -t $s Home Enter
       Wait-Screen $s 'ctop — live-one' 5 | Should -Not -BeNullOrEmpty
-      Wait-Screen $s 'TREE COST .*1 subagent' 5 | Should -Not -BeNullOrEmpty -Because 'its subagents still cost what they cost'
+      Wait-Screen $s (& $tree 25 5) 5 | Should -Not -BeNullOrEmpty -Because 'its subagents still cost what they cost'
+      # the subagent carries on after its session left (a background agent finishing): 20 more turns
+      $lines = [IO.File]::ReadAllLines($agent)
+      [IO.File]::AppendAllLines($agent, [string[]]($lines * 4))
+      Wait-Screen $s (& $tree 25 25) 10 | Should -Not -BeNullOrEmpty -Because 'the gone row follows its subagent transcripts'
     } finally { Stop-Ctop $s }
   }
 }

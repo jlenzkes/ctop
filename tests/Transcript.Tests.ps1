@@ -128,6 +128,25 @@ Describe 'Update-Scan: a transcript that is replaced, cut, or moves' {
     $st.Turns | Should -Be 2
     $st.First | Should -Be 'first message'
   }
+  It 'tells heads apart that differ only in letter case once encoded (Base64 is case-sensitive)' {
+    $a = Join-Path $TestDrive 'ha.bin'; $z = Join-Path $TestDrive 'hz.bin'
+    [IO.File]::WriteAllBytes($a, [Text.Encoding]::ASCII.GetBytes('ab@'))   # YWJA
+    [IO.File]::WriteAllBytes($z, [Text.Encoding]::ASCII.GetBytes('abZ'))   # YWJa
+    Get-HeadPrint $a | Should -BeExactly 'YWJA'
+    Test-SameHead $z 'YWJA' | Should -BeFalse
+    Test-SameHead $a 'YWJA' | Should -BeTrue
+  }
+  It 'rescans a grown file whose start changed only where the head print differs in case' {
+    $f = Join-Path $TestDrive 'case.jsonl'
+    # put an @ where its Base64 group differs from Z's only in the letter case of one character
+    $pad = ''; while ((Prompt "$pad@ mark").IndexOf('@') % 3 -ne 2) { $pad += 'x' }
+    Write-Lines $f @(Prompt "$pad@ mark") ([datetime]::UtcNow.AddMinutes(-2))
+    (Update-Scan (Get-Item -LiteralPath $f) 'case').First | Should -Be "$pad@ mark"
+    Write-Lines $f @((Prompt "${pad}Z mark"), (Prompt 'a second turn' '2026-10-31T05:20:00Z')) ([datetime]::UtcNow)
+    $st = Update-Scan (Get-Item -LiteralPath $f) 'case'
+    $st.First | Should -Be "${pad}Z mark"
+    $st.Turns | Should -Be 2
+  }
   It 'rescans a truncated file' {
     $f = Join-Path $TestDrive 'tr.jsonl'
     Write-Lines $f @((Prompt 'one'), (Prompt 'two')) ([datetime]::UtcNow.AddMinutes(-2))
@@ -153,5 +172,43 @@ Describe 'Update-Scan: a transcript that is replaced, cut, or moves' {
     $st2 = Update-Scan (Get-Item -LiteralPath $f) 'un'
     [object]::ReferenceEquals($st1, $st2) | Should -BeTrue
     $st2.Offset | Should -Be $off
+  }
+}
+
+Describe 'Get-LastAction: its tail cache' {
+  BeforeAll {
+    $script:PriceVer = 2; $script:ScanVer = 2
+    function Reply([string]$text) {
+      @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'
+         message = @{ role = 'assistant'; model = 'm'; content = @(@{ type = 'text'; text = $text }) } } | ConvertTo-Json -Compress -Depth 6
+    }
+  }
+  BeforeEach { $script:ScanCache = @{}; $script:ScanVerified = @{}; $script:TailCache = @{} }
+  It 'does not cut a character in half when it shortens LAST ACTION: <Name>' -ForEach @(
+    @{ Name = 'a reply cut at 120';            Block = @{ type = 'text'; text = ('a' * 119) + [char]::ConvertFromUtf32(0x1F600) + 'tail' } }
+    @{ Name = 'a command cut at 119';          Block = @{ type = 'tool_use'; id = 't1'; name = 'Bash'; input = @{ command = ('x' * 118) + [char]::ConvertFromUtf32(0x1F600) + ('y' * 20) } } }
+    @{ Name = 'a path keeping its last 119';   Block = @{ type = 'tool_use'; id = 't2'; name = 'Read'; input = @{ file_path = '/' + ('x' * 10) + [char]::ConvertFromUtf32(0x1F600) + ('y' * 118) } } }
+    @{ Name = 'a handback cut at 129';         Block = @{ type = 'tool_use'; id = 't3'; name = 'SubagentHandback'; input = @{ message = ('h' * 118) + [char]::ConvertFromUtf32(0x1F600) + ('z' * 20) } } }
+  ) {
+    $f = Join-Path $TestDrive "cut-$([guid]::NewGuid()).jsonl"
+    $line = @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'
+               message = @{ role = 'assistant'; model = 'm'; content = @($Block) } } | ConvertTo-Json -Compress -Depth 8
+    [IO.File]::WriteAllText($f, $line + "`n")
+    $last = (Get-LastAction (Get-Item -LiteralPath $f) ([guid]::NewGuid().ToString())).Last
+    $last | Should -Not -Be '-'
+    $lone = $false
+    for ($i = 0; $i -lt $last.Length; $i++) {
+      if ([char]::IsHighSurrogate($last[$i])) { if ($i + 1 -ge $last.Length -or -not [char]::IsLowSurrogate($last[$i + 1])) { $lone = $true }; $i++ }
+      elseif ([char]::IsLowSurrogate($last[$i])) { $lone = $true }
+    }
+    $lone | Should -BeFalse -Because "[$last]"
+  }
+  It 'reads the new transcript when a session''s transcript is another file of the same size and time' {
+    $when = [datetime]::UtcNow.AddMinutes(-1)
+    $a = Join-Path $TestDrive 'a.jsonl'; $b = Join-Path $TestDrive 'b.jsonl'
+    [IO.File]::WriteAllText($a, (Reply 'alpha final') + "`n"); [IO.File]::SetLastWriteTimeUtc($a, $when)
+    [IO.File]::WriteAllText($b, (Reply 'bravo final') + "`n"); [IO.File]::SetLastWriteTimeUtc($b, $when)
+    (Get-LastAction (Get-Item -LiteralPath $a) 's').Last | Should -Be 'text: alpha final'
+    (Get-LastAction (Get-Item -LiteralPath $b) 's').Last | Should -Be 'text: bravo final'
   }
 }

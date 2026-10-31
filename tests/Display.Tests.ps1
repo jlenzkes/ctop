@@ -284,6 +284,47 @@ Describe 'terminal cell widths' {
       Get-CellWidth (Strip-Ansi $line) | Should -Be (12 + 2 + 5) -Because "[$line]"
     }
   }
+  It 'Format-Row keeps a STATE with a +N subagent badge to its column in cells (width <Width>)' -ForEach @(
+    @{ Width = 13 }   # the badge fits: own text, badge, padding
+    @{ Width = 9 }    # it does not: the cell is cut to the column
+  ) {
+    $cols = @([pscustomobject]@{ Name = 'STATE'; Width = $Width; Align = 'L'; Fixed = $Width },
+              [pscustomobject]@{ Name = 'KIND'; Width = 4; Align = 'L'; Fixed = 4 })
+    $r = [pscustomobject]@{ STATE = "waiting: $([char]0x754C)"; KIND = 'test'; _LiveKids = 1 }
+    $line = @(Format-Row $cols $r '  ' 1)[0]
+    Get-CellWidth (Strip-Ansi $line) | Should -Be ($Width + 2 + 4) -Because "[$line]"
+  }
+  It 'Wrap-Cell keeps a path to <Lines> lines of <Width> cells and keeps its tail: <Name>' -ForEach @(
+    @{ Name = 'wide tail, odd width';   Text = ('/x/ab/' + ([string][char]0x754C * 6));  Width = 9;  Lines = 2 }
+    @{ Name = 'all wide, odd width';    Text = ([string][char]0x754C * 20);              Width = 7;  Lines = 3 }
+    @{ Name = 'mixed, odd width';       Text = ('/a' + ([string][char]0x754C) + 'b') * 9; Width = 5;  Lines = 2 }
+    @{ Name = 'mixed, even width';      Text = ('/a' + ([string][char]0x754C) + 'b') * 9; Width = 6;  Lines = 3 }
+    @{ Name = 'emoji';                  Text = ('/p/' + ([char]::ConvertFromUtf32(0x1F600) * 8)); Width = 5; Lines = 2 }
+    @{ Name = 'narrow only';            Text = '/home/u/' + ('abcdefgh' * 4);            Width = 9;  Lines = 2 }
+  ) {
+    $pieces = Wrap-Cell $Text $Width $Lines $true   # already an array (,$parts); @() would nest it
+    $pieces.Count | Should -BeLessOrEqual $Lines -Because ($pieces -join ' | ')
+    foreach ($p in $pieces) { Get-CellWidth $p | Should -BeLessOrEqual $Width }
+    $joined = (-join $pieces).TrimStart([char]0x2026)
+    $Text.EndsWith($joined) | Should -BeTrue -Because "the tail identifies the path: [$(-join $pieces)]"
+  }
+  It 'measures every BMP character, alone and after a letter, as its text elements do (the fast path agrees)' {
+    # the oracle: text elements one by one, never the fast path
+    function Slow([string]$t) { $w = 0; $en = [Globalization.StringInfo]::GetTextElementEnumerator($t); while ($en.MoveNext()) { $w += Get-ElementCells ([string]$en.Current) }; $w }
+    $bad = [Collections.Generic.List[string]]::new()
+    for ($cp = 0x20; $cp -le 0xFFFF; $cp++) {
+      if ($cp -ge 0xD800 -and $cp -le 0xDFFF) { continue }
+      if ($cp -ge 0x7F -and $cp -le 0x9F) { continue }   # controls: Clean / Protect-TerminalText replace them first
+      $ch = [string][char]$cp
+      foreach ($t in $ch, "a$ch") { if ((Get-CellWidth $t) -ne (Slow $t)) { $bad.Add(('U+{0:X4} in "{1}"' -f $cp, $(if ($t.Length -gt 1) { 'a+' } else { '' }))) } }
+      if ($bad.Count -ge 10) { break }
+    }
+    $bad | Should -BeNullOrEmpty
+  }
+  It 'measures a flag (two regional indicators) as two cells' -Skip:($PSVersionTable.PSEdition -eq 'Desktop') {
+    # .NET Framework (Windows PowerShell 5.1) splits the pair into two text elements: there it measures 4
+    Get-CellWidth ([char]::ConvertFromUtf32(0x1F1FA) + [char]::ConvertFromUtf32(0x1F1F8)) | Should -Be 2
+  }
   It 'Truncate-Ansi stops at <N> cells, with color codes around' {
     $E = [char]27; $t = "$E[31m" + ([string][char]0x754C * 5) + "$E[0m"
     $out = Truncate-Ansi $t 5

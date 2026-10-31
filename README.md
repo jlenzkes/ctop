@@ -225,8 +225,14 @@ The cache and the DLL are rebuilt as needed and can be deleted at any time. Dele
   update can still break them.
 - Text from sessions (titles, paths, tool arguments) is drawn with control characters and escape
   sequences removed, so a title can't move the cursor or set the clipboard. Widths are measured in
-  terminal cells, so CJK, emoji and accented names line up; ctop's width table covers the common wide
-  ranges, and a terminal that disagrees about a character's width will shift that row.
+  terminal cells, so CJK, emoji and accented names line up. ctop's width table counts CJK, Hangul,
+  fullwidth forms, the main emoji blocks and flags as two cells and combining marks as none; symbols
+  that some terminals draw wide (U+2600–27BF) count as one, and a terminal that disagrees about a
+  character's width will shift that row. On Windows PowerShell 5.1 a flag counts as four.
+- A roster poll that hangs is stopped with what it started: `Kill(entireProcessTree)` on PowerShell 7,
+  and on Windows PowerShell 5.1 every process descended from it by parent process id. On Linux a
+  process that outlives `claude` and keeps its output open is no longer `claude`'s child and is not
+  stopped; ctop drops that poll and polls again all the same.
 - COST is computed at API list price from per-turn token usage, the same basis as `/usage`. It
   is not your plan's billing.
 
@@ -243,13 +249,14 @@ Release notes are kept in the script's `.NOTES` help section. When cutting a bui
 Tests use [Pester](https://pester.dev) 5:
 
 - `tests/Keep.Tests.ps1`, `Display.Tests.ps1`, `Transcript.Tests.ps1`, `Clipboard.Tests.ps1`,
-  `Encoding.Tests.ps1`: unit tests. They load the functions from `ctop.ps1` without running it
+  `Encoding.Tests.ps1`, `Process.Tests.ps1` (Windows only): unit tests. They load the functions from `ctop.ps1` without running it
   (`tests/Import-Ctop.ps1`), so they need no `claude` and no terminal.
 - `tests/Integration.Tests.ps1` (tag `Integration`): drives the real ctop in tmux against a fake
   `claude` and a 300-session history, checking that keys are never dropped, that frames stay within the
   tick, that off-screen history is nearly free, that a row scrolled into view shows its current age,
   and that the live sessions show before the history has loaded; also sessions coming and going, a hung
-  roster poll, hostile session text, wide characters and a clean exit. Linux, with `tmux`.
+  roster poll, hostile session text, wide characters and a clean exit. Linux, with `tmux`; they run on
+  a private tmux server (`tmux -L`), so your own sessions and options are left alone.
 
 ```powershell
 Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser

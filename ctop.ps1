@@ -81,9 +81,29 @@
   Print ctop's version and exit.
 
 .NOTES
-  VERSION 2026.10.31.6 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.10.31.7 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.10.31.7 — fixes from the audit's validation round
+    - LAST ACTION could show another transcript's last action: its cache checked size and time, not
+      which file it was
+    - a transcript replaced by one whose start differed only in letter case once encoded (@ vs Z) read
+      as the same file: the start is compared case-sensitively. A longer rewrite that keeps the first
+      256 bytes still reads as an append (Claude Code only appends)
+    - a STATE with a +N subagent badge and wide text pushed the next columns out of line
+    - a wrapped path with wide characters could take more lines than -WrapLines
+    - LAST ACTION and a failed poll's reason are shortened without cutting a character in half (an
+      emoji at the cut left half a surrogate pair)
+    - widths: the fast path covers only characters that are one cell on their own and never join the
+      one before (a soft hyphen, Arabic number signs and bidi isolates were counted as one cell); a
+      flag is two cells (four on Windows PowerShell 5.1, whose .NET splits the pair)
+    - a gone session's tree cost follows its subagent transcripts as they grow; a new subagent file
+      of a gone session is found when its own transcript changes, or at the next start
+    - Windows PowerShell 5.1: a poll that hangs is stopped with everything it started (claude.cmd's
+      node outlived its cmd.exe). Linux: a process that outlives claude and holds its output is not
+      stopped (it is no longer claude's child); ctop still drops the poll and polls again
+    - tests: the integration tests run on a private tmux server and never touch yours; the clipboard
+      test proves the terminal accepts OSC 52 before it trusts a clean result
   2026.10.31.6 — fixes from an outside audit of the branch
     - nothing live but history in the keep window: the history was not drawn (the table was skipped
       whenever no session was live), and peek / t / y could act on a row no longer shown
@@ -223,7 +243,7 @@ param(
   [switch]$NoMouse,
   [switch]$Version
 )
-$script:CtopVersion = '2026.10.31.6'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.10.31.7'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -236,7 +256,7 @@ $ProjectsDir = Join-Path $ConfigDir 'projects'
 #   $TranscriptIndex : sessionId -> newest transcript FileInfo (rebuilt every roster poll)
 #   $ScanCache  : sessionId -> byte offset + running totals (incremental transcript scan)
 $script:TranscriptIndex = @{}
-$script:TailCache  = @{}   # sessionId -> @{ Length; Write; Result }  (skip re-parse if file unchanged)
+$script:TailCache  = @{}   # sessionId -> @{ Path; Length; Write; Result }  (skip re-parse if the same file is unchanged)
 
 # The roster's startedAt (Unix ms) as local time; $null when missing, not a number or out of range. It
 # comes from another program: one bad value threw out of the frame and stopped ctop.
@@ -285,13 +305,15 @@ function Clear-Screen {
 # A terminal gives East Asian wide characters and most emoji two cells, and combining marks and
 # zero-width characters none, while .Length counts UTF-16 units: CJK titles pushed columns out of line
 # and a cut could split a surrogate pair. Widths are measured per text element (a character with its
-# combining marks). Text with nothing outside the narrow ranges (ASCII, Latin, Greek, Cyrillic, box
-# drawing, ctop's own symbols) takes the fast path: its width is its length.
+# combining marks). Text made only of characters that are one cell on their own and never join the
+# character before them (Latin, Greek, Cyrillic, general punctuation, arrows, math, box drawing, blocks,
+# geometric shapes, ctop's own symbols) takes the fast path: its width is its length. A unit test sweeps
+# the whole BMP to keep the two paths in agreement.
 function Test-PlainCells([string]$s) {
-  -not [regex]::IsMatch($s, '[\u0300-\u036F\u0483-\u0489\u0591-\u05C7\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0900-\u0DFF\u0E31-\u0E4E\u0EB1-\u0ECD\u1100-\u115F\u1AB0-\u1AFF\u1DC0-\u1DFF\u200B-\u200F\u202A-\u202E\u2060-\u2064\u20D0-\u20FF\u2E80-\uA4CF\uA960-\uA97F\uAC00-\uD7FF\uD800-\uDFFF\uF900-\uFAFF\uFE00-\uFE0F\uFE10-\uFE6F\uFEFF\uFF00-\uFF60\uFFE0-\uFFE6]')
+  [regex]::IsMatch($s, '^[\u0020-\u007E\u00A0-\u00AC\u00AE-\u02FF\u0370-\u0482\u048A-\u052F\u2010-\u2027\u2030-\u205E\u20A0-\u20C0\u2100-\u27BF\u2800-\u28FF]*$')
 }
 # Cells of one text element: 0 for a lone combining mark or format character (ZWJ, bidi marks),
-# 2 for wide (CJK, Hangul, fullwidth forms, most emoji), else 1.
+# 2 for wide (CJK, Hangul, fullwidth forms, most emoji, a flag), else 1.
 function Get-ElementCells([string]$e) {
   if (-not $e) { return 0 }
   $cat = [Globalization.CharUnicodeInfo]::GetUnicodeCategory($e, 0)
@@ -301,7 +323,7 @@ function Get-ElementCells([string]$e) {
       ($cp -ge 0x3400 -and $cp -le 0x4DBF) -or ($cp -ge 0x4E00 -and $cp -le 0x9FFF) -or ($cp -ge 0xA000 -and $cp -le 0xA4CF) -or
       ($cp -ge 0xA960 -and $cp -le 0xA97F) -or ($cp -ge 0xAC00 -and $cp -le 0xD7A3) -or ($cp -ge 0xF900 -and $cp -le 0xFAFF) -or
       ($cp -ge 0xFE10 -and $cp -le 0xFE19) -or ($cp -ge 0xFE30 -and $cp -le 0xFE6F) -or ($cp -ge 0xFF00 -and $cp -le 0xFF60) -or
-      ($cp -ge 0xFFE0 -and $cp -le 0xFFE6) -or ($cp -ge 0x1F300 -and $cp -le 0x1F64F) -or ($cp -ge 0x1F680 -and $cp -le 0x1F6FF) -or
+      ($cp -ge 0xFFE0 -and $cp -le 0xFFE6) -or ($cp -ge 0x1F1E6 -and $cp -le 0x1F1FF) -or ($cp -ge 0x1F300 -and $cp -le 0x1F64F) -or ($cp -ge 0x1F680 -and $cp -le 0x1F6FF) -or
       ($cp -ge 0x1F900 -and $cp -le 0x1F9FF) -or ($cp -ge 0x1FA70 -and $cp -le 0x1FAFF) -or ($cp -ge 0x20000 -and $cp -le 0x3FFFD)) { return 2 }
   return 1
 }
@@ -334,13 +356,31 @@ function Last-Cells([string]$s, [int]$n) {
   for ($i = $els.Count - 1; $i -ge 0; $i--) { $c = Get-ElementCells $els[$i]; if ($w + $c -gt $n) { break }; $w += $c; $start = $i }
   return (-join $els.GetRange($start, $els.Count - $start))
 }
+# Budgets in UTF-16 units (LAST ACTION's 120, say), cut between characters: never inside a surrogate pair,
+# never between a character and its combining marks.
+function Test-Joined([string]$s, [int]$i) {
+  if ($i -le 0 -or $i -ge $s.Length) { return $false }
+  if ([char]::IsLowSurrogate($s[$i])) { return $true }
+  $cat = [Globalization.CharUnicodeInfo]::GetUnicodeCategory($s[$i])
+  return ($cat -eq 'NonSpacingMark' -or $cat -eq 'SpacingCombiningMark' -or $cat -eq 'EnclosingMark')
+}
+function Limit-Chars([string]$s, [int]$n) {
+  if (-not $s -or $s.Length -le $n) { return $s }
+  $end = [math]::Max(0, $n); while ($end -gt 0 -and (Test-Joined $s $end)) { $end-- }
+  return $s.Substring(0, $end)
+}
+function Last-Chars([string]$s, [int]$n) {
+  if (-not $s -or $s.Length -le $n) { return $s }
+  $start = $s.Length - [math]::Max(0, $n); while ($start -lt $s.Length -and (Test-Joined $s $start)) { $start++ }
+  return $s.Substring($start)
+}
 
 $script:AnsiRx = [regex]'\x1b\[[0-9;]*m'
 function Strip-Ansi([string]$t) { [regex]::Replace($t, '\x1b\[[0-9;]*m', '') }
 # Cut to $n cells, keeping the color codes (and closing them).
 function Truncate-Ansi([string]$t, [int]$n) {
   $rx = if ($script:AnsiRx) { $script:AnsiRx } else { [regex]'\x1b\[[0-9;]*m' }
-  $plain = Test-PlainCells $t
+  $plain = Test-PlainCells ($rx.Replace($t, ''))   # the color codes are skipped below; judge the text
   $sb = [Text.StringBuilder]::new(); $vis = 0; $i = 0
   while ($i -lt $t.Length -and $vis -lt $n) {
     if ($t[$i] -eq [char]27) {
@@ -563,6 +603,18 @@ function Get-AgentFiles([System.IO.FileInfo]$parent, [string]$sessionId) {
   $script:AllAgents[$sessionId] = $found   # every agent file, listed or not: for the tree's Σ cost
   return ,$found
 }
+# Length and write time of each agent file found for a session: part of a gone row's cache key, so its
+# tree cost follows a subagent that carries on after the session left. One stat per known file; a new
+# agent file of a gone session is found when its own transcript changes, or at the next start.
+function Get-AgentSig([string]$sessionId) {
+  $sig = [Text.StringBuilder]::new()
+  foreach ($f in @($script:AllAgents[$sessionId])) {
+    if (-not $f) { continue }
+    $f.Refresh()
+    if ($f.Exists) { [void]$sig.Append($f.Length).Append('.').Append($f.LastWriteTimeUtc.Ticks).Append(',') } else { [void]$sig.Append('-,') }
+  }
+  $sig.ToString()
+}
 # The agent transcripts of a session that are listed as rows.
 function Find-Subagents([System.IO.FileInfo]$parent, [string]$sessionId) {
   if (-not $sessionId -and $parent) { $sessionId = $parent.BaseName }
@@ -685,7 +737,7 @@ function Get-HeadPrint([string]$path, [int]$max = 256) {
 # while the file was under 256 bytes still matches once it has grown.
 function Test-SameHead([string]$path, [string]$head) {
   $n = 0; try { $n = [Convert]::FromBase64String("$head").Length } catch { return $false }
-  return (Get-HeadPrint $path $n) -eq $head
+  return (Get-HeadPrint $path $n) -ceq $head   # Base64 is case-sensitive: YWJA (ab@) is not YWJa (abZ)
 }
 function New-ScanState([System.IO.FileInfo]$file) {
   @{ Path = $file.FullName; Head = (Get-HeadPrint $file.FullName)
@@ -705,7 +757,9 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
   #   shorter than scanned     -> cut or replaced
   #   same length, newer write -> rewritten in place (an append always grows the file)
   #   longer, different head   -> replaced by a longer file
-  # Any of these: start over from byte 0 with fresh totals.
+  # Any of these: start over from byte 0 with fresh totals. Not caught: a longer rewrite that keeps the
+  # first 256 bytes reads as an append (Claude Code only appends to a transcript; telling them apart
+  # would mean re-reading what was already scanned).
   $write = $file.LastWriteTimeUtc.Ticks
   if ($st) {
     $stale = $st.Path -ne $file.FullName -or $file.Length -lt $st.Offset -or
@@ -843,7 +897,8 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
   $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; ToolLog = @(); Handback = $false; Synthetic = $null; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0 }
   if (-not $file) { return $out }
   $stamp = $script:TailCache[$sessionId]
-  if ($stamp -and $stamp.Length -eq $file.Length -and $stamp.Write -eq $file.LastWriteTimeUtc) {
+  # the same file, unchanged: a session's transcript can become another file (it follows the cwd)
+  if ($stamp -and $stamp.Path -eq $file.FullName -and $stamp.Length -eq $file.Length -and $stamp.Write -eq $file.LastWriteTimeUtc) {
     return $stamp.Result
   }
   # Read the tail by BYTES, not lines: Get-Content -Tail on a large transcript whose single lines
@@ -912,7 +967,7 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
     $content = $msg.content
     if (-not $content) { continue }
     # content may be a string or an array of blocks
-    if ($content -is [string]) { $t = ($content -replace '\s+', ' ').Trim(); $out.LastFull = 'text: ' + $t; $out.Last = 'text: ' + $t.Substring(0, [math]::Min(120, $t.Length)); break }
+    if ($content -is [string]) { $t = ($content -replace '\s+', ' ').Trim(); $out.LastFull = 'text: ' + $t; $out.Last = 'text: ' + (Limit-Chars $t 120); break }
     $tool = $content | Where-Object { $_.type -eq 'tool_use' } | Select-Object -Last 1
     if ($tool -and $tool.name -eq 'SubagentHandback') {
       # Claude Code >= 2.1.271: a subagent delivers its report through SubagentHandback, then stops.
@@ -921,7 +976,7 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
       $out.Handback = $true; $hbAt = $i
       $t = (([string]$tool.input.message) -replace '[\x00-\x1F\x7F]+', ' ') -replace '\s{2,}', ' '
       $out.LastFull = ('handback: ' + $t).Trim()
-      $out.Last = if ($out.LastFull.Length -gt 130) { $out.LastFull.Substring(0, 129) + '…' } else { $out.LastFull }
+      $out.Last = if ($out.LastFull.Length -gt 130) { (Limit-Chars $out.LastFull 129) + '…' } else { $out.LastFull }
       break
     }
     if ($tool) {
@@ -931,12 +986,12 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
       }
       $arg = ($arg -replace '[\x00-\x1F\x7F]+', ' ') -replace '\s{2,}', ' '
       $out.LastFull = "$($tool.name) $arg".Trim()
-      if ($arg.Length -gt 120) { $arg = if ($keepTail) { '…' + $arg.Substring($arg.Length - 119) } else { $arg.Substring(0, 119) + '…' } }
+      if ($arg.Length -gt 120) { $arg = if ($keepTail) { '…' + (Last-Chars $arg 119) } else { (Limit-Chars $arg 119) + '…' } }
       $out.Last = "$($tool.name) $arg".Trim()
       break
     }
     $text = ($content | Where-Object { $_.type -eq 'text' } | Select-Object -Last 1).text
-    if ($text) { $t = ($text -replace '\s+', ' ').Trim(); $out.LastFull = 'text: ' + $t; $out.Last = 'text: ' + $t.Substring(0, [math]::Min(120, $t.Length)); break }
+    if ($text) { $t = ($text -replace '\s+', ' ').Trim(); $out.LastFull = 'text: ' + $t; $out.Last = 'text: ' + (Limit-Chars $t 120); break }
   }
   # the newest model entry handed back its report: the agent has stopped, whatever was logged after it
   # ...unless its spawner has since sent it a new message (SendMessage to a stopped agent resumes
@@ -979,7 +1034,7 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
   $out.Synthetic = [bool]$out.Synthetic
   # a Claude-Code-written notice that the turn could not run: usage limit or API error
   $out.SysError = $out.Synthetic -and ($out.LastFull -match '(?i)limit|error|overloaded|unavailable|too long|credit')
-  $script:TailCache[$sessionId] = @{ Length = $file.Length; Write = $file.LastWriteTimeUtc; Result = $out }
+  $script:TailCache[$sessionId] = @{ Path = $file.FullName; Length = $file.Length; Write = $file.LastWriteTimeUtc; Result = $out }
   return $out
 }
 
@@ -1242,7 +1297,7 @@ function ConvertFrom-RosterPoll([int]$ExitCode, [string]$Stdout, [string]$Stderr
   if ($ExitCode -ne 0) {
     $err = @("$Stderr" -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | Select-Object -First 1
     $why = "exit $ExitCode" + $(if ($err) { ": $err" })
-    if ($why.Length -gt 120) { $why = $why.Substring(0, 119) + '…' }
+    if ($why.Length -gt 120) { $why = (Limit-Chars $why 119) + '…' }
   } elseif (-not "$Stdout".Trim()) { $why = 'no output' }
   elseif (-not "$Stdout".TrimStart().StartsWith('[')) { $why = 'output is not a JSON array' }
   else {
@@ -1521,11 +1576,40 @@ function Update-JobMap {
   foreach ($k in @($script:JobCpuPrev.Keys)) { if (-not $live[$k.Split('@')[0]]) { $script:JobCpuPrev.Remove($k) } }
 }
 
-# End a poll's process and everything it started (Kill($true) is .NET Core 3+; Windows PowerShell has Kill()).
+# End a poll's process and everything it started. PowerShell 7 (.NET Core 3+) has Kill($true). Windows
+# PowerShell 5.1 (.NET Framework) has only Kill(), which ends the process alone: claude.cmd's cmd.exe dies
+# and its node lives on, holding the output pipe. There the descendants are found by parent process id,
+# which Windows keeps after a parent exits, and stopped as well.
 function Stop-RosterPoll($p) {
   if (-not $p) { return }
-  try { $p.Proc.Kill($true) } catch { try { $p.Proc.Kill() } catch {} }
-  try { $p.Proc.Dispose() } catch {}
+  $proc = $p.Proc
+  if ($proc.GetType().GetMethod('Kill', [Type[]]@([bool]))) {
+    try { $proc.Kill($true) } catch {}
+  } else {
+    $since = (Get-Date) - $(if ($p.Started) { $p.Started.Elapsed } else { [TimeSpan]::Zero }) - [TimeSpan]::FromSeconds(1)
+    $tree = @(Get-ProcessDescendants $proc.Id $since)
+    try { $proc.Kill() } catch {}
+    foreach ($id in $tree) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+  }
+  try { $proc.Dispose() } catch {}
+}
+# Windows: every process descended from $rootId, by Win32_Process parent ids. Only processes created
+# since $since count, so a pid that was reused by an older, unrelated process is never followed.
+# ($rootId itself cannot be reused while the caller holds its Process object.)
+function Get-ProcessDescendants([int]$rootId, [datetime]$since) {
+  $kids = @{}
+  foreach ($x in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CreationDate -ErrorAction SilentlyContinue)) {
+    if ($x.CreationDate -and $x.CreationDate -lt $since) { continue }
+    $pp = [int]$x.ParentProcessId
+    if (-not $kids.ContainsKey($pp)) { $kids[$pp] = [Collections.Generic.List[int]]::new() }
+    $kids[$pp].Add([int]$x.ProcessId)
+  }
+  $out = [Collections.Generic.List[int]]::new(); $queue = [Collections.Generic.Queue[int]]::new(); $queue.Enqueue($rootId)
+  while ($queue.Count) {
+    $id = $queue.Dequeue()
+    if ($kids.ContainsKey($id)) { foreach ($c in $kids[$id]) { if ($c -ne $id -and $c -ne $rootId -and -not $out.Contains($c)) { $out.Add($c); $queue.Enqueue($c) } } }
+  }
+  return $out.ToArray()
 }
 function Read-Roster {
   $p = $script:Poll
@@ -1657,7 +1741,7 @@ function Build-Rows {
     } else { $s = $e.S; $gone = $null; $cleared = $false }
     if ($gone) {
       $gf = Find-Transcript $s.sessionId
-      $gk = "$(if ($gf) { "$($gf.Length)|$($gf.LastWriteTimeUtc.Ticks)" })|$cleared|$($e.Successor)|$gone"
+      $gk = "$(if ($gf) { "$($gf.Length)|$($gf.LastWriteTimeUtc.Ticks)" })|$cleared|$($e.Successor)|$gone|$(Get-AgentSig $s.sessionId)"
       $gc = $script:GoneRows[$s.sessionId]
       if ($gc -and $gc.Key -eq $gk) {
         # a just-gone row's sparkline keeps scrolling its activity off, on screen or not
@@ -1838,7 +1922,11 @@ function Build-Rows {
     $live = @($kids | Where-Object { $_.STATE -in 'working','thinking' -or $_.STATE -like 'awaiting*' }).Count
     # the +N badge stands in for hidden subagent rows; when the rows are shown they speak for themselves
     $prow | Add-Member -NotePropertyName _LiveKids -NotePropertyValue $(if ($script:ShowSubagents) { 0 } else { $live }) -Force
-    if ($gone) { $script:GoneRows[$s.sessionId] = @{ Key = $gk; Row = $prow }; [void]$script:FreshIds.Add([string]$s.sessionId) }
+    if ($gone) {
+      # keyed after the build: building found its agent files (Get-AgentFiles), so the key covers them now
+      $gk = "$(if ($gf) { "$($gf.Length)|$($gf.LastWriteTimeUtc.Ticks)" })|$cleared|$($e.Successor)|$gone|$(Get-AgentSig $s.sessionId)"
+      $script:GoneRows[$s.sessionId] = @{ Key = $gk; Row = $prow }; [void]$script:FreshIds.Add([string]$s.sessionId)
+    }
     $prow
     if ($script:ShowSubagents) { $kids }
   }
@@ -2174,13 +2262,18 @@ function Wrap-Cell([string]$text, [int]$width, [int]$maxLines, [bool]$isPath) {
   if ((Get-CellWidth $text) -le $width) { return ,@($text) }
   if ($maxLines -le 1) { return ,@((Limit-Cells $text ($width - 1)) + '…') }
   if ($isPath) {
-    $room = $width * $maxLines
-    if ((Get-CellWidth $text) -gt $room) { $text = '…' + (Last-Cells $text ($room - 1)) }
-    $parts = @(); $rest = $text
-    while ($rest) {
-      $head = Limit-Cells $rest $width
-      if (-not $head) { $head = [Globalization.StringInfo]::GetNextTextElement($rest, 0) }   # wider than the column
-      $parts += $head; $rest = $rest.Substring($head.Length)
+    # keep the tail (it identifies a worktree) in at most $maxLines lines. A wide character that does not
+    # fit at a line end leaves that cell empty, so width × lines may not hold: give up a cell and retry.
+    $full = $text
+    for ($room = $width * $maxLines; $room -ge 1; $room--) {
+      $text = if ((Get-CellWidth $full) -gt $room) { '…' + (Last-Cells $full ($room - 1)) } else { $full }
+      $parts = @(); $rest = $text
+      while ($rest) {
+        $head = Limit-Cells $rest $width
+        if (-not $head) { $head = [Globalization.StringInfo]::GetNextTextElement($rest, 0) }   # wider than the column
+        $parts += $head; $rest = $rest.Substring($head.Length)
+      }
+      if ($parts.Count -le $maxLines) { break }
     }
     return ,$parts
   }
@@ -2237,8 +2330,9 @@ function Format-Row([object[]]$cols, $r, [string]$sep, [int]$maxLines) {
       if ($_.Name -eq 'STATE' -and $r._LiveKids -gt 0 -and $i -eq 0) {
         # rollup badge: the session's own state in its usual color, then +N live subagents in green
         $own = [string]$r.STATE; $badge = " +$($r._LiveKids)"
-        if ($own.Length + $badge.Length -le $_.Width) {
-          (Paint $own $color) + (Paint $badge 'green') + (' ' * ($_.Width - $own.Length - $badge.Length))
+        $used = (Get-CellWidth $own) + $badge.Length   # cells: a state can carry wide text
+        if ($used -le $_.Width) {
+          (Paint $own $color) + (Paint $badge 'green') + (' ' * ($_.Width - $used))
         } else { Paint $padded $color }
       }
       elseif ($color -eq 'spark') { Paint-Spark $padded } else { Paint $padded $color }
