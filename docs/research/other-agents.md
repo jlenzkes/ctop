@@ -218,6 +218,37 @@ That is a design decision to make first.
 
 **Not looked at:** the hub (`sdk/packages/core/src/hub/discovery/instance-lock.ts`), which might list running Cline processes.
 
+## Which extensions are worth supporting (2026-11-01)
+
+**Verified** (the projects' own repositories, read 2026-11-01):
+- **Roo Code is shut down.** Its README: "The Roo Code Extension was shut down on May 15th", pointing to ZooCode ("a fork started by the Roo Code community") and Cline. Its last commit on `main` is that day (`b867ec9`, 2026-05-15).
+- **Zoo Code** (`github.com/Zoo-Code-Org/Zoo-Code`) is the Roo fork its README describes.
+  - **Identity:** extension `ZooCodeOrganization.zoo-code`, version 3.94.0 in `src/package.json`.
+  - **Same task layout as Roo:** `src/utils/storage.ts` puts tasks in `<base>/tasks/<taskId>`. `src/shared/globalFileNames.ts` names `api_conversation_history.json`, `ui_messages.json`, `task_metadata.json` and `history_item.json`.
+  - **One difference:** it has no `historyIndex: "_index.json"` entry, which Roo had.
+- **Kilo Code:** extension `kilocode.Kilo-Code`; its README says VS Code, JetBrains and a CLI (`@kilocode/cli`). Its `src/package.json` is not where Roo's was, so its layout has changed. Its storage is not read yet.
+
+**Secondary sources only** (blogs and roundups, with conflicting dates and methods; not checked against the VS Code Marketplace), on install counts:
+- **GitHub Copilot Chat:** about 78.6M.
+- **Claude Code's extension:** 22–27M.
+- **OpenAI's Codex:** 12.6–15.1M.
+- **Tabnine:** 9.6M.
+- **Cline:** about 5M.
+- **No independent count found:** Kilo Code, Zoo Code, Continue.
+
+Sources:
+- [Kimi.ai roundup](https://www.kimi.ai/resources/vscode-ai-extensions)
+- [Kilo's own comparison](https://kilo.ai/articles/coding-agents-for-vscode) (a competitor's claims)
+- [AI coding harness comparison, Oct 2026](https://tech.grahammiranda.com/ai-coding-harness-comparison)
+- [Roo shutdown coverage](https://theaiagentindex.com/agents/roo-code)
+
+**Inference:** by reach, the agents that run Claude in VS Code are:
+- Copilot (built in, with Claude models or a Claude key);
+- Claude Code's own extension (already what ctop reads);
+- Cline, far ahead of the rest among open-source agents.
+
+Zoo Code is a small community continuation, not mainstream by any count found. But it costs little once a Roo-layout reader exists, and that reader also covers old Roo data. OpenAI's Codex, Tabnine, Amazon Q and Gemini Code Assist are not known to run Claude (unverified); they'd be out of scope unless they do.
+
 ## Roo Code
 
 **Verified** (`RooCodeInc/Roo-Code`, `src/shared/globalFileNames.ts` on `main`, 2026-11-01): per-task files are:
