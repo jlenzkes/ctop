@@ -150,6 +150,9 @@ The watch ran 19:42:07–19:45:12Z while the user gave Cline a small task.
     - **Verified** (`claudeTransportMode.ts` at `1306698`): the agent runs in one of two modes. **proxy**: through Copilot, needs a GitHub sign-in, preferred when signed in. **native**: the user's own Claude credentials, no GitHub.
       - Native mode is used only when the SDK's `accountInfo()` reports a credential: a `tokenSource` other than `none`, an `apiKeySource`, or a third-party `apiProvider` (Bedrock, Vertex, a gateway).
       - The file says a `claude login` credential can be invisible to the environment and to `~/.claude/settings.json`, so only the SDK's own report counts.
+    - **Verified** (the user's screenshots): dismissing the "customization needs an update" notice (Review Migrations → Ignore, for the `@remote-ssh` chat participant) did not change the panel.
+      - The Claude Code extension on the same machine is signed in with a subscription: its Account & Usage panel shows "Weekly (7 day)" and "Fable limit" bars, and its model picker offers Opus 5.5, Fable 5.1, Sonnet 5.5 and Haiku 5.5.
+      - So a working Claude Code subscription login was not seen by VS Code's Claude agent as a credential. Why is unknown.
     - **Inference:** "reload the configuration" asks the SDK again, and on that machine it still reports no credential. Copilot's own Anthropic key (in VS Code's secret storage) is not one of the credentials the SDK looks for.
     - The new-session menu (top right, the `+` dropdown) offers New Chat, New Chat Editor, New Chat Window and **New Copilot CLI Session**; it does not list Claude. Copilot CLI sessions are another harness, not looked at.
 - **No VS Code Claude agent transcript appeared:** the Claude Code transcripts that changed during the watch were all from the user's own Claude Code extension session (`entrypoint` `claude-vscode`, project `c--dev-src-genai-mil`, with subagents).
