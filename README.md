@@ -182,14 +182,15 @@ The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meani
 
 ## Tested on
 
-What has actually been run, as of build `2026.10.31.8`. Anything not listed here is untested.
+What has actually been run, as of build `2026.11.01.1`. Anything not listed here is untested.
 
-**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (254, less those that cannot apply: Linux skips the two Windows process
-tests; Windows skips the two that need a case-sensitive filesystem; Windows PowerShell 5.1 also skips
-the flag-width test: 252, 252 and 251 run).
-*End to end*: the integration tests (29), which drive the real ctop in tmux against a fake `claude`
+**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (313, less those
+that cannot apply: Linux skips the two Windows process tests; Windows skips the two that need a
+case-sensitive filesystem; Windows PowerShell 5.1 also skips the flag-width test: 311, 311 and 310 run).
+They include the worker run as a real process, on Windows PowerShell 5.1 too.
+*End to end*: the integration tests (38), which drive the real ctop in tmux against a fake `claude`
 and a 300-session history, sessions coming and going, a hung roster poll, hostile session text, wide
-characters and titles in non-Latin scripts. Each job fails if a test it is meant to run was skipped (`tests/Run-Tests.ps1`).
+characters, titles in non-Latin scripts, and the worker process (busy, and killed). Each job fails if a test it is meant to run was skipped (`tests/Run-Tests.ps1`).
 
 | Platform | PowerShell | Unit | End to end |
 |---|---|---|---|
