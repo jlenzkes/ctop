@@ -258,3 +258,85 @@ Describe 'transcript identity is case-sensitive where the filesystem is' {
     $st.Path | Should -BeExactly $up
   }
 }
+
+Describe 'Get-LastAction: a question for you (AskUserQuestion)' {
+  # The question's shape is the tool's own input schema: questions[] of question, header, options[] of
+  # label/description, multiSelect. It is answered by a newer tool result for its call id (the API requires
+  # that link), or by a newer prompt; a result for another call in the same reply does not answer it.
+  BeforeAll {
+    $script:PriceVer = 2; $script:ScanVer = 2
+    $ask = @{ type = 'tool_use'; id = 'toolu_q1'; name = 'AskUserQuestion'; input = @{ questions = @(
+      @{ question = 'Which database should the tests use?'; header = 'Test DB'; multiSelect = $false
+         options = @(@{ label = 'SQLite (Recommended)'; description = 'In memory, no setup' }, @{ label = 'Postgres'; description = 'Matches production' }) }
+      @{ question = 'Which suites should run?'; header = 'Suites'; multiSelect = $true
+         options = @(@{ label = 'unit'; description = 'fast' }, @{ label = 'integration'; description = 'needs tmux' }) }
+    ) } }
+    function Line($o) { $o | ConvertTo-Json -Compress -Depth 12 }
+    function Write-T([string]$name, [object[]]$objs) {
+      $f = Join-Path $TestDrive "$name.jsonl"
+      [IO.File]::WriteAllLines($f, [string[]]@($objs | ForEach-Object { Line $_ }))
+      Get-Item -LiteralPath $f
+    }
+    $asked = @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'; message = @{ role = 'assistant'; model = 'm'; content = @($ask) } }
+  }
+  BeforeEach { $script:ScanCache = @{}; $script:ScanVerified = @{}; $script:TailCache = @{} }
+  It 'shows the waiting question in LAST ACTION and keeps every question with its choices' {
+    $a = Get-LastAction (Write-T 'pending' @($asked)) 'q1'
+    $a.Last | Should -Be 'asks: Which database should the tests use? (+1 more)'
+    @($a.Questions).Count | Should -Be 2
+    $a.Questions[0].Text | Should -Be 'Which database should the tests use?'
+    $a.Questions[0].Header | Should -Be 'Test DB'
+    @($a.Questions[0].Options) | Should -Be @('SQLite (Recommended): In memory, no setup', 'Postgres: Matches production')
+    $a.Questions[1].Multi | Should -BeTrue
+  }
+  It 'no longer shows it as waiting once a newer entry answers it' {
+    $answer = @{ type = 'user'; sessionId = 's'; timestamp = '2026-10-31T05:20:00Z'; message = @{ role = 'user'; content = @(@{ type = 'tool_result'; tool_use_id = 'toolu_q1'; content = 'answered' }) } }
+    $a = Get-LastAction (Write-T 'answered' @($asked, $answer)) 'q2'
+    $a.Last | Should -Match '^asked: Which database'
+    @($a.Questions).Count | Should -Be 0
+  }
+  It 'keeps waiting when another call made alongside the question gets its result first' {
+    # one reply, two tool calls: the question and a Read. The Read's result comes in; the question is unanswered.
+    $two = @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'; message = @{ role = 'assistant'; model = 'm'
+              content = @($ask, @{ type = 'tool_use'; id = 'toolu_read1'; name = 'Read'; input = @{ file_path = '/x' } }) } }
+    $readDone = @{ type = 'user'; sessionId = 's'; timestamp = '2026-10-31T05:19:01Z'; message = @{ role = 'user'; content = @(@{ type = 'tool_result'; tool_use_id = 'toolu_read1'; content = 'file text' }) } }
+    $a = Get-LastAction (Write-T 'parallel' @($two, $readDone)) 'q4'
+    $a.Last | Should -Match '^asks: Which database'
+    @($a.Questions).Count | Should -Be 2
+    $a.State | Should -Be 'working' -Because 'the same as when the question is the newest entry'
+  }
+  It 'keeps waiting when the question and another call are separate lines of one reply, and only the other is answered' {
+    # Claude Code writes each block of a reply as its own line, all with the reply's message id
+    $askLine = @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'; message = @{ id = 'msg_split'; role = 'assistant'; model = 'm'; content = @($ask) } }
+    $readLine = @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'; message = @{ id = 'msg_split'; role = 'assistant'; model = 'm'
+                   content = @(@{ type = 'tool_use'; id = 'toolu_read2'; name = 'Read'; input = @{ file_path = '/x' } }) } }
+    $readDone = @{ type = 'user'; sessionId = 's'; timestamp = '2026-10-31T05:19:01Z'; message = @{ role = 'user'; content = @(@{ type = 'tool_result'; tool_use_id = 'toolu_read2'; content = 'file text' }) } }
+    $a = Get-LastAction (Write-T 'split' @($askLine, $readLine, $readDone)) 'q6'
+    $a.Last | Should -Match '^asks: Which database'
+    @($a.Questions).Count | Should -Be 2
+    $a.State | Should -Be 'working'
+  }
+  It 'shows the other call once the question in the same reply is answered (separate lines)' {
+    $askLine = @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'; message = @{ id = 'msg_split'; role = 'assistant'; model = 'm'; content = @($ask) } }
+    $readLine = @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'; message = @{ id = 'msg_split'; role = 'assistant'; model = 'm'
+                   content = @(@{ type = 'tool_use'; id = 'toolu_read3'; name = 'Read'; input = @{ file_path = '/x' } }) } }
+    $answer = @{ type = 'user'; sessionId = 's'; timestamp = '2026-10-31T05:20:00Z'; message = @{ role = 'user'; content = @(@{ type = 'tool_result'; tool_use_id = 'toolu_q1'; content = 'answered' }) } }
+    $a = Get-LastAction (Write-T 'split-answered' @($askLine, $readLine, $answer)) 'q7'
+    $a.Last | Should -Match 'Read /x' -Because 'an answered question no longer outranks the newest call'
+    @($a.Questions).Count | Should -Be 0
+  }
+  It 'no longer shows it as waiting once a newer prompt comes in' {
+    $prompt = @{ type = 'user'; sessionId = 's'; timestamp = '2026-10-31T05:21:00Z'; message = @{ role = 'user'; content = 'never mind, use SQLite' } }
+    $a = Get-LastAction (Write-T 'moved-on' @($asked, $prompt)) 'q5'
+    $a.Last | Should -Match '^asked: Which database'
+    @($a.Questions).Count | Should -Be 0
+  }
+  It 'cleans control characters out of question text' {
+    $evil = @{ type = 'assistant'; sessionId = 's'; message = @{ role = 'assistant'; model = 'm'; content = @(@{ type = 'tool_use'; id = 'toolu_q3'; name = 'AskUserQuestion'
+               input = @{ questions = @(@{ question = "pick$([char]27)]52;c;eA==$([char]7) one"; header = 'h'; options = @(@{ label = "a$([char]10)b"; description = '' }) }) } }) } }
+    $a = Get-LastAction (Write-T 'evil' @($evil)) 'q3'
+    $a.Last | Should -Not -Match "[\x00-\x1F]"
+    $a.Questions[0].Text | Should -Not -Match "[\x00-\x1F]"
+    $a.Questions[0].Options[0] | Should -Not -Match "[\x00-\x1F]"
+  }
+}

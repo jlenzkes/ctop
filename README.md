@@ -21,6 +21,12 @@ Everything is read locally. ctop makes no model calls and uses no tokens.
 
 - **PowerShell**: PowerShell 7 (`pwsh`) or Windows PowerShell 5.1. See [Tested on](#tested-on) for
   which versions have been run, and how far.
+- **Two processes**: by default ctop starts a second, hidden PowerShell process (the same script) that
+  reads transcripts, the roster and the process table, so a slow read never holds up the keyboard. Use
+  `-InProcess` to run as one; ctop falls back to one process by itself if the worker can't start, stops,
+  or sends something it can't read. The worker costs some startup: about 0.5 s more to the first frame
+  in the Linux container this was measured in. If a frame is more than 5 s late, the footer says how old
+  the screen is.
 - **Claude Code** on `PATH`, with the `claude agents --json` command. ctop stops with an error
   at startup if `claude` can't be found.
 - **Operating system**: Windows, or Linux in the Debian and Fedora / RHEL families. On Linux the
@@ -63,12 +69,42 @@ To start it as `ctop` from any directory, add an alias to your PowerShell profil
 Set-Alias ctop /path/to/ctop/ctop.ps1
 ```
 
-If you download the script as a file instead of cloning, Windows may block it under the
-`RemoteSigned` execution policy. Unblock it once:
+#### Windows: the execution policy
+
+`ctop.ps1` is not signed. On Windows, PowerShell's execution policy can refuse to run it:
+
+- **Windows PowerShell 5.1** defaults to `Restricted` on client editions, which runs no scripts at all.
+- **PowerShell 7** defaults to `RemoteSigned`. It runs scripts written on the computer, but not unsigned scripts
+  Windows marked as downloaded from the internet (a browser download, an email attachment).
+- An administrator may have set a stricter policy, such as `AllSigned`.
+
+To run it anyway without changing any setting, start it with `-ExecutionPolicy Bypass`. This applies only to that
+PowerShell session and the PowerShell sessions it starts:
 
 ```powershell
-Unblock-File ./ctop.ps1
+pwsh -ExecutionPolicy Bypass -File C:\path\to\ctop\ctop.ps1
 ```
+
+As a `ctop` command in your profile:
+
+```powershell
+function ctop { pwsh -NoProfile -ExecutionPolicy Bypass -File C:\path\to\ctop\ctop.ps1 @args }
+```
+
+If the only problem is the downloaded-file mark, you can remove it once instead, and keep using `Set-Alias`:
+
+```powershell
+Unblock-File C:\path\to\ctop\ctop.ps1
+```
+
+A policy set by Group Policy overrides `-ExecutionPolicy`. Then ask whoever manages the computer.
+ctop starts its own worker process with `-ExecutionPolicy Bypass` on Windows, so you only need it for the first launch.
+
+On Linux and macOS, PowerShell does not enforce execution policies, so none of this applies. Microsoft's
+documentation says "Enforcement of these policies only occurs on Windows platforms". On Linux with PowerShell 7.6.9,
+`pwsh -ExecutionPolicy Restricted -File` still ran a script. Source: [about_Execution_Policies][ep].
+
+[ep]: https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_execution_policies
 
 ## Usage
 
@@ -77,6 +113,7 @@ Unblock-File ./ctop.ps1
 ./ctop.ps1 -All                 # include background sessions too
 ./ctop.ps1 -Sort cost -Compact  # most expensive first, essential columns only
 ./ctop.ps1 -NoSubagents -Keep 1d      # also list sessions that closed in the last day
+./ctop.ps1 -Snapshot -MaxWidth 160 > ctop.txt   # one frame, as text
 ./ctop.ps1 -Version
 ```
 
@@ -102,7 +139,17 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release not
 | `-NoColor`        |                    | Disable ANSI colors. |
 | `-All`            |                    | Include background sessions (`kind == "background"`). |
 | `-NoMouse`        |                    | Windows: leave the mouse to the terminal (see [Mouse](#mouse)). |
+| `-PricingFile`    |                    | A JSON price table in place of the built-in one (see [Pricing](#pricing)). |
+| `-InProcess`      |                    | Run as one process instead of a display process plus a worker (see [Requirements](#requirements)). |
+| `-Snapshot`       |                    | Print one frame as plain text and exit: every session listed, no colors, nothing written. Width: `-MaxWidth`, else the window's, else 200. |
 | `-Version`        |                    | Print the version and exit. |
+
+An unknown or misspelled flag, or a value with no flag (`./ctop.ps1 500`), is an error that names it.
+ctop does not start.
+
+Environment: `CTOP_TRACE=<file>` appends startup timings to that file: each process (display, worker)
+writes a line as it reaches each phase, from the script running to the first frame with sessions in it.
+Use it to see where a slow start goes.
 
 ### Keys
 
@@ -112,6 +159,8 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release not
 | `Enter` / `Space`    | Peek: a live detail screen for the selected session (`↑` `↓` switch session, `Esc` closes) |
 | `t`                  | Copy the selected row's transcript path (see [Copying](#copying)) |
 | `y`                  | Copy its `claude --resume <id>` command |
+| `n`                  | Copy its contact, to reach it from another Claude session (see [Contacts](#contacts)) |
+| `d`                  | Copy its session ID (a subagent: its agent ID) |
 | `o`                  | Cycle sort: activity, roster, start, cost, ctx |
 | `v`                  | Toggle layout: wrap / truncate |
 | `c`                  | Toggle compact columns |
@@ -132,6 +181,16 @@ terminals accept it; inside tmux it needs `set -g set-clipboard on` (tmux's defa
 it from applications). With a display and `xclip` installed, the system clipboard is set as well.
 (PowerShell's own `Set-Clipboard` on Linux needs `xclip`; without it, it keeps the text inside the
 PowerShell process and still reports success, so ctop doesn't rely on it.)
+
+### Contacts
+
+`n` copies the selected session's contact: its name and `@` address, session ID, kind, state, working
+directory, machine, transcript path, and its `claude attach` command (background sessions) or
+`claude --resume` command (sessions that are gone). Paste it into another Claude Code session on the
+same machine and ask it to message that session: Claude Code's own cross-session messaging delivers it,
+by name ([docs](https://code.claude.com/docs/en/cross-session-messaging)). ctop itself sends nothing. A
+session without a name has no address; give it one with `/rename`. A subagent's contact points at its
+parent session. `d` copies just the session ID.
 
 ### Mouse
 
@@ -163,14 +222,16 @@ The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meani
 
 ## Tested on
 
-What has actually been run, as of build `2026.10.31.8`. Anything not listed here is untested.
+What has actually been run, as of build `2026.11.01.3`. Anything not listed here is untested.
 
-**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (254, less those that cannot apply: Linux skips the two Windows process
-tests; Windows skips the two that need a case-sensitive filesystem; Windows PowerShell 5.1 also skips
-the flag-width test: 252, 252 and 251 run).
-*End to end*: the integration tests (29), which drive the real ctop in tmux against a fake `claude`
+**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (350, less those
+that cannot apply: Linux skips the two Windows process tests; Windows skips the two that need a
+case-sensitive filesystem; Windows PowerShell 5.1 also skips the flag-width test: 348, 348 and 347 run).
+They include the worker run as a real process, the display against a worker that misbehaves, `-Snapshot`
+and the command line run as processes, on Windows PowerShell 5.1 too.
+*End to end*: the integration tests (41), which drive the real ctop in tmux against a fake `claude`
 and a 300-session history, sessions coming and going, a hung roster poll, hostile session text, wide
-characters and titles in non-Latin scripts. Each job fails if a test it is meant to run was skipped (`tests/Run-Tests.ps1`).
+characters, titles in non-Latin scripts, and the worker process (busy, and killed). Each job fails if a test it is meant to run was skipped (`tests/Run-Tests.ps1`).
 
 | Platform | PowerShell | Unit | End to end |
 |---|---|---|---|
@@ -185,7 +246,9 @@ characters and titles in non-Latin scripts. Each job fails if a test it is meant
 | Fedora 44 (container) | 7.6.9 | ✅ | ✅ tmux 3.8 |
 
 Each job also checks that the script parses and that `-Version` runs. The two PowerShell 7 jobs on
-GitHub's own runners (Windows, Ubuntu 24.04) also run PSScriptAnalyzer.
+GitHub's own runners (Windows, Ubuntu 24.04) also run PSScriptAnalyzer. The Ubuntu 24.04 job also runs
+`tests/Compare-Versions.ps1` against `main`: the same inputs through both versions, failing if this one
+fails a check.
 
 **By hand**, with a live Claude Code session (Claude Code 2.1.314, PowerShell 7.6.9, Ubuntu 24.04 in
 a container): the roster, transcripts and subagent rows, background jobs (a running `sleep` shown as
@@ -204,6 +267,25 @@ clipboard (with `set-clipboard on`).
 - **VS Code sessions on Linux.**
 - **macOS.**
 - **Interactive use on the Linux distributions above, beyond the integration tests.**
+
+### Pricing
+
+COST uses a built-in table of API list prices. To use other rates, pass `-PricingFile` a JSON array,
+in match order (the first `Match` regex that fits the model id wins), of rates in dollars per million
+tokens:
+
+```json
+[
+  { "Match": "opus-5-5",   "In": 4, "W5": 5,   "W1h": 8, "Read": 0.2, "Out": 20 },
+  { "Match": "sonnet-5-5", "In": 2, "W5": 2.5, "W1h": 4, "Read": 0.1, "Out": 10 },
+  { "Match": "haiku-5-5",  "MaxPrompt": 100000, "In": 0.1, "W5": 0.125, "W1h": 0.2, "Read": 0.01, "Out": 0.5 }
+]
+```
+
+`In` / `Out` are input and output tokens, `Read` cache reads, `W5` / `W1h` 5-minute and 1-hour cache
+writes; every one is required. `MaxPrompt`, optional, limits a row to requests of at most that many
+prompt tokens (for tiered prices). The file replaces the built-in table: replies from a model it doesn't
+match add nothing to COST (a session with only those shows `-`). Editing the file recomputes cached costs.
 
 ## Files it writes
 
@@ -251,12 +333,17 @@ Release notes are kept in the script's `.NOTES` help section. When cutting a bui
 Tests use [Pester](https://pester.dev) 5:
 
 - `tests/Keep.Tests.ps1`, `Display.Tests.ps1`, `Transcript.Tests.ps1`, `Clipboard.Tests.ps1`,
-  `Encoding.Tests.ps1`, `Rows.Tests.ps1`, `Process.Tests.ps1` (its process tests run on Windows only):
-  unit tests. They load the functions from `ctop.ps1` without running it
-  (`tests/Import-Ctop.ps1`), so they need no `claude` and no terminal.
+  `Encoding.Tests.ps1`, `Rows.Tests.ps1`, `Contact.Tests.ps1`, `Pricing.Tests.ps1`, `Worker.Tests.ps1`
+  (keys, the worker run as a real process, and the display against a worker that misbehaves),
+  `Process.Tests.ps1` (its process tests run on Windows only): unit tests. They load the functions from
+  `ctop.ps1` without running it (`tests/Import-Ctop.ps1`), so they need no `claude` and no terminal.
+- `tests/Snapshot.Tests.ps1` and `Cli.Tests.ps1`: run ctop as a process against a fake `claude` (a shell
+  script, or a `.cmd` on Windows), output to pipes: `-Snapshot`, and which command lines it refuses. No
+  terminal, so they run on every CI job, Windows included.
 - `tests/Integration.Tests.ps1` (tag `Integration`): drives the real ctop in tmux against a fake
-  `claude` and a 300-session history, checking that keys are never dropped, that frames stay within the
-  tick, that off-screen history is nearly free, that a row scrolled into view shows its current age,
+  `claude` and a 300-session history, checking that keys are never dropped, that building a frame (the
+  `frame` figure on the strip: building only, not drawing it or sending it from the worker) takes under
+  the 250 ms tick at the median while the clock on screen keeps moving, that off-screen history is nearly free, that a row scrolled into view shows its current age,
   and that the live sessions show before the history has loaded; also sessions coming and going, a hung
   roster poll, hostile session text, wide characters, titles in non-Latin scripts, a transcript that
   moves, and a clean exit. Linux, with `tmux`; they run on a private tmux server (`tmux -L`), so your
@@ -266,6 +353,7 @@ Tests use [Pester](https://pester.dev) 5:
 Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser
 ./tests/Run-Tests.ps1                     # everything; fails if the integration tests are skipped
 ./tests/Run-Tests.ps1 -Integration Skip   # unit tests only (Windows, or no tmux)
+./tests/Compare-Versions.ps1              # main's ctop and this one, side by side (Linux, tmux)
 ```
 
 `Run-Tests.ps1` is what CI runs. It prints how many unit and integration tests passed, failed and were
