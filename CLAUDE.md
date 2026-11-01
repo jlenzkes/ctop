@@ -9,7 +9,14 @@
 - Never state a negative ("there is no X") as fact without having looked.
 - Don't turn one data point into a requirement. Write "tested on X", and say what is untested.
 
-## Pending work: sessions from other agents (VS Code's built-in Copilot, Cline, Roo)
+## Pending work: sessions from other agents
+
+**Decision (user, 2026-11-01): ctop supports exactly three agents:**
+- **Claude Code:** the CLI and its VS Code extension.
+- **GitHub Copilot, built into VS Code:** its chats, including on Claude models or a Claude API key, and its Claude agent.
+- **Cline.**
+
+Not Roo Code (shut down), Zoo Code, Kilo Code, Continue or others. The probe (`tools/Probe-AgentSources.ps1`) still reports Roo/Zoo folders as research; ctop does not read them.
 
 Findings so far, each labelled verified, inference or unverified: `docs/research/other-agents.md`.
 

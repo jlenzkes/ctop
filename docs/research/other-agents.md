@@ -296,6 +296,12 @@ An earlier reply said supporting these would mean "no live 'is it running?' sign
 - Copilot chat stores `modelState`.
 - The Claude agent writes Claude Code transcripts.
 
+## Decision: which agents ctop supports (user, 2026-11-01)
+
+ctop supports **Claude Code** (the CLI and its VS Code extension), **GitHub Copilot built into VS Code** (its chats, on any Claude model or a Claude API key, and its Claude agent) and **Cline**. Nothing else: not Roo Code (shut down), Zoo Code, Kilo Code or Continue.
+
+The Roo/Zoo findings above stay as research only. In the design below, the Roo step is dropped.
+
 ## Proposed design (a proposal, not decided)
 
 **Precondition:** ctop starts and works with no `claude` command (see the requirement above). Every agent's reader is optional. With none of them present, ctop says what it looked for and where.
@@ -317,7 +323,7 @@ The existing Claude Code reader stays as it is.
    - Cost is in Copilot credits, shown as such, never mixed into dollar totals.
    - **Unverified:** where VS Code's user data folder is on each OS. I believe Windows is `%APPDATA%\Code\User`, Linux `~/.config/Code/User`, macOS `~/Library/Application Support/Code/User`, plus Insiders/VSCodium variants. That is from memory; check the VS Code docs or source before relying on it.
 
-3. **Roo.**
+3. **Roo.** *Dropped by the decision above; kept for the record.*
    - Read `tasks/_index.json` and each task's `history_item.json` (tokens, cost in dollars, `status`).
    - "Waiting on you" comes from the newest `ui_messages.json` entry.
    - "Alive" comes from VS Code running plus recent file changes, since there is no pid.
