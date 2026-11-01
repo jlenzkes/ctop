@@ -132,7 +132,17 @@ The watch ran 19:42:07–19:45:12Z while the user gave Cline a small task.
   - **Correction:** this contradicts the reading of `persistence-service.ts` at `a6507a6` (status changes only in the database). Either the installed extension differs from `main` at that commit, or another code path writes the manifest. **Tested on** that machine's installed version, not identified.
   - **For ctop:** Cline's live status can be read from the JSON manifests, with no SQLite and no `cline` CLI.
   - **To check:** how quickly a change reaches the manifest. The watch reads Cline manifests every 3 s, so this run shows only that it took under about 8 s.
-- **Unknown:** what process `pid` 53504 is. It is not either of the two extension hosts that held the database (52584, 31248).
+- **Verified** (the user's `Win32_Process` output): `pid` 53504 is a VS Code extension host (`Code.exe --type=utility --utility-sub-type=node.mojom.NodeService`).
+  - Its parent is 39412, VS Code's main process, as for 52584 and 31248.
+  - It started 2026-10-31 09:41:27 local, a third VS Code window.
+  - It was not among the processes holding `sessions.db` before the task, so each window's Cline opens the database when it needs it.
+  - **So a Cline session's `pid` is the extension host of the VS Code window it runs in.** That process lives as long as the window, so a live pid means "the window is open", not "working". The `status` field says which.
+- **Copilot chat, the user's screenshot at 11:47 local (19:47Z):**
+  - The chat view has tabs **Chat**, **Cline**, **Claude Code** and **Codex**.
+  - In the Chat tab, a session titled "ctop.ps1 purpose and relevance": mode **Agent**, model **Claude Haiku 4.5**, "Max 179K", target "Local", "Completed 6 steps in 13s".
+  - That is the new chat file `04143839-….jsonl` (19:45:01Z).
+  - **Inference:** this is Copilot's own agent mode on a Claude model, not VS Code's separate Claude agent (agent host). It ran in the Chat tab, with Copilot's model picker, and no Claude Code transcript appeared.
+  - Whether the Claude agent is offered (e.g. under the new-session `+` menu) is still unverified.
 - **No VS Code Claude agent transcript appeared:** the Claude Code transcripts that changed during the watch were all from the user's own Claude Code extension session (`entrypoint` `claude-vscode`, project `c--dev-src-genai-mil`, with subagents).
 - **Copilot during the watch:**
   - At 19:44:01 and 19:44:30 the existing chat recorded only `inputState` changes (`selectedModel`, `inputText`, `selections`), i.e. typing and choosing a model.
