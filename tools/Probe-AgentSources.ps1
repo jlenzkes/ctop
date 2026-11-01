@@ -1,7 +1,7 @@
 ﻿<#
 .SYNOPSIS
   Reports what coding agents that can run Claude leave on this computer, for ctop's design: Claude Code,
-  VS Code's Copilot (its chats and its Claude agent), Cline and Roo Code. Read-only.
+  VS Code's Copilot (its chats and its Claude agent), Cline, Roo Code and Zoo Code. Read-only.
 
 .DESCRIPTION
   For each agent: where its files are, how many, how recent, their field names, and a few values that say
@@ -45,7 +45,7 @@ param(
   [int]$WatchSeconds = 0
 )
 $ErrorActionPreference = 'Stop'
-$ProbeVersion = '2026.11.01.2'
+$ProbeVersion = '2026.11.01.3'
 $onWindows = $IsWindows -or $env:OS -eq 'Windows_NT'
 $onMac = (-not $onWindows) -and $IsMacOS
 $homeDir = [Environment]::GetFolderPath('UserProfile')
@@ -252,15 +252,16 @@ foreach ($u in $userDirs) {
     }
   }
   $gs = Join-Path $u 'globalStorage'
-  $ext = @(Get-ChildItem -LiteralPath $gs -Directory -ErrorAction SilentlyContinue | Where-Object Name -match '(?i)claude|anthropic|cline|roo|copilot|kilo')
+  $ext = @(Get-ChildItem -LiteralPath $gs -Directory -ErrorAction SilentlyContinue | Where-Object Name -match '(?i)claude|anthropic|cline|roo|zoo|copilot|kilo')
   Say "    globalStorage folders of interest: $(if ($ext) { (@($ext.Name) | Sort-Object) -join ', ' } else { 'none' })"
-  foreach ($e in $ext) { if ($e.Name -match '(?i)roo-cline|saoudrizwan\.claude-dev|kilo') { $rooDirs.Add($e.FullName) } }
+  # Roo's task layout: Roo Code, Zoo Code (Roo's community fork), Kilo Code, the older Cline extension
+  foreach ($e in $ext) { if ($e.Name -match '(?i)roo-cline|zoo-code|saoudrizwan\.claude-dev|kilo') { $rooDirs.Add($e.FullName) } }
 }
 
 # ---- Roo Code (and the older Cline extension, same task layout) --------------------------------
 Say ''
-Say '== Roo Code / older Cline (VS Code globalStorage tasks)'
-if (-not $rooDirs.Count) { Say '  no roo-cline, saoudrizwan.claude-dev or kilo folder in the VS Code folders above' }
+Say '== Roo Code, Zoo Code, Kilo Code, older Cline (VS Code globalStorage tasks)'
+if (-not $rooDirs.Count) { Say '  no roo-cline, zoo-code, saoudrizwan.claude-dev or kilo folder in the VS Code folders above' }
 foreach ($r in $rooDirs) {
   Say "  $(Show-Path $r)"
   $tasks = Join-Path $r 'tasks'

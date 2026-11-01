@@ -31,6 +31,8 @@ Describe 'the agent probe' {
     Put "$roo/_index.json" @{ version = 1; items = @(@{ id = 't1' }) }
     Put "$roo/t1/history_item.json" @{ id = 't1'; number = 1; ts = 1793500000000; task = "$secret task"; tokensIn = 10; tokensOut = 20; totalCost = 0.12; status = 'active'; workspace = "/w/$secret" }
     Put "$roo/t1/ui_messages.json" @(@{ ts = 1; type = 'say'; say = 'text'; text = "$secret said" }, @{ ts = 2; type = 'ask'; ask = 'followup'; text = "$secret asked" })
+    # Zoo Code (Roo's community fork): the same task layout under its own extension folder
+    Put 'vscode/User/globalStorage/zoocodeorganization.zoo-code/tasks/z1/history_item.json' @{ id = 'z1'; number = 1; ts = 1793500000000; task = "$secret zoo task"; tokensIn = 1; tokensOut = 2; totalCost = 0.05; status = 'completed' }
     # Cline: a session manifest and its messages
     Put 'cline/data/sessions/k1/k1.json' @{ version = 1; session_id = 'k1'; source = 'vscode'; pid = 777; started_at = '2026-11-01T10:00:00Z'; status = 'running'; interactive = $true
                                              provider = 'anthropic'; model = 'claude-sonnet-4-5'; cwd = "/w/$secret"; workspace_root = '/w'; enable_tools = $true; enable_spawn = $false; enable_teams = $false; prompt = "$secret first prompt" }
@@ -91,6 +93,10 @@ Describe 'the agent probe' {
     $script:report | Should -Match 'rooveterinaryinc\.roo-cline'
     $script:report | Should -Match 'status="active".*totalCost=0\.12'
     $script:report | Should -Match 'type="ask"\s+ask="followup"'
+  }
+  It 'reports a Zoo Code task (Roo''s fork, same layout)' {
+    $script:report | Should -Match 'zoocodeorganization\.zoo-code'
+    $script:report | Should -Match 'status="completed".*totalCost=0\.05'
   }
   It 'reports a Cline session from its manifest, and says when sqlite3 is missing' {
     $script:report | Should -Match 'status="running"\s+source="vscode"\s+pid=777'
