@@ -162,6 +162,27 @@ The watch ran 19:42:07–19:45:12Z while the user gave Cline a small task.
   - The watch ended 11 s later. What that chat was (Copilot or the Claude agent) is not known from the report.
 - **Probe gap:** for a new file written as one `kind 0` entry, the watch prints only the request count, not the model or state. To fix.
 
+## Fourth probe run: VS Code's Claude agent (same machine, 2026-11-01, probe 2026.11.01.3)
+
+The Claude agent (Local → **Claude**) ran in native mode on an Anthropic API key in VS Code's environment. Claude Code's subscription login was not accepted (see above). Watch 21:44:25–21:47:30Z.
+
+**Verified** (`probe-claude-agent.txt` and the user's `claude agents --json` output):
+- **It registers as a Claude Code live session:**
+  - `~/.claude/sessions/45408.json` appeared at 21:45:28 with `kind` `interactive`, `entrypoint` **`sdk-ts`**, `status` `busy`.
+  - It changed to `status` `idle` at 21:45:43.
+- **It writes an ordinary Claude Code transcript** in `~/.claude/projects/c--dev-src-ctop/<id>.jsonl`, with `entrypoint` `sdk-ts` on its lines.
+  - The file was already 206.2 KB at its first sighting, 377.1 KB 4 s later, 387.8 KB at the end.
+- **`claude agents --json` lists it** while it is open: pid 45408, `kind` `interactive`, `status` `idle`. The `entrypoint` column came out empty, so that list does not say which harness a session came from; the registry file does.
+- **So, where `claude` is installed, ctop already shows VS Code's Claude agent sessions**, with no change. To label them, read `entrypoint` from `~/.claude/sessions/<pid>.json`: `sdk-ts` for the agent, `claude-vscode` for the Claude Code extension, `cli` and others for the CLI (unverified for the CLI).
+- **A closed VS Code window shows up in Cline as `failed`:** the Cline session `1793562129035_phf3k` (19:42:09Z) went to `failed`, `exit_code` 1, `ended_at` 21:22:28Z, which is when the user restarted VS Code. So Cline's `failed` with exit 1 includes "its window was closed"; ctop should show it as ended, not as an error.
+- **A new Copilot chat file was not written until its first request had finished** (chat `04143839-….jsonl`, step 2's Copilot agent-mode chat):
+  - Request sent at 19:44:37.963Z (`timestamp`); completed at 19:44:51.148Z (`modelState` `1 Complete`, `completedAt`).
+  - The file first appeared at 19:45:00, as a single `kind 0` entry holding the finished request.
+  - So for its whole first turn, this chat was invisible on disk. One instance; whether that is always so for a new chat is unverified.
+  - Its `modelId` `anthropic/Anthropic/claude-haiku-4-5-20251001` shows it ran on the user's Anthropic key (Copilot's bring-your-own-key provider), not on Copilot's own Claude models. `promptTokens` 70660, `completionTokens` 702.
+
+**Inference, for the VS Code-only machine:** the registry file and transcript are written by the SDK's own Claude Code process (`entrypoint` `sdk-ts`), not by an installed `claude`. So they should exist where `claude` is not installed, and ctop could read `~/.claude/sessions/*.json` directly instead of running `claude agents --json`. Unverified until the VS Code-only run.
+
 ## VS Code's built-in Copilot
 
 **Verified:** the standalone `microsoft/vscode-copilot-chat` repo is archived. Its README says "This project has been moved into the main VS Code repository". Copilot now lives in `microsoft/vscode` under `extensions/copilot`.

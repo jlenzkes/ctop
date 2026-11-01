@@ -22,7 +22,14 @@ Findings so far, each labelled verified, inference or unverified: `docs/research
 
 **Requirement:** assume nothing from Anthropic is installed: no `claude` CLI, no standalone Claude Code, no Claude Code extension. A user may install only VS Code and configure Copilot with a Claude API key. ctop must start and work there; today it stops if `claude` is missing (`ctop.ps1`, `Get-Command claude -ErrorAction Stop`).
 
-**When this work resumes, start with:** `tools/Probe-AgentSources.ps1`, run by the user next to one Claude agent chat in VS Code, on a VS Code-only machine as well as one with Claude Code. Then check whether it appears in `claude agents --json` and `~/.claude/sessions/`, and whether its transcript is in `~/.claude/projects/`. Also run one Cline task and check `~/.cline/data/db/sessions.db`. Do this before writing code.
+**Done on the user's machine (with Claude Code installed), 2026-11-01:**
+- Copilot chats on Claude.
+- A Cline task on Claude: its manifest status is live.
+- VS Code's Claude agent: it registers in `~/.claude/sessions/` with `entrypoint` `sdk-ts`, writes a transcript in `~/.claude/projects/`, and is listed by `claude agents --json`.
+
+Details in `docs/research/other-agents.md`.
+
+**Still to do before writing code:** the same with the probe on a **VS Code-only machine** (no `claude`, no Claude Code extension): Copilot chat on Claude, and the Claude agent. The question is whether `~/.claude/sessions/` and `~/.claude/projects/` are written there too.
 
 ## Next PR: flaky tests seen in CI (2026-11-01: PR #2, push run 41330600708 for c144eb6)
 
