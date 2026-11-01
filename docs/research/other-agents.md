@@ -13,7 +13,30 @@ Sources were read on 2026-11-01:
 - `cline/cline` at `a6507a6` (2026-10-30).
 - `RooCodeInc/Roo-Code`, `main` branch, one file.
 
+## Requirement: nothing from Anthropic may be assumed installed
+
+From the user, 2026-11-01. Someone may install only VS Code on a new computer, configure Copilot with a Claude (Anthropic) API key, and start there. So ctop must not assume:
+- the Claude Code CLI (`claude`);
+- standalone Claude Code, or the Claude Code VS Code extension;
+- `~/.claude/sessions` or `claude agents --json`.
+
+What follows from that:
+
+**Verified** (`ctop.ps1:1323`, `$script:ClaudeCmd = (Get-Command claude -ErrorAction Stop).Source`): ctop today **stops at startup** if `claude` isn't on PATH. On a VS Code-only machine it would not start at all. Claude Code has to become one optional source among several.
+
+**Verified** (`claudeAgentSdkService.ts`, `ClaudeSdkPackage` via `this._downloader`): VS Code's Claude agent **downloads the Claude Agent SDK itself**. It does not need a separately installed Claude Code.
+
+**Inference:** its transcripts still land in `~/.claude/projects` (the SDK's CLI writes them), but with no `claude` command there is no `claude agents --json` roster.
+- So these sessions must be found without the roster: from the transcripts, from the process table (`AI_AGENT=github_copilot_vscode_agent`), or from VS Code's own records.
+- That they still land in `~/.claude/projects` is unverified until the first step below.
+
+**Verified** (`extensions/copilot/src/extension/byok/vscode-node/anthropicProvider.ts`): Copilot has a bring-your-own-key **Anthropic** provider.
+- **Inference:** chats on such a model are ordinary Copilot chats, stored in `chatSessions` like any other (the provider supplies the model; the chat service stores the session).
+- **Unverified:** that the stored `modelId` names the Claude model, and what `copilotCredits` holds when you pay Anthropic directly, if anything.
+
 ## First step when this work resumes
+
+Do this on a machine with **only VS Code**: no `claude` command, no Claude Code, no Claude Code extension, as well as on a machine that has them.
 
 Run **one Claude agent chat in VS Code**, then check two things while it is open:
 - whether it appears in `claude agents --json` and in `~/.claude/sessions/`;
@@ -189,6 +212,8 @@ An earlier reply said supporting these would mean "no live 'is it running?' sign
 - The Claude agent writes Claude Code transcripts.
 
 ## Proposed design (a proposal, not decided)
+
+**Precondition:** ctop starts and works with no `claude` command (see the requirement above). Every agent's reader is optional. With none of them present, ctop says what it looked for and where.
 
 **Shape:** one row per session whatever made it, with an AGENT column (`claude`, `copilot`, `cline`, `roo`) and a key to cycle which agents are shown. Each agent is a reader that returns the same row fields ctop has now:
 - id, name/title, STATE (working / waiting on you / idle / gone), pid if any, cwd, model;

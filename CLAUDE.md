@@ -13,4 +13,6 @@
 
 Findings so far, each labelled verified, inference or unverified: `docs/research/other-agents.md`.
 
-**When this work resumes, start with:** one Claude agent chat in VS Code. Then check whether it appears in `claude agents --json` and `~/.claude/sessions/`, and whether its transcript is in `~/.claude/projects/`. Also run one Cline task and check `~/.cline/data/db/sessions.db`. Do this before writing code.
+**Requirement:** assume nothing from Anthropic is installed: no `claude` CLI, no standalone Claude Code, no Claude Code extension. A user may install only VS Code and configure Copilot with a Claude API key. ctop must start and work there; today it stops if `claude` is missing (`ctop.ps1`, `Get-Command claude -ErrorAction Stop`).
+
+**When this work resumes, start with:** one Claude agent chat in VS Code, on a VS Code-only machine as well as one with Claude Code. Then check whether it appears in `claude agents --json` and `~/.claude/sessions/`, and whether its transcript is in `~/.claude/projects/`. Also run one Cline task and check `~/.cline/data/db/sessions.db`. Do this before writing code.
