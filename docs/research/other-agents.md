@@ -119,6 +119,27 @@ A second request in the same Copilot chat. Snapshots at 18:59:05Z (working) and 
 
 **Still open:** a Cline task (none ran); VS Code's own Claude agent; the VS Code-only machine; the exact lag of Copilot's completion state.
 
+## Third probe run: a Cline task on Claude (same machine, 2026-11-01, probe 2026.11.01.3)
+
+The watch ran 19:42:07–19:45:12Z while the user gave Cline a small task.
+
+**Verified** (`probe-cline.txt`):
+- **The new Cline session** `1793562129035_phf3k`: `source` `vscode`, `provider` `anthropic`, `model` `claude-sonnet-5`, `pid` 53504.
+  - It started at 19:42:09.114Z. `cline history --json` and its manifest both said `status` `running`.
+  - The database's `-wal` grew to 20.1 KB at 19:42:09.
+  - Its folder holds `<id>.json` (the manifest) and `<id>.messages.json`.
+- **The manifest's status is live:** the watch saw `status="running"` at 19:42:16 and `status="idle"` at 19:42:24, with the same pid. So the installed extension rewrites the manifest when the status changes.
+  - **Correction:** this contradicts the reading of `persistence-service.ts` at `a6507a6` (status changes only in the database). Either the installed extension differs from `main` at that commit, or another code path writes the manifest. **Tested on** that machine's installed version, not identified.
+  - **For ctop:** Cline's live status can be read from the JSON manifests, with no SQLite and no `cline` CLI.
+  - **To check:** how quickly a change reaches the manifest. The watch reads Cline manifests every 3 s, so this run shows only that it took under about 8 s.
+- **Unknown:** what process `pid` 53504 is. It is not either of the two extension hosts that held the database (52584, 31248).
+- **No VS Code Claude agent transcript appeared:** the Claude Code transcripts that changed during the watch were all from the user's own Claude Code extension session (`entrypoint` `claude-vscode`, project `c--dev-src-genai-mil`, with subagents).
+- **Copilot during the watch:**
+  - At 19:44:01 and 19:44:30 the existing chat recorded only `inputState` changes (`selectedModel`, `inputText`, `selections`), i.e. typing and choosing a model.
+  - At 19:45:01 a new chat file `04143839-….jsonl` appeared: 158 KB, written as one `kind 0` entry already holding 1 request.
+  - The watch ended 11 s later. What that chat was (Copilot or the Claude agent) is not known from the report.
+- **Probe gap:** for a new file written as one `kind 0` entry, the watch prints only the request count, not the model or state. To fix.
+
 ## VS Code's built-in Copilot
 
 **Verified:** the standalone `microsoft/vscode-copilot-chat` repo is archived. Its README says "This project has been moved into the main VS Code repository". Copilot now lives in `microsoft/vscode` under `extensions/copilot`.
