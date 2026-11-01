@@ -142,7 +142,11 @@ The watch ran 19:42:07–19:45:12Z while the user gave Cline a small task.
   - In the Chat tab, a session titled "ctop.ps1 purpose and relevance": mode **Agent**, model **Claude Haiku 4.5**, "Max 179K", target "Local", "Completed 6 steps in 13s".
   - That is the new chat file `04143839-….jsonl` (19:45:01Z).
   - **Inference:** this is Copilot's own agent mode on a Claude model, not VS Code's separate Claude agent (agent host). It ran in the Chat tab, with Copilot's model picker, and no Claude Code transcript appeared.
-  - Whether the Claude agent is offered (e.g. under the new-session `+` menu) is still unverified.
+  - **Verified** (the user's screenshots, 11:56 local): VS Code's Claude agent is offered.
+    - Where: the session-target button at the bottom left of the Chat view ("Local") opens a list of harnesses: **Local**, **Cloud** (sign in), **Copilot**, **Codex**, **Claude**, and "Learn about harnesses…".
+    - Choosing **Claude** shows "Download the Claude Agent. To use the Claude Agent, we need to download the Claude Agent SDK" with a **Download** button. The input reads "Chat with Claude", "No models available", and the footer shows "Claude" and "Ask Before Edits".
+    - This matches the source: the SDK is fetched by VS Code (`claudeAgentSdkService.ts`), not taken from an installed Claude Code.
+    - The new-session menu (top right, the `+` dropdown) offers New Chat, New Chat Editor, New Chat Window and **New Copilot CLI Session**; it does not list Claude. Copilot CLI sessions are another harness, not looked at.
 - **No VS Code Claude agent transcript appeared:** the Claude Code transcripts that changed during the watch were all from the user's own Claude Code extension session (`entrypoint` `claude-vscode`, project `c--dev-src-genai-mil`, with subagents).
 - **Copilot during the watch:**
   - At 19:44:01 and 19:44:30 the existing chat recorded only `inputState` changes (`selectedModel`, `inputText`, `selections`), i.e. typing and choosing a model.
