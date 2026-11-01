@@ -3,8 +3,9 @@
   A top(1)-style live view of *interactive* Claude Code sessions.
 
 .DESCRIPTION
-  Polls `claude agents --json` every N seconds, keeps rows where kind == "interactive",
-  and enriches each with:
+  Polls `claude agents --json` every N seconds (without the claude command, as with VS Code alone, it
+  reads Claude Code's live-session registry, ~/.claude/sessions/*.json, itself), keeps rows where
+  kind == "interactive", and enriches each with:
     - CPU seconds and working-set MB from Get-Process (via the pid field)
     - last transcript activity, and what Claude was last doing, read from
       ~/.claude/projects/<project>/<sessionId>.jsonl
@@ -99,9 +100,18 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.01.3 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.01.4 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.11.01.4
+    - runs without the claude command: VS Code alone (its built-in Claude agent) leaves none. ctop then
+      reads Claude Code's live-session registry, ~/.claude/sessions/<pid>.json, itself, keeping an
+      entry only while its process runs and started no later than the session (a leftover file whose
+      pid went to another process is dropped). With claude installed, `claude agents --json` stays the
+      roster. Verified: VS Code's Claude agent writes that registry and a transcript, on a Windows
+      machine with nothing from Anthropic installed
+    - VIA column: what a session runs in, from its registry entrypoint: cli, vscode (the Claude Code
+      extension), sdk (the Claude Agent SDK: VS Code's own Claude agent, or another program on it)
   2026.11.01.3 — the audit's second round
     - a process-table read still running when ctop exits (a snapshot that gave up on a slow ps) is
       ended by ending its ps; ctop no longer ends the whole PowerShell process to stop it, which ended
@@ -340,7 +350,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.01.3'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.11.01.4'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -1319,8 +1329,10 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
 }
 
 # Resolve the claude executable once. On Windows an npm install may give a .cmd shim,
-# which has to go through cmd.exe; the native installer gives claude.exe.
-$script:ClaudeCmd = (Get-Command claude -ErrorAction Stop).Source
+# which has to go through cmd.exe; the native installer gives claude.exe. It may be missing: VS Code alone
+# runs Claude through its own Claude agent, which leaves no claude command. Then ctop reads Claude Code's
+# live-session registry itself (Read-SessionRegistry).
+$script:ClaudeCmd = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source
 
 # Git branch of a directory, read from .git/HEAD without spawning git. Follows the
 # "gitdir: <path>" pointer file that worktrees use. Cached per cwd per roster poll.
@@ -1648,7 +1660,8 @@ function Write-ClosedLog($sess, [datetime]$when, [string]$why = 'closed', [strin
     $file  = Find-Transcript $sess.sessionId
     $title = Get-SessionTitle $sess.sessionId $file
     $rec = [ordered]@{ closedAt = $when.ToString('o'); why = $why; name = $sess.name; title = $title; sessionId = $sess.sessionId
-                       cwd = $sess.cwd; pid = $sess.pid; startedAt = $sess.startedAt; kind = $sess.kind; successor = $successor }
+                       cwd = $sess.cwd; pid = $sess.pid; startedAt = $sess.startedAt; kind = $sess.kind; successor = $successor
+                       entrypoint = $sess.entrypoint }
     Add-Content -LiteralPath $script:ClosedLogPath -Value ($rec | ConvertTo-Json -Compress) -Encoding UTF8
   } catch {}
 }
@@ -1683,10 +1696,67 @@ function Show-Closed {
   }
 }
 
+# ---- Claude Code's live-session registry --------------------------------------
+# Every running Claude Code session keeps <config>/sessions/<pid>.json: pid, sessionId, name, kind, cwd,
+# startedAt, status, entrypoint, … That is the CLI, its VS Code extension, and anything built on the Claude
+# Agent SDK, such as VS Code's own Claude agent (seen 2026-11-01 on Linux and on Windows, with and without a
+# claude command installed). `claude agents --json` lists the same sessions. Without the claude command,
+# ctop reads these files itself. The *.key files beside them hold secrets: never opened.
+function Read-SessionRegistry([string]$dir) {
+  $list = [Collections.Generic.List[object]]::new()
+  foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq '.json' })) {
+    $o = $null
+    try {
+      $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
+      try { $text = [IO.StreamReader]::new($fs).ReadToEnd() } finally { $fs.Dispose() }
+      $o = ConvertFrom-Json -InputObject $text -ErrorAction Stop
+    } catch { continue }   # being written, or not a session entry
+    if ($null -eq $o -or -not $o.pid -or -not $o.sessionId) { continue }
+    $list.Add($o)
+  }
+  return $list.ToArray()   # callers wrap in @(): none, one or many
+}
+# A registry file can outlive its session (a crash leaves it behind), and its pid can then be given to
+# another process. An entry counts as live only while its pid names a process that started no later than
+# the session did: a process that got the pid afterwards started after it. $getStart: pid -> the process's
+# start time, $null when no process has that pid, or 'unknown' when the start time cannot be read.
+function Test-RegistryLive($entry, [scriptblock]$getStart) {
+  $start = & $getStart ([int]$entry.pid)
+  if ($null -eq $start) { return $false }
+  if ($start -is [string]) { return $true }   # cannot tell: the process is there
+  $began = ConvertFrom-UnixMs $entry.startedAt
+  if (-not $began) { return $true }
+  return ([datetime]$start -le $began.AddSeconds(5))
+}
+function Get-ProcessStart([int]$id) {
+  $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+  if (-not $p) { return $null }
+  try { return $p.StartTime } catch { return 'unknown' }
+}
+function Get-RegistryRoster { @(Read-SessionRegistry (Join-Path $ConfigDir 'sessions') | Where-Object { Test-RegistryLive $_ ${function:Get-ProcessStart} }) }
+# What a session runs in, from its registry entrypoint: cli, vscode (Claude Code's VS Code extension), sdk
+# (the Claude Agent SDK: VS Code's own Claude agent, or any other program built on it), remote (Claude Code
+# on the web); anything else as it is, cleaned and cut short. '-' when unknown.
+function Get-EntrypointLabel([string]$entrypoint) {
+  $e = (Get-ContactText $entrypoint).Trim()
+  if (-not $e) { return '-' }
+  switch -Regex ($e) {
+    '^claude-vscode$' { return 'vscode' }
+    '^sdk-'           { return 'sdk' }
+    default           { if ($e.Length -gt 12) { return $e.Substring(0, 12) } else { return $e } }
+  }
+}
+
 # ---- roster feed (asynchronous) ---------------------------------------------
 # Starts `claude agents --json` as a windowless child (no console => can't retitle this
 # tab or write escapes into it) and returns immediately. Read-Roster polls for completion.
 function Start-RosterPoll {
+  if (-not $script:ClaudeCmd) {
+    # no claude command: the registry is a handful of small files, read now; Read-Roster takes it next
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $script:Poll = @{ Registry = @(Get-RegistryRoster); Started = $sw }
+    return
+  }
   $psi = [System.Diagnostics.ProcessStartInfo]::new()
   if ($script:ClaudeCmd -match '\.(cmd|bat)$') {
     $psi.FileName  = 'cmd.exe'
@@ -1987,23 +2057,34 @@ function Stop-IfSame($d) {
 function Read-Roster {
   $p = $script:Poll
   if (-not $p) { return $false }
-  if (-not ($p.Proc.HasExited -and $p.Out.IsCompleted)) {
-    # Past the deadline, a stuck claude (or a child of it still holding its output open) must not block
-    # every later poll: stop it, keep the last roster, count a failure, and poll again on schedule.
-    if ($p.Started.Elapsed.TotalSeconds -lt $script:PollTimeoutS) { return $false }
-    Stop-RosterPoll $p
+  if ($p.ContainsKey('Registry')) {   # no claude command: read from the registry
     $script:PollMs = [int]$p.Started.ElapsedMilliseconds; $script:PollAt = Get-Date; $script:Poll = $null
-    $script:PollFail = "timed out after $([int]$script:PollTimeoutS)s"; $script:PollFails++
-    return $false
+    $res = @{ Ok = $true; Why = $null; Sessions = @($p.Registry) }
+  } else {
+    if (-not ($p.Proc.HasExited -and $p.Out.IsCompleted)) {
+      # Past the deadline, a stuck claude (or a child of it still holding its output open) must not block
+      # every later poll: stop it, keep the last roster, count a failure, and poll again on schedule.
+      if ($p.Started.Elapsed.TotalSeconds -lt $script:PollTimeoutS) { return $false }
+      Stop-RosterPoll $p
+      $script:PollMs = [int]$p.Started.ElapsedMilliseconds; $script:PollAt = Get-Date; $script:Poll = $null
+      $script:PollFail = "timed out after $([int]$script:PollTimeoutS)s"; $script:PollFails++
+      return $false
+    }
+    $script:PollMs   = [int]$p.Started.ElapsedMilliseconds
+    $script:PollAt   = Get-Date
+    $script:Poll     = $null
+    $raw = $p.Out.Result
+    $exit = $p.Proc.ExitCode
+    $p.Proc.Dispose()
+    $res = ConvertFrom-RosterPoll -ExitCode $exit -Stdout $raw -Stderr $(if ($p.Err.IsCompleted) { $p.Err.Result } else { '' })
+    if (-not $res.Ok) { $script:PollFail = $res.Why; $script:PollFails++; return $false }
+    # `claude agents --json` does not say what a session runs in; its registry entry does (entrypoint)
+    $reg = @{}; foreach ($e in @(Read-SessionRegistry (Join-Path $ConfigDir 'sessions'))) { $reg[[string]$e.pid] = $e }
+    foreach ($x in @($res.Sessions)) {
+      $e = $reg[[string]$x.pid]
+      if ($e -and $e.entrypoint -and -not $x.entrypoint) { $x | Add-Member -NotePropertyName entrypoint -NotePropertyValue ([string]$e.entrypoint) -Force }
+    }
   }
-  $script:PollMs   = [int]$p.Started.ElapsedMilliseconds
-  $script:PollAt   = Get-Date
-  $script:Poll     = $null
-  $raw = $p.Out.Result
-  $exit = $p.Proc.ExitCode
-  $p.Proc.Dispose()
-  $res = ConvertFrom-RosterPoll -ExitCode $exit -Stdout $raw -Stderr $(if ($p.Err.IsCompleted) { $p.Err.Result } else { '' })
-  if (-not $res.Ok) { $script:PollFail = $res.Why; $script:PollFails++; return $false }
   if (-not $script:TracedRoster) { $script:TracedRoster = $true; Write-Trace "first roster in (poll $($script:PollMs) ms)" }
   $script:PollFail = $null; $script:PollFails = 0
   $script:RosterAt = $script:PollAt
@@ -2254,6 +2335,7 @@ function Build-Rows {
       NAME     = if ($s.name) { $s.name } elseif ($s.id) { $s.id } else { '-' }
       TITLE    = $($t = Get-SessionTitle $s.sessionId $file; if ($t) { $t } elseif ($file) { '(untitled)' } elseif ($s.title) { [string]$s.title } else { '' })   # title: logged one, for a gone row whose transcript was deleted
       KIND     = $s.kind
+      VIA      = Get-EntrypointLabel ([string]$s.entrypoint)
       STATE    = $state
       PID      = if ($s.pid) { $s.pid } else { '-' }
       'CPU(s)' = if ($proc) { [math]::Round($proc.CPU, 1) } else { '-' }
@@ -2512,6 +2594,7 @@ $script:Columns = @(
   @{ Name = 'TURNS';       Fixed = 5;  Align = 'R'; Priority = 35 }
   @{ Name = 'TOOLS';       Fixed = 5;  Align = 'R'; Priority = 30 }
   @{ Name = 'MODEL';       Fixed = 5;  Auto = $true; Align = 'L'; Priority = 78 }   # visible by default: catches an unintended model
+  @{ Name = 'VIA';         Fixed = 3;  Auto = $true; Align = 'L'; Priority = 57 }   # what the session runs in: cli, vscode, sdk
   @{ Name = 'KIND';        Fixed = 4;  Auto = $true; Align = 'L'; Priority = 20 }
   @{ Name = 'CPU(s)';      Fixed = 7;  Align = 'R'; Priority = 15 }
   @{ Name = 'MEM(MB)';     Fixed = 7;  Align = 'R'; Priority = 10 }
@@ -2832,6 +2915,7 @@ function Build-Peek([object]$r) {
     $(if ($r.TITLE) { Peek-Block 'TITLE' $r.TITLE $pw } else { $null }),
     $(if ($r._Gone) { Format-GoneNote -Ago (Get-Since $r._Gone) -Cleared ([bool]$r._Cleared) -Successor ([string]$r._Successor) -HasTranscript ($r._Transcript -and $r._Transcript -ne '-') } else { $null }),
     "  KIND         $($r.KIND)",
+    $(if ($r.VIA -and $r.VIA -ne '-') { "  VIA          $($r.VIA)" } else { $null }),
     "  STATE        $(Paint $r.STATE (Cell-Color 'STATE' $r))$(if ($r._SupStatus) { "      supervisor says: $($r._SupStatus)" })",
     $(if ($r.STATE -eq 'polling') { "  POLLING      a wait loop: idle until something external changes (a file, a log marker, another process)" } else { $null }),
     $(if (@($r._Jobs | Where-Object { $_ }).Count) { @(@($r._Jobs | Where-Object { $_ }) | ForEach-Object {   # @($null).Count is 1: filter first (subagent rows have no job list)
@@ -2923,7 +3007,8 @@ function Show-Help {
     '              Building only: not drawing it, nor (with the worker) sending it to the display.',
     '              ctop runs as two processes: this one reads keys and draws, a worker builds frames, so a',
     '              slow frame never holds up keys (q quits at once; "updating…" means the worker is busy)',
-    '  roster age  time since the last good `claude agents --json` result; * = poll in flight',
+    '  roster age  time since the last good `claude agents --json` result (or registry read, without the',
+    '              claude command); * = poll in flight',
     '  last poll   measured ms that call took (runs async; display never waits on it). FAILED×N: the',
     '              last N polls failed (non-zero exit, no output, not a JSON array, or no answer within',
     '              5 s / 5 roster intervals, after which it is stopped and tried again); the previous',
@@ -3007,7 +3092,8 @@ function Show-Help {
     '  TITLE      the task description the spawner gave it. KIND reads subagent, or subagent·bg for one',
     '             spawned in the background (the spawner kept working instead of waiting for it)',
     '',
-    'COLUMNS   (source: J = claude agents --json, O = OS, T = transcript file — heuristic)',
+    'COLUMNS   (source: J = claude agents --json, R = Claude Code''s session registry (~/.claude/sessions),',
+    '           O = OS, T = transcript file — heuristic. Without the claude command, J comes from R too)',
     'MOUSE   (Windows; -NoMouse turns it off)  click a row to select it, click it again or double-click',
     '  to peek, wheel to move, click a footer item for its key, click in peek to close it. To select',
     '  text in the terminal while ctop runs, hold Shift while dragging.',
@@ -3019,6 +3105,8 @@ function Show-Help {
     '                 record > summary of its FIRST SendMessage (peer sessions) > first human prompt.',
     '                 (untitled) = the picker shows Untitled too. Subagents: their task description',
     '  KIND        J  interactive (terminal / VS Code), background (agent view), subagent, subagent·bg',
+    '  VIA         R  what the session runs in: cli, vscode (the Claude Code extension), sdk (the Claude',
+    '                 Agent SDK: VS Code''s own Claude agent, or another program built on it), remote',
     '  TURN        T  time since your last prompt — how long Claude has been on this turn (blank when idle).',
     '                 Yellow >= 10 min, red >= 30 min',
     '  IDLE        T  time since the transcript was last written to',
@@ -3320,7 +3408,8 @@ function Invoke-Frame($view) {
     # nothing to draw, live or gone: no row can be selected, peeked or copied
     $script:BodyMap = $null; $sorted = @(); $selectedId = $null; $script:PeekId = $null
     $hiddenGone = if (-not $script:ShowGone -and $script:KeptGone.Count) { "; g shows $($script:KeptGone.Count) gone" } else { '' }
-    $frame += if ($script:RosterAt) { "(no interactive sessions reported by 'claude agents --json'$hiddenGone)" }
+    $frame += if ($script:RosterAt -and -not $script:ClaudeCmd) { "(no Claude Code sessions running: none in $(Join-Path $ConfigDir 'sessions'), and no claude command$hiddenGone)" }
+              elseif ($script:RosterAt) { "(no interactive sessions reported by 'claude agents --json'$hiddenGone)" }
               elseif ($script:PollFail) { "('claude agents --json' failed: $($script:PollFail); retrying every $RosterInterval s)" }
               else { '(polling…)' }
   } else {

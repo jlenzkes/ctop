@@ -20,7 +20,7 @@ Not Roo Code (shut down), Zoo Code, Kilo Code, Continue or others. The probe (`t
 
 Findings so far, each labelled verified, inference or unverified: `docs/research/other-agents.md`.
 
-**Requirement:** assume nothing from Anthropic is installed: no `claude` CLI, no standalone Claude Code, no Claude Code extension. A user may install only VS Code and configure Copilot with a Claude API key. ctop must start and work there; today it stops if `claude` is missing (`ctop.ps1`, `Get-Command claude -ErrorAction Stop`).
+**Requirement:** assume nothing from Anthropic is installed: no `claude` CLI, no standalone Claude Code, no Claude Code extension. A user may install only VS Code and configure Copilot with a Claude API key. ctop must start and work there. **Step 1 (build 2026.11.01.4) does this:** without `claude`, ctop reads `~/.claude/sessions/*.json` itself, and a VIA column shows `cli` / `vscode` / `sdk`.
 
 **Done on the user's machine (with Claude Code installed), 2026-11-01:**
 - Copilot chats on Claude.
@@ -33,7 +33,12 @@ Details in `docs/research/other-agents.md`.
 - Copilot chat on Claude: chats are in `globalStorage/emptyWindowChatSessions/` when no folder is open; Pending, then Complete about a minute later.
 - VS Code's Claude agent: it creates `~/.claude/sessions/<pid>.json` (`entrypoint` `sdk-ts`, live status including `waiting`) and a transcript in `~/.claude/projects/`. Signed out of GitHub, it needed `"chat.agentHost.allowSignedOutWhenUsable": true`.
 
-**Research is done; code can start.** First step: ctop starts without `claude` and reads `~/.claude/sessions/*.json` itself.
+**Research is done. Code:**
+- **Step 1, done:** ctop starts without `claude` and reads `~/.claude/sessions/*.json` itself; the VIA column.
+- **Step 2, next:** Cline, from its session manifests in `~/.cline/data/sessions/`.
+- **Step 3:** Copilot chats, from VS Code's chat files.
+
+Each step gets its own PR. Step 1 shares one with the probe and these notes.
 
 ## Next PR: flaky tests seen in CI (2026-11-01: PR #2, push run 41330600708 for c144eb6)
 

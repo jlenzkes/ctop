@@ -27,8 +27,10 @@ Everything is read locally. ctop makes no model calls and uses no tokens.
   or sends something it can't read. The worker costs some startup: about 0.5 s more to the first frame
   in the Linux container this was measured in. If a frame is more than 5 s late, the footer says how old
   the screen is.
-- **Claude Code** on `PATH`, with the `claude agents --json` command. ctop stops with an error
-  at startup if `claude` can't be found.
+- **Claude Code sessions to show.** ctop finds them in either of two ways:
+  - **`claude` on `PATH`:** ctop runs `claude agents --json`, as before.
+  - **No `claude` command:** ctop reads Claude Code's live-session registry, `~/.claude/sessions/*.json`, itself. That covers VS Code alone, where VS Code's built-in Claude agent runs Claude Code through the Claude Agent SDK. It writes that registry and its transcripts, which was tested on Windows with nothing from Anthropic installed.
+  - **VIA column:** says which a session is: `cli`, `vscode` (the Claude Code extension) or `sdk` (VS Code's Claude agent, or another program built on the SDK).
 - **Operating system**: Windows, or Linux in the Debian and Fedora / RHEL families. On Linux the
   process table comes from `ps -ww -eo pid,ppid,etimes,…` (procps) and `/proc/<pid>/stat`; without
   `ps`, ctop still runs but can't see background jobs. macOS is untested: the process-table code is
@@ -222,11 +224,11 @@ The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meani
 
 ## Tested on
 
-What has actually been run, as of build `2026.11.01.3`. Anything not listed here is untested.
+What has actually been run, as of build `2026.11.01.4`. Anything not listed here is untested.
 
-**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (358, less those
+**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (381, less those
 that cannot apply: Linux skips the two Windows process tests; Windows skips the two that need a
-case-sensitive filesystem; Windows PowerShell 5.1 also skips the flag-width test: 356, 356 and 355 run).
+case-sensitive filesystem; Windows PowerShell 5.1 also skips the flag-width test: 379, 379 and 378 run).
 They include the worker run as a real process, the display against a worker that misbehaves, `-Snapshot`
 and the command line run as processes, on Windows PowerShell 5.1 too.
 *End to end*: the integration tests (41), which drive the real ctop in tmux against a fake `claude`
