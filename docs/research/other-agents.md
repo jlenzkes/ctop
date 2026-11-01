@@ -183,6 +183,29 @@ The Claude agent (Local → **Claude**) ran in native mode on an Anthropic API k
 
 **Inference, for the VS Code-only machine:** the registry file and transcript are written by the SDK's own Claude Code process (`entrypoint` `sdk-ts`), not by an installed `claude`. So they should exist where `claude` is not installed, and ctop could read `~/.claude/sessions/*.json` directly instead of running `claude agents --json`. Unverified until the VS Code-only run.
 
+## Fifth probe run: a VS Code-only VM (2026-11-01, probe 2026.11.01.3)
+
+Windows 10 (NT 10.0.19045), Windows PowerShell 5.1.19041.6456. VS Code with Copilot on the user's Anthropic key; no `claude`, no Claude Code extension, no Cline, no node.
+
+**Verified** (`probe-vm-before.txt`, `probe-vm-copilot.txt`):
+- **The probe runs on Windows PowerShell 5.1 on a real machine,** not only in CI.
+- **Nothing from Anthropic is present:** `claude` not found, `~\.claude` not found, `~\.cline` not found.
+- **Copilot chats with no folder open are stored in `globalStorage\emptyWindowChatSessions\`,** as the source said.
+- **The model is named:** Copilot chat on Claude via the user's key gives `modelId` `anthropic/Anthropic/claude-haiku-4-5-20251001`.
+- **A new chat was visible while working** (`4033627a-….jsonl`):
+  - The file existed, empty (0 requests), from 22:44:14.
+  - At 22:44:34 the watch saw the request pushed with `modelState` `0 Pending`.
+  - The next write came at 22:45:35, 61 s later: `modelState` `1 Complete`, tokens, `response`, `customTitle`, and a push of three requests, all Complete.
+  - So during that minute the file said Pending.
+  - This contradicts the one earlier instance where a new chat was not on disk until its first request finished. So "a new chat is invisible during its first request" is not always true.
+- **An earlier chat on the VM** (`892a9c64-….jsonl`): requests at 22:39:10Z and 22:39:30Z, the second still Pending in the 22:44:21 snapshot.
+
+**Inference:**
+- While a request runs, Copilot writes the chat file about once a minute. The 61 s gap fits VS Code's 60 s storage flush. So ctop can show a Copilot chat as working, but "finished" may reach it up to about a minute late.
+- How late, exactly, needs the reply's real end time, which the file does not hold until it is written.
+
+**Not run:** VS Code's Claude agent on the VM, the question that matters most here.
+
 ## VS Code's built-in Copilot
 
 **Verified:** the standalone `microsoft/vscode-copilot-chat` repo is archived. Its README says "This project has been moved into the main VS Code repository". Copilot now lives in `microsoft/vscode` under `extensions/copilot`.
