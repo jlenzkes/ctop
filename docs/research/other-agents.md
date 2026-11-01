@@ -46,6 +46,10 @@ Also run **one Cline task** and check `~/.cline/data/db/sessions.db`.
 
 These are the two facts the source reading could not settle.
 
+**How:** run `tools/Probe-AgentSources.ps1 -OutFile probe.txt` on each machine, once while the chat or task is working and once after it has finished, and bring back both reports. It prints only shape and safe values (see its help), so the reports can be shared as they are.
+
+**Verified** (the probe run in this cloud container, 2026-11-01): Claude Code's own Bash tool sets `AI_AGENT=claude-code_2-1-316_agent` on the processes it runs, together with `CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT`. The transcript lines of this session carry `entrypoint` `remote`, `userType` `external` and `version`. So `AI_AGENT` tells a Claude Code process from one VS Code's agent started (`github_copilot_vscode_agent`), and `entrypoint` should tell an SDK-written transcript from a CLI one. Which `entrypoint` value the SDK writes is unverified until the probe runs next to a Claude agent chat.
+
 ## VS Code's built-in Copilot
 
 **Verified:** the standalone `microsoft/vscode-copilot-chat` repo is archived. Its README says "This project has been moved into the main VS Code repository". Copilot now lives in `microsoft/vscode` under `extensions/copilot`.
