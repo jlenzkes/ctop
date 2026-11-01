@@ -339,3 +339,21 @@ Describe 'terminal cell widths' {
     Get-CellWidth (Strip-Ansi $out) | Should -BeLessOrEqual 5
   }
 }
+
+Describe 'Get-QuestionLines (peek: a question waiting on you)' {
+  It 'gives one plain line per question, choice and note' {
+    $qs = @(@{ Text = 'Which DB?'; Header = 'DB'; Multi = $false; Options = @('SQLite: fast', 'Postgres: real') },
+            @{ Text = 'Which suites?'; Header = ''; Multi = $true; Options = @('unit') })
+    $lines = Get-QuestionLines $qs 100
+    foreach ($l in $lines) { $l | Should -BeOfType [string] }   # a nested array draws as a blank line
+    ($lines -join "`n") | Should -Match 'QUESTION +\[DB\] Which DB\?'
+    ($lines -join "`n") | Should -Match '1\. SQLite: fast'
+    ($lines -join "`n") | Should -Match '2\. Postgres: real'
+    ($lines -join "`n") | Should -Match 'Which suites\?'
+    ($lines -join "`n") | Should -Match '\(choose any\)'
+    $lines.Count | Should -Be 7
+  }
+  It 'gives nothing when no question is waiting' {
+    @(Get-QuestionLines @() 100).Count | Should -Be 0
+  }
+}
