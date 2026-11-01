@@ -99,9 +99,17 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.01.2 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.01.3 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.11.01.3 — the audit's second round
+    - a process-table read still running when ctop exits (a snapshot that gave up on a slow ps) is
+      ended by ending its ps; ctop no longer ends the whole PowerShell process to stop it, which ended
+      the PowerShell that ran it (& ./ctop.ps1 -Snapshot; the next command never ran)
+    - a question for you stays "asks:" when the reply's other calls are separate transcript lines (as
+      Claude Code writes them) and one of them gets its result first; an answered question no longer
+      outranks a newer call in the same reply
+    - CTOP_TRACE: one more phase, when the worker's process has started
   2026.11.01.2 — the audit of the worker build (2026.11.01.1)
     - t / y / n / d copy the session selected when the key was pressed, even if the selection moves
       before the worker's next frame comes in; a session gone by then is not copied, and the footer says so
@@ -332,7 +340,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.01.2'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.11.01.3'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -386,6 +394,7 @@ function Start-Worker {
   $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
   $psi.WorkingDirectory = (Get-Location -PSProvider FileSystem).ProviderPath   # where PowerShell is, not where the process started
   $proc = [Diagnostics.Process]::Start($psi)
+  Write-Trace 'worker process started (settings next)'
   # settings: the parameters this run was given (the worker starts with none of them)
   $settings = @{}
   foreach ($k in $script:BoundParams.Keys) { if ($k -notin 'Worker', 'Snapshot', 'Version', 'InProcess', 'NoMouse') { $v = $script:BoundParams[$k]; $settings[$k] = if ($v -is [Management.Automation.SwitchParameter]) { [bool]$v } else { $v } } }
@@ -1192,9 +1201,38 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
     # content may be a string or an array of blocks
     if ($content -is [string]) { $t = ($content -replace '\s+', ' ').Trim(); $out.LastFull = 'text: ' + $t; $out.Last = 'text: ' + (Limit-Chars $t 120); break }
     $tool = $content | Where-Object { $_.type -eq 'tool_use' } | Select-Object -Last 1
-    # a reply can make several calls at once; a question among them is what matters to you
-    $askCall = $content | Where-Object { $_.type -eq 'tool_use' -and $_.name -eq 'AskUserQuestion' } | Select-Object -Last 1
-    if ($askCall) { $tool = $askCall }
+    # A question for you is waiting until a newer entry answers its call: its tool result (the API ties
+    # every result to its call's id), or a prompt that is not a tool result.
+    $isWaiting = {
+      param($id, [int]$at)
+      if ($interrupted) { return $false }
+      $idRx = '"tool_use_id"\s*:\s*"' + [regex]::Escape([string]$id) + '"'
+      for ($k = $at + 1; $k -lt $lines.Count; $k++) {
+        $lk = $lines[$k]
+        if (-not $lk.Contains('"type":"user"')) { continue }
+        if (-not $lk.Contains('"tool_result"') -or ($id -and $lk -match $idRx)) { return $false }
+      }
+      return $true
+    }
+    # A reply can make several calls at once, in one line or (as Claude Code writes them) one line per
+    # block, all with the reply's message id. A question among them that is still waiting is what
+    # matters to you, even when another call is newer or has its result already.
+    $asks = [Collections.Generic.List[object]]::new()
+    foreach ($c in @($content)) { if ($c.type -eq 'tool_use' -and $c.name -eq 'AskUserQuestion') { $asks.Insert(0, @{ Call = $c; At = $i }) } }
+    if ($msg.id) {
+      $idText = '"id":"' + [string]$msg.id + '"'
+      for ($b = $i - 1; $b -ge 0; $b--) {
+        $lb = $lines[$b]
+        if ($lb.Contains('"type":"user"')) { if ($lb.Contains('"tool_result"')) { continue } else { break } }   # a prompt: an earlier turn
+        if (-not $lb.Contains('"type":"assistant"')) { continue }
+        if (-not $lb.Contains($idText)) { break }   # another reply (checked as text: no parse of other lines)
+        $ob = $null; try { $ob = $lb | ConvertFrom-Json } catch { continue }
+        if ([string]$ob.message.id -ne [string]$msg.id) { break }
+        foreach ($c in @($ob.message.content)) { if ($c.type -eq 'tool_use' -and $c.name -eq 'AskUserQuestion') { $asks.Add(@{ Call = $c; At = $b }) } }
+      }
+    }
+    $askAt = $i
+    foreach ($a in $asks) { if (& $isWaiting $a.Call.id $a.At) { $tool = $a.Call; $askAt = $a.At; break } }
     if ($tool -and $tool.name -eq 'SubagentHandback') {
       # Claude Code >= 2.1.271: a subagent delivers its report through SubagentHandback, then stops.
       # The report is in input.message. It can hand back again later (e.g. when background work it
@@ -1207,21 +1245,13 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
     }
     if ($tool -and $tool.name -eq 'AskUserQuestion') {
       # A question for you, from the tool's own input (questions[]: question, header, options[] of label /
-      # description, multiSelect). Waiting until a newer entry answers this call: its tool result (the API
-      # ties every result to its call's id), or a prompt that is not a tool result. Another call made in the
-      # same reply can get its result first; that does not answer the question.
+      # description, multiSelect); asks: while it waits (see $isWaiting above), asked: once answered.
       $qs = @(foreach ($q in @($tool.input.questions)) {
         if (-not $q) { continue }
         @{ Text = (Get-ContactText $q.question); Header = (Get-ContactText $q.header); Multi = [bool]$q.multiSelect
            Options = @(foreach ($op in @($q.options)) { if ($op) { (Get-ContactText $op.label) + $(if ($op.description) { ': ' + (Get-ContactText $op.description) }) } }) }
       })
-      $waiting = -not $interrupted
-      $idRx = '"tool_use_id"\s*:\s*"' + [regex]::Escape([string]$tool.id) + '"'
-      for ($k = $i + 1; $waiting -and $k -lt $lines.Count; $k++) {
-        $lk = $lines[$k]
-        if (-not $lk.Contains('"type":"user"')) { continue }
-        if (-not $lk.Contains('"tool_result"') -or ($tool.id -and $lk -match $idRx)) { $waiting = $false }
-      }
+      $waiting = & $isWaiting $tool.id $askAt
       $verb = if ($waiting) { 'asks' } else { 'asked' }
       $first = if ($qs) { $qs[0].Text } else { '(question not recorded)' }
       $out.LastFull = "${verb}: " + $(if ($qs) { ($qs | ForEach-Object { $_.Text }) -join ' / ' } else { $first })
@@ -1691,15 +1721,29 @@ $script:ProcJob = $null; $script:ProcTable = @(); $script:JobMap = @{}
 $script:LaunchedBy = @{}
 $script:ProcAt = Get-Date; $script:JobCpuPrev = @{}   # job key -> @{ At } (when the job was last sampled)
 $script:ProcCpuPrev = @{}   # "pid@start" -> CPU seconds at the previous poll, per process
+# $box (a synchronized hashtable): where the read puts the ps process it starts, so Stop-ProcPoll can end it.
+# It must be ended, not abandoned: a thread job still in a native command holds the process open, and
+# Stop-Job waits for the command to finish.
 $script:ProcScript = {
+  param($box)
   if ($IsWindows -or $env:OS -eq 'Windows_NT') {
-    Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine, CreationDate, KernelModeTime, UserModeTime -ErrorAction SilentlyContinue |
+    Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine, CreationDate, KernelModeTime, UserModeTime -OperationTimeoutSec 20 -ErrorAction SilentlyContinue |
       ForEach-Object { [pscustomobject]@{ Pid = [int]$_.ProcessId; Ppid = [int]$_.ParentProcessId; Name = [string]$_.Name; Cmd = [string]$_.CommandLine; Start = $_.CreationDate
                                           Cpu = ([double]$_.KernelModeTime + [double]$_.UserModeTime) / 1e7 } }   # 100 ns units -> seconds
   } else {
     $now = Get-Date
     # -ww: never cut args to the terminal width (ps honors COLUMNS; a cut line loses the tool-wrapper marker)
-    & ps -ww -eo 'pid=,ppid=,etimes=,stat=,times=,comm=,args=' 2>$null | ForEach-Object {
+    $psi = [Diagnostics.ProcessStartInfo]::new('ps')
+    foreach ($a in '-ww', '-eo', 'pid=,ppid=,etimes=,stat=,times=,comm=,args=') { $psi.ArgumentList.Add($a) }
+    $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $out = ''
+    try {
+      $p = [Diagnostics.Process]::Start($psi)
+      if ($box) { $box.Proc = $p; if ($box.Cancel) { try { $p.Kill($true) } catch {} } }
+      $null = $p.StandardError.ReadToEndAsync()
+      $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+    } catch {}
+    $out -split "`n" | ForEach-Object {
       # stat Z = zombie: exited, just not reaped yet. Finished work is not a running job.
       if ($_ -match '^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+(\S+)\s+(.*)$' -and $Matches[4] -notlike 'Z*') {
         $o = [pscustomobject]@{ Pid = [int]$Matches[1]; Ppid = [int]$Matches[2]; Name = $Matches[6]; Cmd = $Matches[7]; Start = $now.AddSeconds(-[int]$Matches[3]); Cpu = [double]$Matches[5] }
@@ -1717,8 +1761,20 @@ $script:ProcScript = {
 }
 function Start-ProcPoll {
   if ($script:ProcJob) { return }
-  if (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue) { $script:ProcJob = Start-ThreadJob -ScriptBlock $script:ProcScript }
-  else { $script:ProcTable = @(& $script:ProcScript); $script:ProcAt = Get-Date; Update-JobMap }   # no ThreadJob module: run inline
+  $script:ProcBox = [hashtable]::Synchronized(@{})
+  if (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue) { $script:ProcJob = Start-ThreadJob -ScriptBlock $script:ProcScript -ArgumentList $script:ProcBox }
+  else { $script:ProcTable = @(& $script:ProcScript $null); $script:ProcAt = Get-Date; Update-JobMap }   # no ThreadJob module: run inline
+}
+# End a process-table read still running (ctop is exiting): end the ps it started, give the job a moment
+# to finish, and remove it. Never ends the PowerShell process: ctop may be running inside yours.
+function Stop-ProcPoll {
+  $j = $script:ProcJob
+  if (-not $j) { return }
+  if ($j.State -eq 'Running') {
+    if ($script:ProcBox) { $script:ProcBox.Cancel = $true; try { $script:ProcBox.Proc.Kill($true) } catch {} }
+    $null = Wait-Job $j -Timeout 2
+  }
+  if ($j.State -ne 'Running') { Remove-Job $j -Force -ErrorAction SilentlyContinue; $script:ProcJob = $null }
 }
 function Read-ProcPoll {
   $j = $script:ProcJob
@@ -3683,8 +3739,7 @@ catch {
 }
 finally {
   Stop-RosterPoll $script:Poll
-  # a process-table read still running is left to end with the process: removing it waits for its ps
-  if ($script:ProcJob -and $script:ProcJob.State -ne 'Running') { Remove-Job $script:ProcJob -Force -ErrorAction SilentlyContinue }
+  Stop-ProcPoll   # a process-table read still running: end its ps, so nothing holds the process open
   if ($script:FeedOwner -and -not $script:ReadOnly) { Save-ScanCache }
   if ($script:Mode -ne 'Worker') {
     try { [Console]::OutputEncoding = $origOutEnc } catch {}
@@ -3704,10 +3759,5 @@ finally {
 # a crash is a failure to whoever ran ctop (a wrapper, a test): say so on stderr and in the exit status
 if ($script:Fatal) {
   [Console]::Error.WriteLine((Protect-TerminalText "ctop $script:CtopVersion stopped: $($script:Fatal.Exception.GetType().Name): $($script:Fatal.Exception.Message)"))
-}
-# A process-table read still running (a slow ps) would hold the process open until it ends: end it now.
-if ($script:ProcJob -and $script:ProcJob.State -eq 'Running') {
-  try { [Console]::Out.Flush(); [Console]::Error.Flush() } catch {}
-  [Environment]::Exit($(if ($script:Fatal) { 1 } else { 0 }))
 }
 if ($script:Fatal) { exit 1 }

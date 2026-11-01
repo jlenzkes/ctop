@@ -563,6 +563,26 @@ Describe 'a snapshot (-Snapshot) when ps is slow' -Tag Integration -Skip:$script
       }
     } finally { try { $job.Kill() } catch {} }
   }
+  It 'returns to the PowerShell that ran it, and leaves no ps behind, when the process table is late' {
+    # ctop run inside a PowerShell (& ./ctop.ps1), not as its own process: when it gives up on a slow
+    # process read, the caller must carry on (it once ended the whole process to stop the read)
+    $fx = New-Fixture (Join-Path $TestDrive 'snap-host') @()
+    $realPs = (Get-Command ps -CommandType Application | Select-Object -First 1).Source
+    $bin = Split-Path -Parent $fx.Fake
+    [IO.File]::WriteAllText((Join-Path $bin 'ps'), "#!/bin/sh`nsleep 30`nexec '$realPs' `"`$@`"`n"); & chmod +x (Join-Path $bin 'ps')
+    $wrapper = Join-Path $TestDrive 'wrapper.ps1'
+    [IO.File]::WriteAllText($wrapper, "& '$($script:ctop)' -ClosedLog '$($fx.Log)' -Snapshot -MaxWidth 200`n'HOST-SURVIVED'`n")
+    $out = Join-Path $TestDrive 'wrapper.out'
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    & sh -c "$($fx.Env) '$($script:pwsh)' -NoProfile -File '$wrapper' >'$out' 2>&1 </dev/null"
+    $sw.Elapsed.TotalSeconds | Should -BeLessThan 20 -Because 'the snapshot gives up on the process table after 10 s'
+    $text = [IO.File]::ReadAllText($out)
+    $text | Should -Match '(?m)^live-one ' -Because 'the snapshot printed'
+    $text | Should -Match 'process data .*not read'
+    $text | Should -Match 'HOST-SURVIVED' -Because 'the statement after ctop runs: ctop returned instead of ending the process'
+    $fakePs = [regex]::Escape((Join-Path $bin 'ps'))
+    @(& $realPs -eo args | Where-Object { $_ -match "$fakePs|^sleep 30`$" }).Count | Should -Be 0 -Because 'the slow ps it gave up on was ended'
+  }
 }
 
 Describe 'a session waiting on a question for you' -Tag Integration -Skip:$script:noTmux {

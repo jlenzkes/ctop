@@ -305,6 +305,26 @@ Describe 'Get-LastAction: a question for you (AskUserQuestion)' {
     @($a.Questions).Count | Should -Be 2
     $a.State | Should -Be 'working' -Because 'the same as when the question is the newest entry'
   }
+  It 'keeps waiting when the question and another call are separate lines of one reply, and only the other is answered' {
+    # Claude Code writes each block of a reply as its own line, all with the reply's message id
+    $askLine = @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'; message = @{ id = 'msg_split'; role = 'assistant'; model = 'm'; content = @($ask) } }
+    $readLine = @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'; message = @{ id = 'msg_split'; role = 'assistant'; model = 'm'
+                   content = @(@{ type = 'tool_use'; id = 'toolu_read2'; name = 'Read'; input = @{ file_path = '/x' } }) } }
+    $readDone = @{ type = 'user'; sessionId = 's'; timestamp = '2026-10-31T05:19:01Z'; message = @{ role = 'user'; content = @(@{ type = 'tool_result'; tool_use_id = 'toolu_read2'; content = 'file text' }) } }
+    $a = Get-LastAction (Write-T 'split' @($askLine, $readLine, $readDone)) 'q6'
+    $a.Last | Should -Match '^asks: Which database'
+    @($a.Questions).Count | Should -Be 2
+    $a.State | Should -Be 'working'
+  }
+  It 'shows the other call once the question in the same reply is answered (separate lines)' {
+    $askLine = @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'; message = @{ id = 'msg_split'; role = 'assistant'; model = 'm'; content = @($ask) } }
+    $readLine = @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'; message = @{ id = 'msg_split'; role = 'assistant'; model = 'm'
+                   content = @(@{ type = 'tool_use'; id = 'toolu_read3'; name = 'Read'; input = @{ file_path = '/x' } }) } }
+    $answer = @{ type = 'user'; sessionId = 's'; timestamp = '2026-10-31T05:20:00Z'; message = @{ role = 'user'; content = @(@{ type = 'tool_result'; tool_use_id = 'toolu_q1'; content = 'answered' }) } }
+    $a = Get-LastAction (Write-T 'split-answered' @($askLine, $readLine, $answer)) 'q7'
+    $a.Last | Should -Match 'Read /x' -Because 'an answered question no longer outranks the newest call'
+    @($a.Questions).Count | Should -Be 0
+  }
   It 'no longer shows it as waiting once a newer prompt comes in' {
     $prompt = @{ type = 'user'; sessionId = 's'; timestamp = '2026-10-31T05:21:00Z'; message = @{ role = 'user'; content = 'never mind, use SQLite' } }
     $a = Get-LastAction (Write-T 'moved-on' @($asked, $prompt)) 'q5'
