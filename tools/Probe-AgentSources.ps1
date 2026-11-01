@@ -307,6 +307,7 @@ if (Test-Path -LiteralPath $kdir) {
   # Cline's CLI lists sessions as JSON (apps/cli/src/commands/history.ts): the same rows, without SQLite
   $cl = Get-Command cline -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($cl) {
+    # (rows are unrolled with ForEach-Object: Windows PowerShell 5.1 returns a JSON list as one object)
     $rows = $null; $why = ''
     try {
       $psi = [Diagnostics.ProcessStartInfo]::new()
@@ -316,7 +317,7 @@ if (Test-Path -LiteralPath $kdir) {
       $pr = [Diagnostics.Process]::Start($psi); $pr.StandardInput.Close()
       $so = $pr.StandardOutput.ReadToEndAsync(); $null = $pr.StandardError.ReadToEndAsync()
       if (-not $pr.WaitForExit(30000)) { try { $pr.Kill() } catch {}; $why = 'did not finish within 30 s' }
-      else { $text = $so.Result; $start = $text.IndexOf('['); if ($start -ge 0) { $rows = @(ConvertFrom-Json -InputObject $text.Substring($start) | ForEach-Object { $_ })   # unroll: Windows PowerShell 5.1 returns a JSON list as one object } else { $why = "exit $($pr.ExitCode), no JSON list in its output" } }
+      else { $text = $so.Result; $start = $text.IndexOf('['); if ($start -ge 0) { $rows = @(ConvertFrom-Json -InputObject $text.Substring($start) | ForEach-Object { $_ }) } else { $why = "exit $($pr.ExitCode), no JSON list in its output" } }
     } catch { $why = $_.Exception.Message }
     if ($null -ne $rows) {
       Say "    cline history --json: $($rows.Count) rows"
