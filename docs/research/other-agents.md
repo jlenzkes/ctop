@@ -204,7 +204,14 @@ Windows 10 (NT 10.0.19045), Windows PowerShell 5.1.19041.6456. VS Code with Copi
 - While a request runs, Copilot writes the chat file about once a minute. The 61 s gap fits VS Code's 60 s storage flush. So ctop can show a Copilot chat as working, but "finished" may reach it up to about a minute late.
 - How late, exactly, needs the reply's real end time, which the file does not hold until it is written.
 
-**Not run:** VS Code's Claude agent on the VM, the question that matters most here.
+**VS Code's Claude agent on the VM:** blocked so far.
+- **Verified** (the user's screenshot): with `ANTHROPIC_API_KEY` set and VS Code restarted, the harness list showed **Claude** greyed, "No models available". **Copilot** and **Cloud** both showed "Sign in". Claude could not be selected, so its "Download the Claude Agent" prompt could not be reached.
+- **Verified** (`claudeAgent.ts` at `1306698`, `_refreshModels`): models come from two places only.
+  - **Copilot's models:** only when signed in to GitHub.
+  - **Native models (the user's key):** only when the SDK is already on disk. The native attempt is skipped otherwise, because "that download is the user's explicit choice".
+- **Verified, same file:** the download is offered by the agent's `AgentSdkSetupChannel`. No setting turning the Claude agent on or off was found in `agentHostEnablementService.ts`.
+- **Inference:** a machine with only VS Code and an Anthropic key, and no GitHub sign-in, cannot start VS Code's Claude agent: no SDK, so no models, so no way to reach Download. On the user's main machine it was selectable before the download, plausibly because Copilot was signed in there (its harness list showed Copilot without "Sign in").
+- **Way through, to be tried:** sign in to GitHub on the VM, select Claude, download the SDK. Then sign out to run on the key (native mode), or stay signed in (Copilot mode). Either way, see whether `~\.claude\sessions` and `~\.claude\projects` appear.
 
 ## VS Code's built-in Copilot
 
