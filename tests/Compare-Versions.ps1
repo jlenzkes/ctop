@@ -140,3 +140,4 @@ $results | Sort-Object Check, @{ Expression = { $_.Which -ne 'base' } } | Format
 $failed = @($results | Where-Object { $_.Which -eq 'current' -and -not $_.Holds })
 if ($failed) { $failed | ForEach-Object { Write-Host "FAIL (this checkout): $($_.Check)" -ForegroundColor Red }; exit 1 }
 Write-Host 'this checkout holds every check'
+exit 0   # not the exit code of the last program run above (a check that expects a refusal)
