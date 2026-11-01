@@ -100,7 +100,11 @@ A second request in the same Copilot chat. Snapshots at 18:59:05Z (working) and 
 - **Verified** (the user's terminal output): the probe ran at 18:59:05 and 18:59:59 only. The 18:59:05 run listed `-wal` and `-shm` dated 18:56:03, then ran `cline history`. The 18:59:59 run listed `-wal` dated 18:59:11.
 - **Inference:** the probe's `cline history` call touched `-wal` at 18:59:11. So reading Cline through its CLI is not side-effect free on disk; the probe's help says so.
 - **Unexplained:** what opened the database at 18:56:03, three minutes before either run. The user did not open Cline.
-- **A guess:** the Cline VS Code extension, running in the background (its source has a dead-session reconciler that opens the database). To settle it: `code --list-extensions`, then the probe's `-WatchSeconds` while VS Code starts.
+- **Verified** (the user ran `code --list-extensions`): the Cline extension `saoudrizwan.claude-dev` is installed on that machine.
+- **Verified** (`apps/vscode/package.json` at `a6507a6`, version 4.1.26): it activates on `onStartupFinished`. So it runs in every VS Code window, whether or not its panel is opened.
+- **Inference:** the extension opened the database at 18:56:03. It was running then, and its source has a dead-session reconciler that opens the database. Unverified.
+- **To settle it:** compare `Get-Item ~\.cline\data\db\sessions.db-*` before and 30 s after "Developer: Reload Window".
+- **For ctop** (inference): wherever VS Code runs with Cline installed, Cline is running. A Cline session's `pid` should then name a live process while VS Code is open.
 
 **Still open:** a Cline task (none ran); VS Code's own Claude agent; the VS Code-only machine; the exact lag of Copilot's completion state.
 
