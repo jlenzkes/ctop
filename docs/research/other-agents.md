@@ -96,7 +96,11 @@ A second request in the same Copilot chat. Snapshots at 18:59:05Z (working) and 
 - **Cancellations and context size are recorded:** an older chat has a request with `modelState` `2 Cancelled` and `promptTokens` 139025.
 - **`cline history --json` works on that machine** (PowerShell 7.6.9). It gave 3 rows, the same sessions as the manifests, with camelCase fields: `sessionId`, `source`, `pid`, `status`, `provider`, `model`, `startedAt`, `endedAt`, `exitCode`, `interactive`, `isSubagent`, `updatedAt`, plus `prompt`, `metadata`, `cwd`, `workspaceRoot`, `messagesPath`.
 
-**Inference** (from file times): `cline history` opens Cline's database in WAL mode, which creates or touches `sessions.db-wal` and `sessions.db-shm`. They appeared at 18:56:03, and `-wal` changed at 18:59:11, during the probe's `cline history` call. So reading Cline through its CLI is not side-effect free on disk. The probe's help says so.
+**Database companion files** (SQLite in WAL mode creates `sessions.db-wal` and `sessions.db-shm` whenever a program opens the database):
+- **Verified** (the user's terminal output): the probe ran at 18:59:05 and 18:59:59 only. The 18:59:05 run listed `-wal` and `-shm` dated 18:56:03, then ran `cline history`. The 18:59:59 run listed `-wal` dated 18:59:11.
+- **Inference:** the probe's `cline history` call touched `-wal` at 18:59:11. So reading Cline through its CLI is not side-effect free on disk; the probe's help says so.
+- **Unexplained:** what opened the database at 18:56:03, three minutes before either run. The user did not open Cline.
+- **A guess:** the Cline VS Code extension, running in the background (its source has a dead-session reconciler that opens the database). To settle it: `code --list-extensions`, then the probe's `-WatchSeconds` while VS Code starts.
 
 **Still open:** a Cline task (none ran); VS Code's own Claude agent; the VS Code-only machine; the exact lag of Copilot's completion state.
 
