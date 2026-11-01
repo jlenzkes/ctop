@@ -47,7 +47,7 @@ Describe 'the agent probe' {
   }
   It 'runs and writes the report it prints' {
     $script:report | Should -Not -BeNullOrEmpty -Because $script:stdout
-    $script:report.Trim() | Should -Be ($script:stdout.Trim() -replace "`r", '')
+    ($script:report -replace "`r", '').Trim() | Should -Be ($script:stdout -replace "`r", '').Trim() -Because 'the same report (line endings aside: CRLF on Windows)'
   }
   It 'never prints the content of prompts, replies, titles or paths' {
     $script:report | Should -Not -Match $secret
