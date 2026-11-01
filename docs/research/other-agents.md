@@ -83,6 +83,23 @@ Probe 2026.11.01.1 on Windows (NT 10.0.26300), PowerShell 7.6.9, run while a Cop
 - Cline dates printed as `(object)`, because PowerShell 7 reads ISO strings as dates.
 - A request's state was not shown when the request was added rather than set.
 
+## Second probe run (same machine, 2026-11-01, probe 2026.11.01.2)
+
+A second request in the same Copilot chat. Snapshots at 18:59:05Z (working) and 18:59:59Z (done); watch mode not used.
+
+**Verified:**
+- **The request was written when sent.** It was sent at 18:59:03.308 (its `timestamp`). It was in the file as a pushed request with `modelState` `0 Pending` by 18:59:04, about 1 s later.
+- **`1 Complete` was in the file by 19:00:00**, 57 s after sending. How long after the reply really finished is not known; `-WatchSeconds` measures it.
+- **Request fields:**
+  - All of them: `agent`, `modeInfo`, `modelConfiguration`, `modelId`, `modelState`, `requestId`, `response`, `responseId`, `responseTimestamp`, `timeSpentWaiting`, `timestamp`, `variableData`, `codeCitations`, `contentReferences`, `hiddenFromTranscript`, `message`.
+  - Once finished, also: `completionTokens`, `promptTokens`, `promptTokenDetails`, `outputBuffer`, `elapsedMs`, `result`, `followups`.
+- **Cancellations and context size are recorded:** an older chat has a request with `modelState` `2 Cancelled` and `promptTokens` 139025.
+- **`cline history --json` works on that machine** (PowerShell 7.6.9). It gave 3 rows, the same sessions as the manifests, with camelCase fields: `sessionId`, `source`, `pid`, `status`, `provider`, `model`, `startedAt`, `endedAt`, `exitCode`, `interactive`, `isSubagent`, `updatedAt`, plus `prompt`, `metadata`, `cwd`, `workspaceRoot`, `messagesPath`.
+
+**Inference** (from file times): `cline history` opens Cline's database in WAL mode, which creates or touches `sessions.db-wal` and `sessions.db-shm`. They appeared at 18:56:03, and `-wal` changed at 18:59:11, during the probe's `cline history` call. So reading Cline through its CLI is not side-effect free on disk. The probe's help says so.
+
+**Still open:** a Cline task (none ran); VS Code's own Claude agent; the VS Code-only machine; the exact lag of Copilot's completion state.
+
 ## VS Code's built-in Copilot
 
 **Verified:** the standalone `microsoft/vscode-copilot-chat` repo is archived. Its README says "This project has been moved into the main VS Code repository". Copilot now lives in `microsoft/vscode` under `extensions/copilot`.

@@ -8,6 +8,9 @@
   nothing about your work (ids, status, model, entrypoint, token counts, times). Never prints prompts,
   replies, file contents, titles or command lines, only the names of the fields that hold them.
   Paths under your home folder are shown as ~ unless -ShowHome.
+  The probe itself writes nothing but -OutFile. If the cline command is installed it runs
+  `cline history --json`, and Cline opening its own database can create or touch its sessions.db-wal and
+  sessions.db-shm files (seen on Windows, 2026-11-01).
 
   Run it while an agent is working (and again once it has finished) to see what changes:
     pwsh -File ./tools/Probe-AgentSources.ps1 -OutFile probe.txt
