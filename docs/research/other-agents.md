@@ -211,7 +211,23 @@ Windows 10 (NT 10.0.19045), Windows PowerShell 5.1.19041.6456. VS Code with Copi
   - **Native models (the user's key):** only when the SDK is already on disk. The native attempt is skipped otherwise, because "that download is the user's explicit choice".
 - **Verified, same file:** the download is offered by the agent's `AgentSdkSetupChannel`. No setting turning the Claude agent on or off was found in `agentHostEnablementService.ts`.
 - **Inference:** a machine with only VS Code and an Anthropic key, and no GitHub sign-in, cannot start VS Code's Claude agent: no SDK, so no models, so no way to reach Download. On the user's main machine it was selectable before the download, plausibly because Copilot was signed in there (its harness list showed Copilot without "Sign in").
-- **Way through, to be tried:** sign in to GitHub on the VM, select Claude, download the SDK. Then sign out to run on the key (native mode), or stay signed in (Copilot mode). Either way, see whether `~\.claude\sessions` and `~\.claude\projects` appear.
+- **Way through, found by the user:** the setting `"chat.agentHost.allowSignedOutWhenUsable": true` in VS Code's `settings.json`.
+  - With it, the Claude agent became usable signed out, on the Anthropic key.
+  - **Verified** (`src/vs/platform/agentHost/common/agentHostCustomizationConfig.ts` at `1306698`): the key `allowSignedOutWhenUsable` exists, commented "Legacy wire key; remove once all supported hosts allow signed-out operation unconditionally". So it is a stopgap VS Code means to remove.
+  - The full name `chat.agentHost.allowSignedOutWhenUsable` is from the user's working settings, not read in source.
+
+### VS Code's Claude agent on the VS Code-only VM (probe 2026.11.01.3, watch 22:57:06–23:00:08Z)
+
+**Verified** (`probe-vm-claude-agent.txt`):
+- **Before:** `claude` not found and `~\.claude` not found.
+- **During the task:**
+  - `~\.claude\sessions\12748.json` appeared at 22:57:45 with `kind` `interactive`, `entrypoint` `sdk-ts`, `status` `busy`.
+  - A transcript appeared in `~\.claude\projects\c--Users-<user>--copilot-chats-<uuid>\<id>.jsonl`, with `entrypoint` `sdk-ts` on its lines. The session's working folder is `~\.copilot-chats\<uuid>`, VS Code's folder for a chat with no folder open.
+- **Its status changed live:** `busy` → `idle` (22:57:49) → `busy` (22:58:15) → `idle` (22:58:16) → `busy` (22:58:36) → **`waiting`** (22:58:37) → `busy` (22:58:40) → `idle` (22:58:42).
+  - `waiting` fits a permission prompt (the harness ran with "Ask Before Edits"; inference).
+  - ctop already maps `waiting` (`Resolve-State`, `ctop.ps1`).
+
+**So, verified on a machine with nothing from Anthropic installed:** VS Code's Claude agent writes Claude Code's own live-session entry (`~/.claude/sessions/<pid>.json`) and transcript (`~/.claude/projects/`). ctop can find, label and follow these sessions by reading those files directly, with no `claude` command.
 
 ## VS Code's built-in Copilot
 

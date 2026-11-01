@@ -29,7 +29,11 @@ Findings so far, each labelled verified, inference or unverified: `docs/research
 
 Details in `docs/research/other-agents.md`.
 
-**Still to do before writing code:** the same with the probe on a **VS Code-only machine** (no `claude`, no Claude Code extension): Copilot chat on Claude, and the Claude agent. The question is whether `~/.claude/sessions/` and `~/.claude/projects/` are written there too.
+**Done on a VS Code-only VM** (Windows 10, Windows PowerShell 5.1, no `claude`, no `~/.claude` before), 2026-11-01:
+- Copilot chat on Claude: chats are in `globalStorage/emptyWindowChatSessions/` when no folder is open; Pending, then Complete about a minute later.
+- VS Code's Claude agent: it creates `~/.claude/sessions/<pid>.json` (`entrypoint` `sdk-ts`, live status including `waiting`) and a transcript in `~/.claude/projects/`. Signed out of GitHub, it needed `"chat.agentHost.allowSignedOutWhenUsable": true`.
+
+**Research is done; code can start.** First step: ctop starts without `claude` and reads `~/.claude/sessions/*.json` itself.
 
 ## Next PR: flaky tests seen in CI (2026-11-01: PR #2, push run 41330600708 for c144eb6)
 
