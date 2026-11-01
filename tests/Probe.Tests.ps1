@@ -23,7 +23,7 @@ Describe 'the agent probe' {
     ) }
     Put 'vscode/User/workspaceStorage/abc123/chatSessions/c1.jsonl' ((@(
       (@{ kind = 0; v = $session } | ConvertTo-Json -Depth 12 -Compress)
-      (@{ kind = 2; k = @('requests'); v = @(@{ requestId = 'r2'; modelId = 'copilot/claude-opus-4.6'; message = @{ text = "$secret second question" } }) } | ConvertTo-Json -Depth 12 -Compress)
+      (@{ kind = 2; k = @('requests'); v = @(@{ requestId = 'r2'; modelId = 'copilot/claude-opus-4.6'; message = @{ text = "$secret second question" }; modelState = @{ value = 0 } }) } | ConvertTo-Json -Depth 12 -Compress)
       (@{ kind = 1; k = @('requests', 1, 'modelState'); v = @{ value = 0 } } | ConvertTo-Json -Depth 12 -Compress)
     )) -join "`n") -Raw
     # Roo Code: a task in the extension's global storage
@@ -38,12 +38,35 @@ Describe 'the agent probe' {
 
     $pwsh = (Get-Process -Id $PID).Path
     $onWindows = $IsWindows -or $env:OS -eq 'Windows_NT'
+    # a cline command whose history lists one session, prompt and title included (they must not show)
+    $bin = Join-Path $TestDrive 'bin'; New-Item -ItemType Directory -Force -Path $bin | Out-Null
+    $rowsJson = '[{"sessionId":"k1","source":"cli","pid":4321,"status":"idle","provider":"anthropic","model":"claude-opus-5-5","startedAt":"2026-11-01T11:00:00Z","prompt":"' + $secret + ' p","metadata":{"title":"' + $secret + ' t"}}]'
+    if ($onWindows) { [IO.File]::WriteAllText((Join-Path $bin 'cline.cmd'), "@echo off`r`necho $rowsJson`r`n") }
+    else { $f = Join-Path $bin 'cline'; [IO.File]::WriteAllText($f, "#!/bin/sh`necho '$rowsJson'`n"); & chmod +x $f }
+    $oldPath = $env:PATH; $env:PATH = $bin + [IO.Path]::PathSeparator + $env:PATH
     $outFile = Join-Path $TestDrive 'probe.txt'
     $args1 = @('-NoProfile', '-NonInteractive') + $(if ($onWindows) { @('-ExecutionPolicy', 'Bypass') } else { @() }) +
              @('-File', $probe, '-NoProcesses', '-ClaudeConfigDir', (Join-Path $root 'claude'), '-ClineDir', (Join-Path $root 'cline'),
                '-VSCodeUserDir', (Join-Path $root 'vscode/User'), '-OutFile', $outFile)
-    $script:stdout = (& $pwsh @args1 2>&1) -join "`n"
-    $script:report = if (Test-Path -LiteralPath $outFile) { [IO.File]::ReadAllText($outFile) } else { '' }
+    try {
+      $script:stdout = (& $pwsh @args1 2>&1) -join "`n"
+      $script:report = if (Test-Path -LiteralPath $outFile) { [IO.File]::ReadAllText($outFile) } else { '' }
+      # watch: start it, change a chat and a Cline manifest while it runs
+      $watchOut = Join-Path $TestDrive 'watch.txt'
+      $args2 = @($args1 | ForEach-Object { if ($_ -eq $outFile) { $watchOut } else { $_ } }) + @('-WatchSeconds', '8')
+      $psi = [Diagnostics.ProcessStartInfo]::new($pwsh); $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+      $psi.Arguments = (@($args2 | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' ')
+      $wp = [Diagnostics.Process]::Start($psi); $wo = $wp.StandardOutput.ReadToEndAsync(); $we = $wp.StandardError.ReadToEndAsync()
+      $sw = [Diagnostics.Stopwatch]::StartNew()
+      while (-not ($wo.IsCompleted) -and -not (Test-Path -LiteralPath $watchOut) -and $sw.Elapsed.TotalSeconds -lt 30) { Start-Sleep -Milliseconds 100 }
+      Start-Sleep -Seconds 3
+      $chatFile = Join-Path $root 'vscode/User/workspaceStorage/abc123/chatSessions/c1.jsonl'
+      [IO.File]::AppendAllText($chatFile, "`n" + (@{ kind = 1; k = @('requests', 1, 'modelState'); v = @{ value = 1; completedAt = 1793500009000 } } | ConvertTo-Json -Depth 8 -Compress))
+      $man = Join-Path $root 'cline/data/sessions/k1/k1.json'
+      [IO.File]::WriteAllText($man, ([IO.File]::ReadAllText($man) -replace '"running"', '"idle"'))
+      if (-not $wp.WaitForExit(60000)) { $wp.Kill(); throw 'the watch did not end' }
+      $script:watch = $wo.Result + $we.Result
+    } finally { $env:PATH = $oldPath }
   }
   It 'runs and writes the report it prints' {
     $script:report | Should -Not -BeNullOrEmpty -Because $script:stdout
@@ -60,7 +83,8 @@ Describe 'the agent probe' {
     $script:report | Should -Match 'Copilot chats .*: 1'
     $script:report | Should -Match 'modelId="copilot/claude-sonnet-4\.5"'
     $script:report | Should -Match 'modelId values: .*"copilot/claude-opus-4\.6"'
-    $script:report | Should -Match 'modelState values set later: 0 \(1\)'
+    $script:report | Should -Match 'modelState values set later: 0 Pending \(1\)'
+    $script:report | Should -Match 'request added later, modelState: 0 Pending'
     $script:report | Should -Match 'requests/\*/modelState \(1\)'
   }
   It 'reports a Roo task: status, cost, and whether it is waiting on you' {
@@ -72,5 +96,17 @@ Describe 'the agent probe' {
     $script:report | Should -Match 'status="running"\s+source="vscode"\s+pid=777'
     $script:report | Should -Match 'messages\.json: a list of 1'
     $script:report | Should -Match 'sessions\.db: not found'
+    $script:report | Should -Match 'started_at="?2026-11-01T10:00:00' -Because 'a date, not (object): PowerShell 7 reads ISO strings as dates'
+  }
+  It 'reads cline history --json when cline is installed, showing status and model, not the prompt or title' {
+    $script:report | Should -Match 'cline history --json: 1 rows'
+    $script:report | Should -Match 'sessionId="k1"\s+source="cli"\s+pid=4321\s+status="idle"'
+  }
+  It 'watches: prints each change as it happens, with the request''s new state, and no content' {
+    $script:watch | Should -Match 'copilot chat changed: c1\.jsonl'
+    $script:watch | Should -Match 'kind 1 requests/\*/modelState\s+modelState=1 Complete'
+    $script:watch | Should -Match 'cline manifest changed: k1\.json\s+status="idle"'
+    $script:watch | Should -Match 'watch ended'
+    $script:watch | Should -Not -Match $secret
   }
 }

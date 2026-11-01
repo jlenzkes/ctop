@@ -27,6 +27,11 @@
   VS Code server (remote / WSL) on this OS; the report says which exist.
 .PARAMETER NoProcesses
   Skip the process table.
+.PARAMETER WatchSeconds
+  After the report, keep watching for this many seconds and print each change as it happens, with its
+  time: Copilot chat files (each new log entry, and a request's state), Claude Code's live-session
+  entries and transcripts, Cline's session manifests. Start it, then use the agent:
+    pwsh -File ./tools/Probe-AgentSources.ps1 -WatchSeconds 180 -OutFile probe-watch.txt
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(
@@ -36,10 +41,11 @@ param(
   [string]$ClaudeConfigDir,
   [string]$ClineDir,
   [string[]]$VSCodeUserDir,
-  [switch]$NoProcesses
+  [switch]$NoProcesses,
+  [int]$WatchSeconds = 0
 )
 $ErrorActionPreference = 'Stop'
-$ProbeVersion = '2026.11.01.1'
+$ProbeVersion = '2026.11.01.2'
 $onWindows = $IsWindows -or $env:OS -eq 'Windows_NT'
 $onMac = (-not $onWindows) -and $IsMacOS
 $homeDir = [Environment]::GetFolderPath('UserProfile')
@@ -58,6 +64,7 @@ function Show-Size([long]$n) { if ($n -ge 1MB) { '{0:N1} MB' -f ($n / 1MB) } els
 function Safe($v) {
   if ($null -eq $v) { return 'null' }
   if ($v -is [bool] -or $v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal]) { return [string]$v }
+  if ($v -is [datetime]) { return $v.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }   # PowerShell 7 turns ISO date strings into dates
   if ($v -is [string]) {
     if ($v.Length -le 80 -and $v -notmatch '[\r\n\\]' -and $v -notmatch '^(/|~|[A-Za-z]:)') { return '"' + $v + '"' }
     return "(text, $($v.Length) chars)"
@@ -65,6 +72,8 @@ function Safe($v) {
   if ($v -is [array]) { return "(list of $(@($v).Count))" }
   return '(object)'
 }
+# Copilot's ResponseModelState (src/vs/workbench/contrib/chat/common/chatService/chatService.ts)
+function State-Name($n) { $names = @('Pending', 'Complete', 'Cancelled', 'Failed', 'NeedsInput'); if ($n -is [int] -or $n -is [long]) { if ($n -ge 0 -and $n -lt $names.Count) { return "$n $($names[$n])" } }; Safe $n }
 function Keys($o) { if ($null -eq $o) { return '-' }; (@($o.PSObject.Properties.Name) | Sort-Object) -join ', ' }
 # Show the allowed fields of an object, Safe-formatted, plus the names of all its fields
 function Show-Fields($o, [string[]]$allow, [string]$indent) {
@@ -198,7 +207,7 @@ foreach ($u in $userDirs) {
       if ($null -eq $text) { Say '        (too big or unreadable)'; continue }
       $lines = @($text -split "`n" | Where-Object { $_.Trim() })
       $first = try { ConvertFrom-Json -InputObject $lines[0] } catch { $null }
-      $kinds = @{}; $paths = @{}; $states = @{}; $models = @{}
+      $kinds = @{}; $paths = @{}; $states = @{}; $models = @{}; $pushed = [Collections.Generic.List[object]]::new()
       foreach ($l in $lines) {
         $e = try { ConvertFrom-Json -InputObject $l } catch { $null }
         if (-not $e) { continue }
@@ -207,9 +216,11 @@ foreach ($u in $userDirs) {
           $p = (@($e.k) | ForEach-Object { if ($_ -is [int] -or $_ -is [long]) { '*' } else { $_ } }) -join '/'
           $paths[$p] = 1 + [int]$paths[$p]
           $leaf = @($e.k)[-1]
-          if ($leaf -eq 'modelState' -and $e.v) { $states[[string]$e.v.value] = 1 + [int]$states[[string]$e.v.value] }
+          if ($leaf -eq 'modelState' -and $e.v) { $sn = State-Name $e.v.value; $states[$sn] = 1 + [int]$states[$sn] }
           if ($leaf -eq 'modelId' -and $e.v -is [string]) { $models[$e.v] = 1 }
-          if ([string]$e.kind -eq '2') { foreach ($item in @($e.v)) { if ($item -and $item.modelId -is [string]) { $models[$item.modelId] = 1 } } }   # a new request pushed
+          if ([string]$e.kind -eq '2') {   # a new request pushed
+            foreach ($item in @($e.v)) { if ($item -and $item.modelId -is [string]) { $models[$item.modelId] = 1 }; if ($item -and @($e.k)[-1] -eq 'requests') { $pushed.Add($item) } }
+          }
         }
       }
       Say "        log entries by kind: $((@($kinds.Keys | Sort-Object | ForEach-Object { "$_=$($kinds[$_])" })) -join '  ')"
@@ -220,11 +231,15 @@ foreach ($u in $userDirs) {
         if ($reqs.Count) {
           $last = $reqs[-1]
           Show-Fields $last $reqAllow '        last request: '
-          if ($last.modelState) { Say "        last request modelState: $(Safe $last.modelState.value)  completedAt=$(Safe $last.modelState.completedAt)" }
+          if ($last.modelState) { Say "        last request modelState: $(State-Name $last.modelState.value)  completedAt=$(Safe $last.modelState.completedAt)" }
           foreach ($r in $reqs) { if ($r.modelId -is [string]) { $models[$r.modelId] = 1 } }
         }
       }
       if ($paths.Count) { Say "        later changes, by path: $((@($paths.Keys | Sort-Object | Select-Object -First 25 | ForEach-Object { "$_ ($($paths[$_]))" })) -join ', ')" }
+      foreach ($item in @($pushed | Select-Object -Last 2)) {
+        Show-Fields $item $reqAllow '        request added later: '
+        Say "        request added later, modelState: $(if ($item.modelState) { State-Name $item.modelState.value } else { '(none)' })"
+      }
       if ($states.Count) { Say "        modelState values set later: $((@($states.Keys | Sort-Object | ForEach-Object { "$_ ($($states[$_]))" })) -join ', ')" }
       if ($models.Count) { Say "        modelId values: $((@($models.Keys | Sort-Object | ForEach-Object { Safe $_ })) -join ', ')" }
     } else {
@@ -233,7 +248,7 @@ foreach ($u in $userDirs) {
       Say "        session fields: $(Keys $o)"
       $reqs = @($o.requests)
       Say "        requests: $($reqs.Count)"
-      if ($reqs.Count) { Show-Fields $reqs[-1] $reqAllow '        last request: '; if ($reqs[-1].modelState) { Say "        last request modelState: $(Safe $reqs[-1].modelState.value)" } }
+      if ($reqs.Count) { Show-Fields $reqs[-1] $reqAllow '        last request: '; if ($reqs[-1].modelState) { Say "        last request modelState: $(State-Name $reqs[-1].modelState.value)" } }
     }
   }
   $gs = Join-Path $u 'globalStorage'
@@ -288,6 +303,25 @@ if (Test-Path -LiteralPath $kdir) {
     Say '    newest rows (session_id | source | pid | status | provider | model | started_at | ended_at):'
     foreach ($row in $rows) { Say "      $row" }
   } elseif (Test-Path -LiteralPath $db) { Say '    (sqlite3 not on PATH: the database was not read)' }
+  # Cline's CLI lists sessions as JSON (apps/cli/src/commands/history.ts): the same rows, without SQLite
+  $cl = Get-Command cline -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($cl) {
+    $rows = $null; $why = ''
+    try {
+      $psi = [Diagnostics.ProcessStartInfo]::new()
+      if ($cl.Source -match '\.(cmd|bat)$') { $psi.FileName = $env:ComSpec; $psi.Arguments = "/d /c `"`"$($cl.Source)`" history --json --limit $Newest`"" }
+      else { $psi.FileName = $cl.Source; $psi.Arguments = "history --json --limit $Newest" }
+      $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.RedirectStandardInput = $true
+      $pr = [Diagnostics.Process]::Start($psi); $pr.StandardInput.Close()
+      $so = $pr.StandardOutput.ReadToEndAsync(); $null = $pr.StandardError.ReadToEndAsync()
+      if (-not $pr.WaitForExit(30000)) { try { $pr.Kill() } catch {}; $why = 'did not finish within 30 s' }
+      else { $text = $so.Result; $start = $text.IndexOf('['); if ($start -ge 0) { $rows = @(ConvertFrom-Json -InputObject $text.Substring($start)) } else { $why = "exit $($pr.ExitCode), no JSON list in its output" } }
+    } catch { $why = $_.Exception.Message }
+    if ($null -ne $rows) {
+      Say "    cline history --json: $($rows.Count) rows"
+      foreach ($row in $rows) { Show-Fields $row @('sessionId', 'session_id', 'source', 'pid', 'status', 'provider', 'model', 'startedAt', 'started_at', 'endedAt', 'ended_at', 'exitCode', 'interactive') '      ' }
+    } else { Say "    cline history --json: not read ($why)" }
+  }
   $sdir = if ($env:CLINE_SESSION_DATA_DIR) { $env:CLINE_SESSION_DATA_DIR } else { Join-Path $dataDir 'sessions' }
   $idxFile = Join-Path $sdir 'sessions.index.json'
   Say "    data/sessions/sessions.index.json (file fallback): $(if (Test-Path -LiteralPath $idxFile) { 'exists' } else { 'not found' })"
@@ -308,3 +342,90 @@ if (Test-Path -LiteralPath $kdir) {
 $report = $out -join [Environment]::NewLine
 if ($OutFile) { [IO.File]::WriteAllText($OutFile, $report + [Environment]::NewLine, [Text.UTF8Encoding]::new($false)) }
 $report
+if ($WatchSeconds -le 0) { return }
+
+# ---- watch: each change as it happens -------------------------------------------------------------
+$t0 = [Diagnostics.Stopwatch]::StartNew()
+function W([string]$text) {
+  $line = '{0}  +{1,6:N1}s  {2}' -f [datetime]::UtcNow.ToString('HH:mm:ss.fff'), $t0.Elapsed.TotalSeconds, $text
+  [Console]::Out.WriteLine($line)
+  if ($OutFile) { [IO.File]::AppendAllText($OutFile, $line + [Environment]::NewLine) }
+}
+if ($OutFile) { [IO.File]::AppendAllText($OutFile, [Environment]::NewLine + "== Watching for $WatchSeconds s (UTC)" + [Environment]::NewLine) }
+[Console]::Out.WriteLine(''); [Console]::Out.WriteLine("== Watching for $WatchSeconds s (UTC). Use the agent now.")
+function Get-ChatFiles {
+  foreach ($u in $userDirs) {
+    if (-not (Test-Path -LiteralPath $u)) { continue }
+    Get-ChildItem -LiteralPath (Join-Path $u 'workspaceStorage') -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem -LiteralPath (Join-Path $_.FullName 'chatSessions') -File -ErrorAction SilentlyContinue }
+    foreach ($g in 'emptyWindowChatSessions', 'transferredChatSessions') { Get-ChildItem -LiteralPath (Join-Path (Join-Path $u 'globalStorage') $g) -File -ErrorAction SilentlyContinue }
+  }
+}
+function Get-Seen($files) { $h = @{}; foreach ($f in $files) { $h[$f.FullName] = @{ Len = $f.Length; Time = $f.LastWriteTimeUtc } }; $h }
+# the new bytes of a file another program is writing
+function Read-From([string]$path, [long]$from) {
+  try {
+    $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    try { if ($from -gt $fs.Length) { $from = 0 }; $null = $fs.Seek($from, 'Begin'); $sr = [IO.StreamReader]::new($fs); return $sr.ReadToEnd() } finally { $fs.Dispose() }
+  } catch { return '' }
+}
+$chatSeen = Get-Seen (Get-ChatFiles)
+$regDir = Join-Path $cdir 'sessions'; $projDir = Join-Path $cdir 'projects'
+$regSeen = Get-Seen @(Get-ChildItem -LiteralPath $regDir -Filter '*.json' -File -ErrorAction SilentlyContinue)
+$txSeen = @{}; $txStart = [datetime]::UtcNow
+$clineSess = if (Test-Path -LiteralPath $kdir) { $(if ($env:CLINE_SESSION_DATA_DIR) { $env:CLINE_SESSION_DATA_DIR } else { Join-Path $(if ($env:CLINE_DATA_DIR) { $env:CLINE_DATA_DIR } else { Join-Path $kdir 'data' }) 'sessions' }) }
+$clineSeen = if ($clineSess) { Get-Seen @(Get-ChildItem -LiteralPath $clineSess -Filter '*.json' -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.messages.json' -and $_.Name -notlike '*.compaction.json' }) } else { @{} }
+$tick = 0
+while ($t0.Elapsed.TotalSeconds -lt $WatchSeconds) {
+  Start-Sleep -Milliseconds 1000; $tick++
+  # Copilot chats: every second
+  foreach ($f in @(Get-ChatFiles)) {
+    $old = $chatSeen[$f.FullName]
+    if ($old -and $old.Len -eq $f.Length -and $old.Time -eq $f.LastWriteTimeUtc) { continue }
+    $from = if ($old) { [long]$old.Len } else { 0 }
+    W "copilot chat $(if ($old) { 'changed' } else { 'new' }): $($f.Name)  $(Show-Size $f.Length) ($(if ($old) { '{0:+#;-#;0} B' -f ($f.Length - $old.Len) } else { 'new' }))"
+    if ($f.Extension -eq '.jsonl') {
+      foreach ($l in @((Read-From $f.FullName $from) -split "`n" | Where-Object { $_.Trim() })) {
+        $e = try { ConvertFrom-Json -InputObject $l } catch { $null }
+        if (-not $e) { W '    (a partial line)'; continue }
+        $p = (@($e.k) | ForEach-Object { if ($_ -is [int] -or $_ -is [long]) { '*' } else { $_ } }) -join '/'
+        $extra = ''
+        if (@($e.k)[-1] -eq 'modelState' -and $e.v) { $extra = "  modelState=$(State-Name $e.v.value)" }
+        if ([string]$e.kind -eq '2') { foreach ($item in @($e.v)) { if ($item -and $item.PSObject.Properties.Name -contains 'modelId') { $extra += "  modelId=$(Safe $item.modelId)  modelState=$(if ($item.modelState) { State-Name $item.modelState.value } else { '(none)' })" } } }
+        if ([string]$e.kind -eq '0') { $extra = "  (whole session: $(@($e.v.requests).Count) requests)" }
+        W "    kind $($e.kind) $(if ($p) { $p })$extra"
+      }
+    }
+    $chatSeen[$f.FullName] = @{ Len = $f.Length; Time = $f.LastWriteTimeUtc }
+  }
+  # Claude Code registry: every second; transcripts and Cline: every 3 s
+  $nowReg = @(Get-ChildItem -LiteralPath $regDir -Filter '*.json' -File -ErrorAction SilentlyContinue)
+  foreach ($f in $nowReg) {
+    $old = $regSeen[$f.FullName]
+    if ($old -and $old.Time -eq $f.LastWriteTimeUtc) { continue }
+    $o = Read-Json $f.FullName 1MB
+    W "claude live-session entry $(if ($old) { 'changed' } else { 'new' }): $($f.Name)  $(if ($o) { "kind=$(Safe $o.kind) entrypoint=$(Safe $o.entrypoint) status=$(Safe $o.status)" })"
+    $regSeen[$f.FullName] = @{ Len = $f.Length; Time = $f.LastWriteTimeUtc }
+  }
+  foreach ($k in @($regSeen.Keys)) { if (-not (Test-Path -LiteralPath $k)) { W "claude live-session entry removed: $(Split-Path -Leaf $k)"; $regSeen.Remove($k) } }
+  if ($tick % 3 -eq 0) {
+    foreach ($f in @(Get-ChildItem -LiteralPath $projDir -Filter '*.jsonl' -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTimeUtc -gt $txStart })) {
+      $old = $txSeen[$f.FullName]
+      if ($old -and $old.Len -eq $f.Length) { continue }
+      $from = if ($old) { [long]$old.Len } else { [Math]::Max(0, $f.Length - 65536) }
+      $added = Read-From $f.FullName $from
+      $ep = @([regex]::Matches($added, '"entrypoint":"([^"]{1,40})"') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ','
+      W "claude transcript $(if ($old) { 'grew' } else { 'changed' }): $(Show-Path $f.FullName)  $(Show-Size $f.Length)  entrypoint: $(if ($ep) { $ep } else { '-' })"
+      $txSeen[$f.FullName] = @{ Len = $f.Length; Time = $f.LastWriteTimeUtc }
+    }
+    if ($clineSess) {
+      foreach ($f in @(Get-ChildItem -LiteralPath $clineSess -Filter '*.json' -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.messages.json' -and $_.Name -notlike '*.compaction.json' })) {
+        $old = $clineSeen[$f.FullName]
+        if ($old -and $old.Time -eq $f.LastWriteTimeUtc) { continue }
+        $m = Read-Json $f.FullName 2MB
+        W "cline manifest $(if ($old) { 'changed' } else { 'new' }): $($f.Name)  $(if ($m) { "status=$(Safe $m.status) pid=$(Safe $m.pid) source=$(Safe $m.source) model=$(Safe $m.model)" })"
+        $clineSeen[$f.FullName] = @{ Len = $f.Length; Time = $f.LastWriteTimeUtc }
+      }
+    }
+  }
+}
+W 'watch ended'

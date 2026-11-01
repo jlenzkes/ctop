@@ -50,6 +50,39 @@ These are the two facts the source reading could not settle.
 
 **Verified** (the probe run in this cloud container, 2026-11-01): Claude Code's own Bash tool sets `AI_AGENT=claude-code_2-1-316_agent` on the processes it runs, together with `CLAUDECODE=1` and `CLAUDE_CODE_ENTRYPOINT`. The transcript lines of this session carry `entrypoint` `remote`, `userType` `external` and `version`. So `AI_AGENT` tells a Claude Code process from one VS Code's agent started (`github_copilot_vscode_agent`), and `entrypoint` should tell an SDK-written transcript from a CLI one. Which `entrypoint` value the SDK writes is unverified until the probe runs next to a Claude agent chat.
 
+## First probe run (the user's Windows machine, 2026-11-01)
+
+Probe 2026.11.01.1 on Windows (NT 10.0.26300), PowerShell 7.6.9, run while a Copilot chat was working (18:43:44Z) and after (18:44:21Z). The machine has Claude Code, its VS Code extension and the `cline` CLI installed, so it is **not** the VS Code-only case; that case is still to run.
+
+**Verified** (from the two reports):
+- **Copilot chat with the user's Anthropic key:**
+  - It is an ordinary Copilot chat: `Code\User\workspaceStorage\<id>\chatSessions\<id>.jsonl`.
+  - Its model id names the Claude model and the key's provider: `"anthropic/Anthropic/claude-opus-5-5"`.
+  - The session's first log entry had 0 requests. The request was added (`kind 2` on `requests`) when it was sent: the file changed at 18:43:43, one second before the probe.
+  - Tokens and the response (`kind 1` on `requests/*/promptTokens`, `completionTokens`, `response`, …) were written by 18:43:59.
+  - 22 s later, no `modelState` had been written for it.
+  - Older chats on the same machine do get `modelState` 1 (Complete) written later.
+- **No Claude Code trace:** no Claude Code transcript or live-session entry changed during the chat (newest transcript 17:54:07Z). So this run says nothing about VS Code's Claude agent; it was Copilot's own chat.
+- **Claude Code's VS Code extension** writes `entrypoint` `claude-vscode`, in its live-session entries (`~/.claude/sessions/<pid>.json`) and in its transcript lines.
+- **Transcript line types:** that machine's transcripts also have `api-request`, `api-request-blob`, `api-request-shape`, `ai-title`, `file-history-delta`, `teleported-from`. Some lines carry `version` `1.0` and `userType` `unknown`.
+- **Windows processes:** four `claude.exe` processes with one parent. The probe can't read another process's environment on Windows, so the `AI_AGENT` marker is Linux-only as a signal there.
+- **Cline:**
+  - `~\.cline\data\db\sessions.db` exists, with no `-wal` file at the time.
+  - `sqlite3` is not installed, so the database was not read.
+  - The newest three session manifests are all `status` `failed`, `exit_code` 1, `source` `vscode`. That matches Cline's dead-session reconciler marking sessions whose process has gone.
+  - Their `provider` is `openai-compatible` (`gemini-3.1-pro-preview`), so none of them used Claude.
+- **Older Cline extension** (`globalStorage\saoudrizwan.claude-dev`): one task folder holding only `settings.json`.
+
+**Verified** (source, `apps/cli/src/commands/history.ts`): `cline history --json --limit <n>` prints the session list as JSON. Where the `cline` CLI is installed, ctop can read Cline sessions without SQLite, the way it reads `claude agents --json`.
+
+**Inference:**
+- **Copilot completion state:** it reaches the file later than the response, plausibly at VS Code's one-minute storage flush. So a reader would see "working" for up to about a minute after a reply finishes.
+- **To measure:** the probe's `-WatchSeconds` mode (2026.11.01.2) times each change.
+
+**Probe bugs this run exposed** (fixed in 2026.11.01.2):
+- Cline dates printed as `(object)`, because PowerShell 7 reads ISO strings as dates.
+- A request's state was not shown when the request was added rather than set.
+
 ## VS Code's built-in Copilot
 
 **Verified:** the standalone `microsoft/vscode-copilot-chat` repo is archived. Its README says "This project has been moved into the main VS Code repository". Copilot now lives in `microsoft/vscode` under `extensions/copilot`.
