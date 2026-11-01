@@ -41,6 +41,15 @@ Describe 'Format-Contact' {
     $t | Should -Not -Match '@'
     $t | Should -Match "(?m)^Session ID: +$uuid$"
   }
+  It 'gives no address to an unnamed background session shown by its job id (the id is not a name)' {
+    # Build-Rows shows an unnamed background session by its job id: NAME = id
+    $r = Row @{ NAME = 'bg7f3a'; KIND = 'background'; _Src = [pscustomobject]@{ sessionId = $uuid; kind = 'background'; id = 'bg7f3a'; pid = 1 } }
+    $t = Format-Contact $r 'box1'
+    $t | Should -Not -Match '@'
+    $t | Should -Match '(?m)^Name: +\(none\)'
+    $t | Should -Match '(?m)^Attach: +claude attach bg7f3a$'
+    $t | Should -Match '/rename'
+  }
   It 'points a subagent at its parent session' {
     $parent = '22222222-2222-4222-8222-222222222222'
     $r = Row @{ NAME = '  └ Explore (a1b2c3d4)'; KIND = 'subagent'; STATE = 'working'; CWD = '-'; _Parent = $parent

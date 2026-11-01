@@ -99,9 +99,29 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.01.1 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.01.2 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.11.01.2 — the audit of the worker build (2026.11.01.1)
+    - t / y / n / d copy the session selected when the key was pressed, even if the selection moves
+      before the worker's next frame comes in; a session gone by then is not copied, and the footer says so
+    - relative -PricingFile / -ClosedLog / -ConfigDir paths are made absolute, and the worker starts in
+      PowerShell's current directory: a relative pricing path made the worker fail and ctop fall back
+    - -Snapshot waits (up to 10 s) for the process table, so a running job shows; if it is not in by
+      then, the snapshot says so. A slow process read no longer holds the exit
+    - in one process (-InProcess), a tick counts from the start of the last frame, not its end
+    - n: no @address for a session without a name (it has none to message until you /rename it)
+    - "updating…" shows only when a key's own frame is late (it could show for an earlier key)
+    - a frame the display asked for and has not had for 5 s says so on the footer, counting up; a worker
+      that sends something other than a frame is dropped, and ctop carries on in one process
+    - the worker starts before the rest of the script loads, and the first frame shows live sessions
+      before it lists history: here ~0.3 s sooner. The worker still costs ~0.5 s here at startup; the
+      ~2 s the audit measured on WSL is not reproduced here (CTOP_TRACE times each phase)
+    - a question for you stays "asks:" when another call made in the same reply gets its result first
+      (the answer is matched to the question's call id)
+    - -PricingFile refuses an infinite rate (1e400)
+    - an unknown flag or a stray value is an error that names it: 500 was taken as -Tick
+    - CTOP_TRACE=<file>: append startup timings (process start to first frame) to that file
   2026.11.01.1
     - two processes: this one reads keys and draws; a hidden worker (the same script, -Worker) reads
       transcripts, the roster and the process table and builds frames. A slow frame no longer holds up
@@ -287,6 +307,8 @@
   The *internal* JSONL line shape (message.content[].type == "tool_use", .name, .input)
   is NOT officially documented; this script reads it defensively and degrades to "-".
 #>
+# Advanced: an unknown flag or a stray word is an error, not silently ignored (or taken as -Tick).
+[CmdletBinding(PositionalBinding = $false)]
 param(
   [int]$Tick = 250,
   [double]$RosterInterval = 2,
@@ -310,12 +332,23 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.01.1'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.11.01.2'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
+# CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
+# role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
+function Write-Trace([string]$phase) {
+  if (-not $env:CTOP_TRACE) { return }
+  try {
+    $now = [DateTimeOffset]::Now
+    $since = ($now.LocalDateTime - [Diagnostics.Process]::GetCurrentProcess().StartTime).TotalMilliseconds
+    [IO.File]::AppendAllText($env:CTOP_TRACE, ('{0} {1,6:N0} {2,-8} {3}' -f $now.ToUnixTimeMilliseconds(), $since, $(if ($Worker) { 'worker' } else { 'display' }), $phase) + "`n")
+  } catch {}
+}
+Write-Trace 'script running (parsed, parameters bound)'
 # A worker (see "worker process" near the end) is started with no parameters but -Worker: the display
 # process sends the ones it was given as the first line on the worker's input.
 if ($Worker) {
-  $settings = ConvertFrom-Json -InputObject ([Console]::In.ReadLine())
+  $settings = ConvertFrom-Json -InputObject ([Console]::In.ReadLine()); Write-Trace 'settings received'
   foreach ($p in @($settings.PSObject.Properties)) { Set-Variable -Name $p.Name -Value $p.Value -Scope Script; $PSBoundParameters[$p.Name] = $p.Value }
 }
 # Worker: builds frames for a display process. InProcess: one process does it all (-InProcess, -Snapshot,
@@ -328,6 +361,43 @@ $ErrorActionPreference = 'SilentlyContinue'
 
 # Respect CLAUDE_CONFIG_DIR (documented) — otherwise ~/.claude
 $ConfigDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME '.claude' }
+# Paths the user gave are relative to PowerShell's location (Set-Location), which is not always the
+# process's working directory that .NET file calls (and a worker process) go by: make them absolute here.
+function Resolve-UserPath([string]$path) { if (-not $path) { return $path }; $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path) }
+$ConfigDir = Resolve-UserPath $ConfigDir
+if ($PricingFile) { $PricingFile = Resolve-UserPath $PricingFile; $script:BoundParams['PricingFile'] = $PricingFile }   # (what a worker is sent)
+if ($ClosedLog) { $ClosedLog = Resolve-UserPath $ClosedLog; $script:BoundParams['ClosedLog'] = $ClosedLog }
+
+# ---- the worker, started first ------------------------------------------------------------
+# In display mode (the default) the worker is started here, before the rest of this script defines its
+# functions, so its own startup (a second PowerShell, parsing this file, reading the data feed) overlaps
+# this process's. See "worker process" near the end.
+function ConvertTo-AsciiJson($value) {
+  $j = ConvertTo-Json -InputObject $value -Compress -Depth 8
+  [regex]::Replace($j, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
+}
+function Start-Worker {
+  $psi = [Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName = (Get-Process -Id $PID).Path
+  $onWindows = $IsWindows -or $env:OS -eq 'Windows_NT'
+  $psi.Arguments = '-NoProfile -NonInteractive ' + $(if ($onWindows) { '-ExecutionPolicy Bypass ' }) + "-File `"$($script:ScriptPath)`" -Worker"
+  $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+  $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+  $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+  $psi.WorkingDirectory = (Get-Location -PSProvider FileSystem).ProviderPath   # where PowerShell is, not where the process started
+  $proc = [Diagnostics.Process]::Start($psi)
+  # settings: the parameters this run was given (the worker starts with none of them)
+  $settings = @{}
+  foreach ($k in $script:BoundParams.Keys) { if ($k -notin 'Worker', 'Snapshot', 'Version', 'InProcess', 'NoMouse') { $v = $script:BoundParams[$k]; $settings[$k] = if ($v -is [Management.Automation.SwitchParameter]) { [bool]$v } else { $v } } }
+  $proc.StandardInput.WriteLine((ConvertTo-AsciiJson $settings)); $proc.StandardInput.Flush()
+  return @{ Proc = $proc; Err = $proc.StandardError.ReadToEndAsync(); Reply = $null }
+}
+$script:EarlyWorker = $null; $script:EarlyFault = $null
+if ($script:Mode -eq 'Frontend') {
+  Write-Trace 'starting the worker'
+  try { $script:EarlyWorker = Start-Worker } catch { $script:EarlyFault = $_.Exception.Message }
+  Write-Trace 'worker started'
+}
 $ProjectsDir = Join-Path $ConfigDir 'projects'
 
 # Caches so a 1s refresh stays cheap with a large projects/ tree:
@@ -796,7 +866,7 @@ function Import-PricingFile([string]$path) {
     $row = @{ Match = $x.Match }
     foreach ($k in 'In', 'W5', 'W1h', 'Read', 'Out') {
       $v = $x.$k
-      if ($null -eq $v -or -not ($v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal]) -or [double]$v -lt 0) {
+      if ($null -eq $v -or -not ($v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal]) -or [double]$v -lt 0 -or [double]::IsInfinity([double]$v) -or [double]::IsNaN([double]$v)) {
         throw "pricing file entry ${n}: $k must be a number of dollars per million tokens, 0 or more"
       }
       $row[$k] = [double]$v
@@ -1122,6 +1192,9 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
     # content may be a string or an array of blocks
     if ($content -is [string]) { $t = ($content -replace '\s+', ' ').Trim(); $out.LastFull = 'text: ' + $t; $out.Last = 'text: ' + (Limit-Chars $t 120); break }
     $tool = $content | Where-Object { $_.type -eq 'tool_use' } | Select-Object -Last 1
+    # a reply can make several calls at once; a question among them is what matters to you
+    $askCall = $content | Where-Object { $_.type -eq 'tool_use' -and $_.name -eq 'AskUserQuestion' } | Select-Object -Last 1
+    if ($askCall) { $tool = $askCall }
     if ($tool -and $tool.name -eq 'SubagentHandback') {
       # Claude Code >= 2.1.271: a subagent delivers its report through SubagentHandback, then stops.
       # The report is in input.message. It can hand back again later (e.g. when background work it
@@ -1134,18 +1207,26 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
     }
     if ($tool -and $tool.name -eq 'AskUserQuestion') {
       # A question for you, from the tool's own input (questions[]: question, header, options[] of label /
-      # description, multiSelect). Waiting while this call is the newest entry: an answer is a newer one.
+      # description, multiSelect). Waiting until a newer entry answers this call: its tool result (the API
+      # ties every result to its call's id), or a prompt that is not a tool result. Another call made in the
+      # same reply can get its result first; that does not answer the question.
       $qs = @(foreach ($q in @($tool.input.questions)) {
         if (-not $q) { continue }
         @{ Text = (Get-ContactText $q.question); Header = (Get-ContactText $q.header); Multi = [bool]$q.multiSelect
            Options = @(foreach ($op in @($q.options)) { if ($op) { (Get-ContactText $op.label) + $(if ($op.description) { ': ' + (Get-ContactText $op.description) }) } }) }
       })
-      $waiting = $lastObj -and $lastObj.type -eq 'assistant' -and (@($lastObj.message.content) | Where-Object { $_.type -eq 'tool_use' -and $_.id -eq $tool.id })
+      $waiting = -not $interrupted
+      $idRx = '"tool_use_id"\s*:\s*"' + [regex]::Escape([string]$tool.id) + '"'
+      for ($k = $i + 1; $waiting -and $k -lt $lines.Count; $k++) {
+        $lk = $lines[$k]
+        if (-not $lk.Contains('"type":"user"')) { continue }
+        if (-not $lk.Contains('"tool_result"') -or ($tool.id -and $lk -match $idRx)) { $waiting = $false }
+      }
       $verb = if ($waiting) { 'asks' } else { 'asked' }
       $first = if ($qs) { $qs[0].Text } else { '(question not recorded)' }
       $out.LastFull = "${verb}: " + $(if ($qs) { ($qs | ForEach-Object { $_.Text }) -join ' / ' } else { $first })
       $out.Last = "${verb}: " + (Limit-Chars $first 110) + $(if ($qs.Count -gt 1) { " (+$($qs.Count - 1) more)" })
-      if ($waiting) { $out.Questions = $qs }
+      if ($waiting) { $out.Questions = $qs; $out.State = 'working' }   # as when the question is the newest entry
       break
     }
     if ($tool) {
@@ -1351,7 +1432,9 @@ function Format-Contact($r, [string]$machine = [Environment]::MachineName) {
     return ($lines -join "`n")
   }
   $src = $r._Src
-  $name = if ($src -and $src.name) { & $c $src.name } elseif ($r.NAME -and $r.NAME -ne '-') { & $c $r.NAME } else { '' }
+  # the address is the session's own name (claude agents --json: name); the row's NAME can be a stand-in
+  # (an unnamed background session is shown by its job id), which no one can message
+  $name = if ($src -and $src.name) { & $c $src.name } else { '' }
   $lines.Add('Claude Code session')
   & $row 'Name' $(if ($name -and -not $r._Gone) { "$name   (address: @$name)" } elseif ($name) { $name } else { '(none)' })
   & $row 'Session ID' (& $c $r._SessionId)
@@ -1865,6 +1948,7 @@ function Read-Roster {
   $p.Proc.Dispose()
   $res = ConvertFrom-RosterPoll -ExitCode $exit -Stdout $raw -Stderr $(if ($p.Err.IsCompleted) { $p.Err.Result } else { '' })
   if (-not $res.Ok) { $script:PollFail = $res.Why; $script:PollFails++; return $false }
+  if (-not $script:TracedRoster) { $script:TracedRoster = $true; Write-Trace "first roster in (poll $($script:PollMs) ms)" }
   $script:PollFail = $null; $script:PollFails = 0
   $script:RosterAt = $script:PollAt
   $sessions = $res.Sessions
@@ -1983,7 +2067,8 @@ function Build-Rows {
         if ($script:RefreshIds.Contains([string]$s.sessionId)) { Update-GoneRow $gc.Row; [void]$script:FreshIds.Add([string]$s.sessionId) }
         $gc.Row; continue
       }
-      if ($budget.ElapsedMilliseconds -ge $script:GoneBuildMs) { $script:GonePending++; continue }
+      # the first frame with live sessions shows them at once: history rows start on the next frame
+      if ($budget.ElapsedMilliseconds -ge $script:GoneBuildMs -or ($script:Roster.Count -and -not $script:LiveShown)) { $script:GonePending++; continue }
       # (re)building: find its agent files first, then key the row on what is there BEFORE anything is
       # read. A write that lands while it is built changes the files, so the next check rebuilds; a key
       # taken after the build could take in that write and never count it.
@@ -2779,6 +2864,7 @@ function Show-Help {
     '  title bar   clock; live sessions / working / idle; live subagents (stopped, orphaned); gone sessions',
     '  tick        display refresh period (ms). [ / ] adjust by 50ms; floor 50',
     '  frame       measured ms to build the last frame: roster / process harvest, cache save, rows, table.',
+    '              Building only: not drawing it, nor (with the worker) sending it to the display.',
     '              ctop runs as two processes: this one reads keys and draws, a worker builds frames, so a',
     '              slow frame never holds up keys (q quits at once; "updating…" means the worker is busy)',
     '  roster age  time since the last good `claude agents --json` result; * = poll in flight',
@@ -3244,14 +3330,17 @@ function Invoke-Frame($view) {
     if ($pr) { $lines = Build-Peek $pr; $footer = "  live peek   ↑↓ other session   esc/enter close   t path   y resume   n contact   d ID   h help" }
     else { $script:PeekId = $null }
   }
-  # what t / y / n / d copy, for the selected row (the display process has no rows of its own)
-  $sel = if ($selectedId) { $sorted | Where-Object _SessionId -eq $selectedId | Select-Object -First 1 }
+  # what t / y / n / d copy: for the session a waiting copy asked for (CopyFor), else the selected row
+  # (the display process has no rows of its own)
+  $copyId = if ($view.CopyFor) { [string]$view.CopyFor } else { $selectedId }
+  $sel = if ($copyId) { $sorted | Where-Object _SessionId -eq $copyId | Select-Object -First 1 }
   $copy = $null
   if ($sel) {
     $cid = Get-CopyId $sel
-    $copy = @{ Id = [string]$selectedId; Transcript = $(if ($sel._Transcript -and $sel._Transcript -ne '-') { [string]$sel._Transcript } else { '' })
+    $copy = @{ Id = [string]$sel._SessionId; Transcript = $(if ($sel._Transcript -and $sel._Transcript -ne '-') { [string]$sel._Transcript } else { '' })
                Resume = "claude --resume $(if ($sel._Parent) { $sel._Parent } else { $sel._SessionId })"; Contact = (Format-Contact $sel); IdText = $cid.Text; IdWhat = $cid.What }
   }
+  if ($script:Roster.Count -and @($sorted).Count) { $script:LiveShown = $true }
   $script:LastFrameMs = [int]$frameSw.ElapsedMilliseconds
   return @{ Lines = @($lines); Footer = $footer; Ids = @(foreach ($r in $sorted) { [string]$r._SessionId }); SelectedId = $selectedId
             PeekId = $script:PeekId; PageRows = [int]$script:PageRows; BodyMap = @($script:BodyMap); BodyY0 = [int]$script:BodyY0; Copy = $copy
@@ -3264,7 +3353,7 @@ function Invoke-Frame($view) {
 function New-View {
   [pscustomobject]@{ Rev = 0; SelectedId = $null; PeekId = $null; Tick = [math]::Max(50, $Tick); KeepMin = $script:KeepMin
                      ShowSubagents = [bool]$script:ShowSubagents; Compact = [bool]$script:Compact; SortMode = [int]$script:SortMode
-                     LayoutMode = [int]$script:LayoutMode; ShowGone = [bool]$script:ShowGone; Actions = @(); PendingCopy = $null }
+                     LayoutMode = [int]$script:LayoutMode; ShowGone = [bool]$script:ShowGone; Actions = @(); PendingCopies = @(); CopyFor = $null }
 }
 # One key against the view and the last frame drawn (its row ids, page size). Returns what the loop must
 # do beyond redrawing: quit, help, closed (the log), poll, or copy-<t|y|n|d>; $null for nothing more.
@@ -3307,12 +3396,29 @@ function Apply-Key($view, $k, $packet) {
   $view.Rev++
   return $null
 }
-# t / y / n / d copy from the frame drawn for the current selection; when the selection has moved on since
-# (a worker frame still on its way), the copy waits for the frame that matches it.
+# t / y / n / d copy what belongs to the session selected when the key was pressed. The frame on screen
+# carries copy data for one session (Copy); when that is not the one, the request waits in order, with its
+# session, and the next frame is asked for that session's data (CopyFor). The selection moving on in the
+# meantime does not change what is copied; a session that is no longer listed is not copied at all.
 function Invoke-CopyKey([string]$what, $packet, $view) {
-  $c = $packet.Copy
-  if (-not $c -or [string]$c.Id -ne [string]$view.SelectedId) { $view.PendingCopy = $what; return }
-  $view.PendingCopy = $null
+  $id = [string]$view.SelectedId
+  if (-not @($view.PendingCopies).Count -and $packet.Copy -and [string]$packet.Copy.Id -eq $id) { Copy-From $what $packet.Copy; return }
+  $view.PendingCopies = @(@($view.PendingCopies) + @{ What = $what; Id = $id })
+  $view.CopyFor = [string]@($view.PendingCopies)[0].Id
+}
+function Complete-PendingCopies($packet, $view) {
+  while (@($view.PendingCopies).Count) {
+    $head = @($view.PendingCopies)[0]
+    if ($packet.Copy -and [string]$packet.Copy.Id -eq [string]$head.Id) { Copy-From $head.What $packet.Copy }
+    elseif (@($packet.Ids) -notcontains [string]$head.Id) {
+      $script:Flash = "not copied: that session is no longer listed"; $script:FlashUntil = (Get-Date).AddSeconds(3)
+    }
+    else { break }   # its data has not come yet
+    $view.PendingCopies = @(@($view.PendingCopies) | Select-Object -Skip 1)
+  }
+  $view.CopyFor = if (@($view.PendingCopies).Count) { [string]@($view.PendingCopies)[0].Id } else { $null }
+}
+function Copy-From([string]$what, $c) {
   switch ($what) {
     't' { if ($c.Transcript) { Copy-Text $c.Transcript 'transcript path' } }
     'y' { Copy-Text $c.Resume 'resume command' }
@@ -3322,6 +3428,7 @@ function Invoke-CopyKey([string]$what, $packet, $view) {
 }
 # Draw a frame (with a copy flash in the footer while it lasts) and keep what the mouse needs.
 function Show-Packet($packet, [string]$note = '') {
+  if (-not $script:TracedRows -and @($packet.Ids).Count) { $script:TracedRows = $true; Write-Trace 'first frame with sessions drawn' }
   $foot = if ((Get-Date) -lt $script:FlashUntil) { "  ► $($script:Flash)" } elseif ($note) { $note } else { [string]$packet.Footer }
   $script:ShownFooter = $foot
   $script:BodyMap = @($packet.BodyMap); $script:BodyY0 = [int]$packet.BodyY0
@@ -3357,6 +3464,7 @@ function Read-Keys($view, $packet) {
 # Whoever builds frames owns the feed: the closed-sessions history, the transcript index, the roster
 # poll and the scan cache. In worker mode that is the worker; the display process reads none of it.
 function Initialize-Feed {
+  Write-Trace 'feed: start'
   # sessionId -> @{ Session; GoneAt; Cleared; Successor }: every session that left, this run or an earlier
   # one (closed log); the keep window picks which are drawn. Sessions that are live again drop out on the
   # first poll. The same rule as for the live roster: background sessions only with -All.
@@ -3367,6 +3475,7 @@ function Initialize-Feed {
   Load-ScanCache
   $script:LastSave = Get-Date
   $script:FeedOwner = $true
+  Write-Trace 'feed: ready (history read, roster poll started, scan cache loaded)'
 }
 
 # ---- one process -------------------------------------------------------------------------
@@ -3379,14 +3488,18 @@ function Invoke-InProcessLoop($view) {
       $winW = Get-WindowWidth; $winH = Get-WindowHeight
       Clear-Screen   # the terminal reflows old lines on resize; wipe them, including the last column
     }
+    $loopStart = [Diagnostics.Stopwatch]::StartNew()   # a tick runs from frame start to frame start: building and drawing count in it
     $packet = Invoke-Frame $view
     $view.Actions = @(); $view.SelectedId = $packet.SelectedId; $view.PeekId = $packet.PeekId
-    if ($view.PendingCopy) { Invoke-CopyKey $view.PendingCopy $packet $view }
+    Complete-PendingCopies $packet $view
     Show-Packet $packet
-    $loopStart = [Diagnostics.Stopwatch]::StartNew()
     while ($true) {
       $r = Read-Keys $view $packet
-      if ($r -eq 'quit') { return }
+      if ($r -eq 'quit') {
+        # copies asked for just before q: finish them first (their data is one frame away)
+        if (@($view.PendingCopies).Count) { Complete-PendingCopies (Invoke-Frame $view) $view }
+        return
+      }
       if ($r -or $loopStart.ElapsedMilliseconds -ge [int]$view.Tick) { break }
       # a poll that just finished mid-sleep: draw it now rather than waiting out the tick
       if ($script:Poll -and $script:Poll.Proc.HasExited -and $script:Poll.Out.IsCompleted) { break }
@@ -3401,25 +3514,6 @@ function Invoke-InProcessLoop($view) {
 # One request (the view and the window size) and one reply (the frame) per line, as JSON escaped to
 # ASCII so neither side's encoding matters. One request is in flight at a time, always the newest view,
 # so a slow frame never stops keys (q included) from being read and acknowledged.
-function ConvertTo-AsciiJson($value) {
-  $j = ConvertTo-Json -InputObject $value -Compress -Depth 8
-  [regex]::Replace($j, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
-}
-function Start-Worker {
-  $psi = [Diagnostics.ProcessStartInfo]::new()
-  $psi.FileName = (Get-Process -Id $PID).Path
-  $onWindows = $IsWindows -or $env:OS -eq 'Windows_NT'
-  $psi.Arguments = '-NoProfile -NonInteractive ' + $(if ($onWindows) { '-ExecutionPolicy Bypass ' }) + "-File `"$($script:ScriptPath)`" -Worker"
-  $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
-  $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
-  $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
-  $proc = [Diagnostics.Process]::Start($psi)
-  # settings: the parameters this run was given (the worker starts with none of them)
-  $settings = @{}
-  foreach ($k in $script:BoundParams.Keys) { if ($k -notin 'Worker', 'Snapshot', 'Version', 'InProcess', 'NoMouse') { $v = $script:BoundParams[$k]; $settings[$k] = if ($v -is [Management.Automation.SwitchParameter]) { [bool]$v } else { $v } } }
-  $proc.StandardInput.WriteLine((ConvertTo-AsciiJson $settings)); $proc.StandardInput.Flush()
-  return @{ Proc = $proc; Err = $proc.StandardError.ReadToEndAsync(); Reply = $null }
-}
 # Closing its input tells the worker to stop: it saves its scan cache and exits on its own. Quitting does
 # not wait for that: a worker busy with a slow frame finishes it, finds no one to send it to, and exits.
 # (Killing it would lose the cache save.)
@@ -3437,25 +3531,52 @@ function Get-WorkerFault($w) {
 function Invoke-WorkerLoop {
   try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {}
   Initialize-Feed
+  $first = $true
   while ($null -ne ($line = [Console]::In.ReadLine())) {
+    if ($first) { Write-Trace 'first request received'; $first = $false }
     $req = ConvertFrom-Json -InputObject $line
     $script:FixedSize = @{ W = [int]$req.W; H = [int]$req.H }
     $p = Invoke-Frame $req.View
-    [Console]::Out.WriteLine((ConvertTo-AsciiJson $p)); [Console]::Out.Flush()
+    $json = ConvertTo-AsciiJson $p
+    [Console]::Out.WriteLine($json); [Console]::Out.Flush()
+    if ($env:CTOP_TRACE -and $script:TracedFrames -lt 6) { $script:TracedFrames++; Write-Trace "frame $($script:TracedFrames) sent: $(@($p.Ids).Count) rows, built in $($script:LastFrameMs) ms, $($json.Length) bytes" }
   }
 }
 # The display process: keys, requests, replies, drawing. Falls back to one process if the worker fails.
 function Invoke-FrontendLoop {
   $view = New-View
   $packet = @{ Lines = @(@{ Text = "  ctop  $(Get-Date -Format 'HH:mm:ss')   starting…"; Inverse = $true }); Footer = '  h help   q quit'; Ids = @(); PageRows = 10; BodyMap = @(); BodyY0 = 0; Rev = -1 }
-  $w = $null
-  try { $w = Start-Worker } catch { $w = $null; $fault = $_.Exception.Message }
-  if (-not $w) { return (Invoke-Fallback $view "worker did not start: $fault") }
-  $sent = -1; $tickSw = [Diagnostics.Stopwatch]::StartNew(); $dirty = $true; $waitSw = [Diagnostics.Stopwatch]::new(); $noted = $false
+  $w = $script:EarlyWorker   # started at the top of the script
+  if (-not $w) { return (Invoke-Fallback $view "worker did not start: $($script:EarlyFault)") }
+  $sent = -1; $tickSw = [Diagnostics.Stopwatch]::StartNew(); $dirty = $true
+  # "updating…": a key changed the view and its frame has not come within 300 ms (the worker is busy).
+  # Only a key starts this clock: the first frame being slow is not a key waiting.
+  $keySw = [Diagnostics.Stopwatch]::new(); $keyRev = $null; $noted = $false
+  # a frame asked for and not in after 5 s: the screen is that old, so say so (and count up)
+  $askSw = [Diagnostics.Stopwatch]::new(); $staleSec = 0
   $winW = Get-WindowWidth; $winH = Get-WindowHeight
   try {
     while ($true) {
-      if ((Read-Keys $view $packet) -eq 'quit') { return }
+      $revBefore = $view.Rev
+      $keys = Read-Keys $view $packet
+      if ($keys -ne 'quit' -and $view.Rev -ne $revBefore -and $null -eq $keyRev) { $keyRev = $view.Rev; $keySw.Restart(); $noted = $false }
+      if ($keys -eq 'quit') {
+        # copies asked for just before q: wait (up to 2 s) for the frame that carries their data
+        $qsw = [Diagnostics.Stopwatch]::StartNew()
+        while (@($view.PendingCopies).Count -and $qsw.ElapsedMilliseconds -lt 2000 -and -not $w.Proc.HasExited) {
+          if (-not $w.Reply) {
+            $w.Proc.StandardInput.WriteLine((ConvertTo-AsciiJson @{ W = $winW; H = $winH; View = $view })); $w.Proc.StandardInput.Flush()
+            $w.Reply = $w.Proc.StandardOutput.ReadLineAsync()
+          }
+          if ($w.Reply.Wait(50)) {
+            $line = $w.Reply.Result; $w.Reply = $null
+            $p = if ($null -ne $line) { Read-WorkerFrame $line }
+            if (-not $p) { break }
+            Complete-PendingCopies $p $view
+          }
+        }
+        return
+      }
       if ((Get-WindowWidth) -ne $winW -or (Get-WindowHeight) -ne $winH) {
         $winW = Get-WindowWidth; $winH = Get-WindowHeight; Clear-Screen; $view.Rev++; $dirty = $true
       }
@@ -3463,9 +3584,12 @@ function Invoke-FrontendLoop {
         $line = $null; try { $line = $w.Reply.Result } catch {}
         $w.Reply = $null
         if ($null -eq $line) { return (Invoke-Fallback $view "worker stopped ($(Get-WorkerFault $w))" $w) }
-        $packet = ConvertFrom-Json -InputObject $line
+        $got = Read-WorkerFrame $line
+        if (-not $got) { return (Invoke-Fallback $view 'worker sent an unreadable frame' $w) }
+        $packet = $got; $staleSec = 0
         if ([int]$packet.Rev -eq [int]$view.Rev) { $view.SelectedId = $packet.SelectedId; $view.PeekId = $packet.PeekId }
-        if ($view.PendingCopy) { Invoke-CopyKey $view.PendingCopy $packet $view }
+        if ($null -ne $keyRev -and [int]$packet.Rev -ge [int]$keyRev) { $keyRev = $null; $noted = $false }   # the key's frame is in
+        Complete-PendingCopies $packet $view
         $dirty = $true
       }
       if (-not $w.Reply) {
@@ -3474,18 +3598,35 @@ function Invoke-FrontendLoop {
           $req = @{ W = $winW; H = $winH; View = $view }
           try { $w.Proc.StandardInput.WriteLine((ConvertTo-AsciiJson $req)); $w.Proc.StandardInput.Flush() }
           catch { return (Invoke-Fallback $view "worker stopped ($(Get-WorkerFault $w))" $w) }
-          $w.Reply = $w.Proc.StandardOutput.ReadLineAsync()
-          $sent = $view.Rev; $view.Actions = @(); $tickSw.Restart(); $waitSw.Restart(); $noted = $false
+          $w.Reply = $w.Proc.StandardOutput.ReadLineAsync(); $askSw.Restart()
+          $sent = $view.Rev; $view.Actions = @(); $tickSw.Restart()
         }
       }
+      $waitSec = if ($w.Reply) { [int][math]::Floor($askSw.ElapsedMilliseconds / 1000) } else { 0 }
       if ($dirty) { Show-Packet $packet; $dirty = $false }
-      elseif (-not $noted -and $w.Reply -and [int]$packet.Rev -ne [int]$view.Rev -and $waitSw.ElapsedMilliseconds -ge 300) {
+      elseif ($waitSec -ge 5 -and $waitSec -ne $staleSec) {
+        $why = if ([int]$packet.Rev -lt 0) { "  starting: no frame yet after $waitSec s   (q quits)" } else { "  not updated for $waitSec s: the worker is busy   (keys are taken, q quits)" }
+        Show-Packet $packet $why; $staleSec = $waitSec; $noted = $true
+      }
+      elseif ($null -ne $keyRev -and -not $noted -and $keySw.ElapsedMilliseconds -ge 300) {
         Show-Packet $packet '  updating…   (the worker is busy: keys are taken, q quits)'; $noted = $true   # a key, acknowledged
       }
       elseif ((Get-Date) -ge $script:FlashUntil -and $script:ShownFooter -like '  ►*') { Show-Packet $packet }   # a flash ran out
       Start-Sleep -Milliseconds 10
     }
   } finally { Stop-Worker $w }
+}
+# One reply from the worker, read and checked: the frame, or $null when it is not one (not JSON, or without
+# what the display needs). The display treats a worker that sends something else like one that stopped.
+function Read-WorkerFrame([string]$line) {
+  try { $p = ConvertFrom-Json -InputObject $line -ErrorAction Stop } catch { return $null }
+  if ($null -eq $p -or $p.GetType().FullName -ne 'System.Management.Automation.PSCustomObject') { return $null }
+  $isInt = { param($v) $v -is [int] -or $v -is [long] }
+  if ($p.Lines -isnot [array] -or -not (& $isInt $p.Rev)) { return $null }
+  foreach ($l in $p.Lines) { if ($null -ne $l -and $l -isnot [string] -and $l.GetType().FullName -ne 'System.Management.Automation.PSCustomObject') { return $null } }   # a null line draws as blank
+  if ($null -ne $p.Footer -and $p.Footer -isnot [string]) { return $null }
+  if ($null -ne $p.Ids -and $p.Ids -isnot [array]) { return $null }
+  return $p
 }
 # No worker: carry on in this process, and say why on the footer for a while.
 function Invoke-Fallback($view, [string]$why, $w = $null) {
@@ -3511,6 +3652,11 @@ try {
   elseif ($Snapshot) {
     Initialize-Feed
     while (-not (Read-Roster) -and $script:Poll) { Start-Sleep -Milliseconds 25 }   # the one frame shows the roster
+    # ...and what the sessions run (jobs, CPU, memory): the process table is read after the roster, in the
+    # background. Wait for it, a bounded while; if it is not in by then, say so rather than show none.
+    $psw = [Diagnostics.Stopwatch]::StartNew()
+    while ($script:ProcJob -and $psw.ElapsedMilliseconds -lt 10000) { Read-ProcPoll; if ($script:ProcJob) { Start-Sleep -Milliseconds 25 } }
+    $procNote = if ($script:ProcJob) { 'note: process data (jobs, CPU, memory) not read within 10 s: not shown' }
     # the strip is built before the table finds which columns fit (hidden N cols), so it is a frame behind:
     # print the second frame, which also times the first as "frame"
     $view = New-View
@@ -3521,6 +3667,7 @@ try {
       $t = Strip-Ansi (Protect-TerminalText $(if ($item -is [string]) { $item } else { [string]$item.Text }))
       [Console]::Out.WriteLine((Limit-Cells $t $sw).TrimEnd())
     }
+    if ($procNote) { [Console]::Out.WriteLine($procNote) }
   }
   else {
     [Console]::CursorVisible = $false
@@ -3536,7 +3683,8 @@ catch {
 }
 finally {
   Stop-RosterPoll $script:Poll
-  if ($script:ProcJob) { Remove-Job $script:ProcJob -Force -ErrorAction SilentlyContinue }
+  # a process-table read still running is left to end with the process: removing it waits for its ps
+  if ($script:ProcJob -and $script:ProcJob.State -ne 'Running') { Remove-Job $script:ProcJob -Force -ErrorAction SilentlyContinue }
   if ($script:FeedOwner -and -not $script:ReadOnly) { Save-ScanCache }
   if ($script:Mode -ne 'Worker') {
     try { [Console]::OutputEncoding = $origOutEnc } catch {}
@@ -3556,5 +3704,10 @@ finally {
 # a crash is a failure to whoever ran ctop (a wrapper, a test): say so on stderr and in the exit status
 if ($script:Fatal) {
   [Console]::Error.WriteLine((Protect-TerminalText "ctop $script:CtopVersion stopped: $($script:Fatal.Exception.GetType().Name): $($script:Fatal.Exception.Message)"))
-  exit 1
 }
+# A process-table read still running (a slow ps) would hold the process open until it ends: end it now.
+if ($script:ProcJob -and $script:ProcJob.State -eq 'Running') {
+  try { [Console]::Out.Flush(); [Console]::Error.Flush() } catch {}
+  [Environment]::Exit($(if ($script:Fatal) { 1 } else { 0 }))
+}
+if ($script:Fatal) { exit 1 }

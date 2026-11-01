@@ -23,7 +23,10 @@ Everything is read locally. ctop makes no model calls and uses no tokens.
   which versions have been run, and how far.
 - **Two processes**: by default ctop starts a second, hidden PowerShell process (the same script) that
   reads transcripts, the roster and the process table, so a slow read never holds up the keyboard. Use
-  `-InProcess` to run as one; ctop falls back to one process by itself if the worker can't start.
+  `-InProcess` to run as one; ctop falls back to one process by itself if the worker can't start, stops,
+  or sends something it can't read. The worker costs some startup: about 0.5 s more to the first frame
+  in the Linux container this was measured in. If a frame is more than 5 s late, the footer says how old
+  the screen is.
 - **Claude Code** on `PATH`, with the `claude agents --json` command. ctop stops with an error
   at startup if `claude` can't be found.
 - **Operating system**: Windows, or Linux in the Debian and Fedora / RHEL families. On Linux the
@@ -66,12 +69,42 @@ To start it as `ctop` from any directory, add an alias to your PowerShell profil
 Set-Alias ctop /path/to/ctop/ctop.ps1
 ```
 
-If you download the script as a file instead of cloning, Windows may block it under the
-`RemoteSigned` execution policy. Unblock it once:
+#### Windows: the execution policy
+
+`ctop.ps1` is not signed. On Windows, PowerShell's execution policy can refuse to run it:
+
+- **Windows PowerShell 5.1** defaults to `Restricted` on client editions, which runs no scripts at all.
+- **PowerShell 7** defaults to `RemoteSigned`. It runs scripts written on the computer, but not unsigned scripts
+  Windows marked as downloaded from the internet (a browser download, an email attachment).
+- An administrator may have set a stricter policy, such as `AllSigned`.
+
+To run it anyway without changing any setting, start it with `-ExecutionPolicy Bypass`. This applies only to that
+PowerShell session and the PowerShell sessions it starts:
 
 ```powershell
-Unblock-File ./ctop.ps1
+pwsh -ExecutionPolicy Bypass -File C:\path\to\ctop\ctop.ps1
 ```
+
+As a `ctop` command in your profile:
+
+```powershell
+function ctop { pwsh -NoProfile -ExecutionPolicy Bypass -File C:\path\to\ctop\ctop.ps1 @args }
+```
+
+If the only problem is the downloaded-file mark, you can remove it once instead, and keep using `Set-Alias`:
+
+```powershell
+Unblock-File C:\path\to\ctop\ctop.ps1
+```
+
+A policy set by Group Policy overrides `-ExecutionPolicy`. Then ask whoever manages the computer.
+ctop starts its own worker process with `-ExecutionPolicy Bypass` on Windows, so you only need it for the first launch.
+
+On Linux and macOS, PowerShell does not enforce execution policies, so none of this applies. Microsoft's
+documentation says "Enforcement of these policies only occurs on Windows platforms". On Linux with PowerShell 7.6.9,
+`pwsh -ExecutionPolicy Restricted -File` still ran a script. Source: [about_Execution_Policies][ep].
+
+[ep]: https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_execution_policies
 
 ## Usage
 
@@ -110,6 +143,13 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release not
 | `-InProcess`      |                    | Run as one process instead of a display process plus a worker (see [Requirements](#requirements)). |
 | `-Snapshot`       |                    | Print one frame as plain text and exit: every session listed, no colors, nothing written. Width: `-MaxWidth`, else the window's, else 200. |
 | `-Version`        |                    | Print the version and exit. |
+
+An unknown or misspelled flag, or a value with no flag (`./ctop.ps1 500`), is an error that names it.
+ctop does not start.
+
+Environment: `CTOP_TRACE=<file>` appends startup timings to that file: each process (display, worker)
+writes a line as it reaches each phase, from the script running to the first frame with sessions in it.
+Use it to see where a slow start goes.
 
 ### Keys
 
@@ -182,13 +222,14 @@ The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meani
 
 ## Tested on
 
-What has actually been run, as of build `2026.11.01.1`. Anything not listed here is untested.
+What has actually been run, as of build `2026.11.01.2`. Anything not listed here is untested.
 
-**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (313, less those
+**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (348, less those
 that cannot apply: Linux skips the two Windows process tests; Windows skips the two that need a
-case-sensitive filesystem; Windows PowerShell 5.1 also skips the flag-width test: 311, 311 and 310 run).
-They include the worker run as a real process, on Windows PowerShell 5.1 too.
-*End to end*: the integration tests (38), which drive the real ctop in tmux against a fake `claude`
+case-sensitive filesystem; Windows PowerShell 5.1 also skips the flag-width test: 346, 346 and 345 run).
+They include the worker run as a real process, the display against a worker that misbehaves, `-Snapshot`
+and the command line run as processes, on Windows PowerShell 5.1 too.
+*End to end*: the integration tests (40), which drive the real ctop in tmux against a fake `claude`
 and a 300-session history, sessions coming and going, a hung roster poll, hostile session text, wide
 characters, titles in non-Latin scripts, and the worker process (busy, and killed). Each job fails if a test it is meant to run was skipped (`tests/Run-Tests.ps1`).
 
@@ -205,7 +246,9 @@ characters, titles in non-Latin scripts, and the worker process (busy, and kille
 | Fedora 44 (container) | 7.6.9 | ✅ | ✅ tmux 3.8 |
 
 Each job also checks that the script parses and that `-Version` runs. The two PowerShell 7 jobs on
-GitHub's own runners (Windows, Ubuntu 24.04) also run PSScriptAnalyzer.
+GitHub's own runners (Windows, Ubuntu 24.04) also run PSScriptAnalyzer. The Ubuntu 24.04 job also runs
+`tests/Compare-Versions.ps1` against `main`: the same inputs through both versions, failing if this one
+fails a check.
 
 **By hand**, with a live Claude Code session (Claude Code 2.1.314, PowerShell 7.6.9, Ubuntu 24.04 in
 a container): the roster, transcripts and subagent rows, background jobs (a running `sleep` shown as
@@ -291,12 +334,16 @@ Tests use [Pester](https://pester.dev) 5:
 
 - `tests/Keep.Tests.ps1`, `Display.Tests.ps1`, `Transcript.Tests.ps1`, `Clipboard.Tests.ps1`,
   `Encoding.Tests.ps1`, `Rows.Tests.ps1`, `Contact.Tests.ps1`, `Pricing.Tests.ps1`, `Worker.Tests.ps1`
-  (keys, and the worker run as a real process), `Process.Tests.ps1` (its process tests run on Windows
-  only): unit tests. They load the functions from `ctop.ps1` without running it
-  (`tests/Import-Ctop.ps1`), so they need no `claude` and no terminal.
+  (keys, the worker run as a real process, and the display against a worker that misbehaves),
+  `Process.Tests.ps1` (its process tests run on Windows only): unit tests. They load the functions from
+  `ctop.ps1` without running it (`tests/Import-Ctop.ps1`), so they need no `claude` and no terminal.
+- `tests/Snapshot.Tests.ps1` and `Cli.Tests.ps1`: run ctop as a process against a fake `claude` (a shell
+  script, or a `.cmd` on Windows), output to pipes: `-Snapshot`, and which command lines it refuses. No
+  terminal, so they run on every CI job, Windows included.
 - `tests/Integration.Tests.ps1` (tag `Integration`): drives the real ctop in tmux against a fake
-  `claude` and a 300-session history, checking that keys are never dropped, that frames stay within the
-  tick, that off-screen history is nearly free, that a row scrolled into view shows its current age,
+  `claude` and a 300-session history, checking that keys are never dropped, that building a frame (the
+  `frame` figure on the strip: building only, not drawing it or sending it from the worker) takes under
+  the 250 ms tick at the median while the clock on screen keeps moving, that off-screen history is nearly free, that a row scrolled into view shows its current age,
   and that the live sessions show before the history has loaded; also sessions coming and going, a hung
   roster poll, hostile session text, wide characters, titles in non-Latin scripts, a transcript that
   moves, and a clean exit. Linux, with `tmux`; they run on a private tmux server (`tmux -L`), so your
@@ -306,6 +353,7 @@ Tests use [Pester](https://pester.dev) 5:
 Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser
 ./tests/Run-Tests.ps1                     # everything; fails if the integration tests are skipped
 ./tests/Run-Tests.ps1 -Integration Skip   # unit tests only (Windows, or no tmux)
+./tests/Compare-Versions.ps1              # main's ctop and this one, side by side (Linux, tmux)
 ```
 
 `Run-Tests.ps1` is what CI runs. It prints how many unit and integration tests passed, failed and were

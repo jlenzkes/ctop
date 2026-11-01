@@ -167,22 +167,29 @@ Describe 'ctop under a long history' -Tag Integration -Skip:$script:noTmux {
     $script:fx = New-Fixture (Join-Path $TestDrive 'h') @(for ($i = 0; $i -lt 300; $i++) { $now.AddMinutes(-1 - $rand.NextDouble() * 30 * 1440) })
   }
 
-  It 'shows the live session while the history is still loading (cold cache)' {
+  It 'shows the live session while the history is still loading (cold cache, <Mode>)' -ForEach @(
+    @{ Mode = 'one process'; CtopArgs = '-InProcess'; Starts = 4 }
+    @{ Mode = 'worker'; CtopArgs = ''; Starts = 5 }
+  ) {
     # The property, independent of machine speed: the first screen with the live session on it still
     # reads "gone N/300", so live rows did not wait for the history. (Building all 300 history rows
-    # before the first frame took ~8 s here.) A loose cap guards against startup getting slow overall.
+    # before the first frame took ~8 s here.) A loose cap guards against startup getting slow overall,
+    # counted in "starts": one `ctop -Version` (a PowerShell start and a parse of ctop.ps1). One process:
+    # 4 starts + 4 s, as agreed. The worker is a second PowerShell that parses ctop.ps1 before it can
+    # read anything: one start more, on the critical path (CTOP_TRACE shows it: ~0.4 s from launch to the
+    # worker running, against a ~0.4 s `ctop -Version` here). The worker buys keys that never wait on reads.
     Remove-Item -LiteralPath (Join-Path $fx.Cfg 'ctop-scancache.json') -ErrorAction SilentlyContinue
     $sw = [Diagnostics.Stopwatch]::StartNew(); & $script:pwsh -NoProfile -File $script:ctop -Version | Out-Null; $base = $sw.Elapsed.TotalSeconds
     $sw.Restart()
-    $s = Start-Ctop $fx '-Keep inf'
+    $s = Start-Ctop $fx "-Keep inf $CtopArgs"
     try {
       Wait-Screen $s 'live-one' 60 | Should -Not -BeNullOrEmpty
       $took = $sw.Elapsed.TotalSeconds
       $screen = Get-Screen $s
       $loading = if ($screen -match 'gone (\d+)/300') { [int]$Matches[1] } else { $null }
-      Write-Host ("    pwsh start {0:N1} s, live session shown after {1:N1} s, history then at {2}/300" -f $base, $took, $(if ($null -ne $loading) { $loading } else { 'done' }))
+      Write-Host ("    {0}: pwsh start {1:N1} s, live session shown after {2:N1} s (cap {3:N1} s), history then at {4}/300" -f $Mode, $base, $took, ($base * $Starts + 4), $(if ($null -ne $loading) { $loading } else { 'done' }))
       $loading | Should -Not -BeNullOrEmpty -Because 'the live session must show before the history has loaded'
-      $took | Should -BeLessThan ($base * 4 + 4)
+      $took | Should -BeLessThan ($base * $Starts + 4)
     } finally { Stop-Ctop $s }
   }
 
@@ -523,8 +530,9 @@ Describe 'hostile session text' -Tag Integration -Skip:$script:noTmux {
   }
 }
 
-Describe 'a snapshot (-Snapshot)' -Tag Integration -Skip:$script:noTmux {
-  # Not in tmux: a snapshot is for pipes and files, where there is no console to size the window by.
+Describe 'a snapshot (-Snapshot) when ps is slow' -Tag Integration -Skip:$script:noTmux {
+  # Not in tmux: a snapshot is for pipes and files. Linux only, for the fake slow `ps` (a shell script); the
+  # snapshot tests that run everywhere, Windows included, are in Snapshot.Tests.ps1.
   BeforeAll {
     function Invoke-Snapshot($fx, [string[]]$more) {
       $out = Join-Path $TestDrive "snap-$([guid]::NewGuid()).txt"; $err = "$out.err"
@@ -534,54 +542,26 @@ Describe 'a snapshot (-Snapshot)' -Tag Integration -Skip:$script:noTmux {
       @{ Code = [int]$code; Ms = $sw.ElapsedMilliseconds; Text = [IO.File]::ReadAllText($out); Err = [IO.File]::ReadAllText($err) }
     }
   }
-  It 'prints one frame, every session listed, as plain text within the width, and exits 0' {
-    $now = [DateTimeOffset]::UtcNow
-    $fx = New-Fixture (Join-Path $TestDrive 'snap') @(for ($i = 0; $i -lt 70; $i++) { $now.AddMinutes(-2 - $i) }) -Turns 1
-    $x = Invoke-Snapshot $fx @('-Keep', 'inf', '-MaxWidth', '120')
-    $x.Code | Should -Be 0 -Because $x.Err
-    $x.Err.Trim() | Should -BeNullOrEmpty
-    $lines = $x.Text -split "`r?`n"
-    $lines[0] | Should -Match 'ctop'
-    $x.Text | Should -Match '(?m)^live-one '
-    foreach ($i in 0, 35, 69) { $x.Text | Should -Match ('(?m)^h{0:d3} ' -f $i) -Because 'a snapshot lists every row, not a screenful' }
-    $x.Text | Should -Not -Match "[\x00-\x08\x0B-\x1F\x7F]" -Because 'plain text: no colors, no cursor movement'
-    foreach ($l in $lines) { Get-CellWidthForTest $l | Should -BeLessOrEqual 120 }
-    $lines[1] | Should -Match 'hidden \d+ cols' -Because 'at 120 columns some columns do not fit, and the strip says so'
-  }
-  It 'writes nothing: no scan cache, no closed log entries' {
-    $fx = New-Fixture (Join-Path $TestDrive 'snap-ro') @([DateTimeOffset]::UtcNow.AddMinutes(-3)) -Turns 1
-    $before = [IO.File]::ReadAllText($fx.Log)
-    $x = Invoke-Snapshot $fx @('-Keep', 'inf')
-    $x.Code | Should -Be 0 -Because $x.Err
-    Test-Path -LiteralPath (Join-Path $fx.Cfg 'ctop-scancache.json') | Should -BeFalse
-    [IO.File]::ReadAllText($fx.Log) | Should -BeExactly $before
-  }
-  It 'prices with -PricingFile instead of the built-in table' {
-    # the fixture's 25 turns of claude-sonnet-5-5 cost $0.32 at the built-in rates (worked out by hand in
-    # 'tree cost of a session that leaves'); every rate doubled, $0.64
-    $fx = New-Fixture (Join-Path $TestDrive 'snap-price') @()
-    $prices = Join-Path $TestDrive 'prices.json'
-    [IO.File]::WriteAllText($prices, '[{"Match":"sonnet-5-5","In":4,"W5":5,"W1h":8,"Read":0.2,"Out":20}]')
-    $base = Invoke-Snapshot $fx @('-MaxWidth', '400')
-    $base.Text | Should -Match '(?m)^live-one .*\$0\.32\b' -Because $base.Err
-    $x = Invoke-Snapshot $fx @('-MaxWidth', '400', '-PricingFile', "'$prices'")
-    $x.Code | Should -Be 0 -Because $x.Err
-    $x.Text | Should -Match '(?m)^live-one .*\$0\.64\b'
-  }
-  It 'stops at once with exit 2 and the reason when the pricing file is wrong' {
-    $fx = New-Fixture (Join-Path $TestDrive 'snap-badprice') @()
-    $prices = Join-Path $TestDrive 'bad-prices.json'
-    [IO.File]::WriteAllText($prices, '[{"Match":"sonnet-","In":1,"W5":1,"W1h":1,"Out":1}]')
-    $x = Invoke-Snapshot $fx @('-PricingFile', "'$prices'")
-    $x.Code | Should -Be 2
-    $x.Err | Should -Match '-PricingFile: pricing file entry 1: Read'
-  }
-  It 'says why when the roster cannot be read, and still exits' {
-    $fx = New-Fixture (Join-Path $TestDrive 'snap-bad') @() -NoLive
-    Set-Content -LiteralPath $fx.Fake -Value "#!/bin/sh`necho not-json"
-    $x = Invoke-Snapshot $fx @()
-    $x.Text | Should -Match "claude agents --json' failed"
-    $x.Code | Should -Be 0
+  It 'waits for the process table, so a running job shows (a ps that takes <Delay> s)' -ForEach @(@{ Delay = 3 }, @{ Delay = 30 }) {
+    # the live session (pid: this test process) runs a Bash tool command: a child sourcing a shell snapshot
+    $fx = New-Fixture (Join-Path $TestDrive "snap-ps$Delay") @()
+    $realPs = (Get-Command ps -CommandType Application | Select-Object -First 1).Source
+    $bin = Split-Path -Parent $fx.Fake
+    [IO.File]::WriteAllText((Join-Path $bin 'ps'), "#!/bin/sh`nsleep $Delay`nexec '$realPs' `"`$@`"`n"); & chmod +x (Join-Path $bin 'ps')
+    # (no exec: the shell must stay, its command line naming the snapshot, as Claude Code's Bash tool does)
+    $psi = [Diagnostics.ProcessStartInfo]::new('bash'); foreach ($a in '-c', 'sleep 120; true /tmp/shell-snapshots/snapshot-bash-1.sh') { $psi.ArgumentList.Add($a) }
+    $job = [Diagnostics.Process]::Start($psi)
+    try {
+      $sw = [Diagnostics.Stopwatch]::StartNew()
+      $x = Invoke-Snapshot $fx @('-MaxWidth', '200')
+      $x.Code | Should -Be 0 -Because $x.Err
+      if ($Delay -lt 10) {
+        $x.Text | Should -Match '(?m)^live-one +.*awaiting' -Because 'the job is running; the snapshot must not call the session idle'
+      } else {
+        $sw.Elapsed.TotalSeconds | Should -BeLessThan 25 -Because 'the wait is bounded'
+        $x.Text | Should -Match 'process data .*not read' -Because 'it says the job data is missing rather than show none'
+      }
+    } finally { try { $job.Kill() } catch {} }
   }
 }
 
@@ -629,6 +609,48 @@ Describe 'copying a contact' -Tag Integration -Skip:$script:noTmux {
       $sw.Restart()
       while ($sw.Elapsed.TotalSeconds -lt 5 -and -not ((& $buffers) -contains '11111111-1111-4111-8111-111111111111')) { Start-Sleep -Milliseconds 100 }
       (& $buffers) | Should -Contain '11111111-1111-4111-8111-111111111111'
+    } finally {
+      & tmux set-option -g set-clipboard $prev
+      if ($s) { Stop-Ctop $s }; Stop-Ctop $hold
+    }
+  }
+}
+
+Describe 'copy keys while the selection moves' -Tag Integration -Skip:$script:noTmux {
+  BeforeAll {
+    function Get-Copied { ((& tmux list-buffers -F '#{buffer_name}' 2>$null) | ForEach-Object { (& tmux show-buffer -b $_ 2>$null) -join "`n" }) }
+    # the session id of each row, in screen order (history row hNNN is the fixture's session NNN)
+    function Get-RowIds([string]$s) {
+      @((Get-Screen $s) -split "`n" | ForEach-Object {
+        if ($_ -match '^live-one ') { '11111111-1111-4111-8111-111111111111' }
+        elseif ($_ -match '^h(\d{3}) ') { $i = [int]$Matches[1]; ('{0:x8}-0000-4000-8000-{1:x12}' -f $i, $i) }
+      })
+    }
+  }
+  It 'copies the session that was selected when y was pressed (<Mode>)' -ForEach @(@{ Mode = 'worker'; CtopArgs = '' }, @{ Mode = 'one process'; CtopArgs = '-InProcess' }) {
+    $now = [DateTimeOffset]::UtcNow
+    $fx = New-Fixture (Join-Path $TestDrive "cp-$($CtopArgs.Length)") @(for ($i = 0; $i -lt 5; $i++) { $now.AddMinutes(-2 - $i) }) -Turns 1
+    $script:n++; $hold = "ctop-it-$PID-$($script:n)-hold"
+    & tmux new-session -d -s $hold -x 80 -y 10 'sleep 120'
+    $prev = & tmux show-options -gv set-clipboard; $s = $null
+    try {
+      & tmux set-option -g set-clipboard on
+      $s = Start-Ctop $fx "-Keep inf $CtopArgs"
+      Wait-Screen $s '(?m)^h004 ' 30 | Should -Not -BeNullOrEmpty
+      Start-Sleep -Milliseconds 800
+      $ids = Get-RowIds $s
+      $ids.Count | Should -Be 6
+      # one burst: the copy key comes before any frame for the row it was pressed on
+      & tmux send-keys -t $s Home Down y Down Down
+      $sw = [Diagnostics.Stopwatch]::StartNew()
+      while ($sw.Elapsed.TotalSeconds -lt 5 -and -not ((Get-Copied) -match 'claude --resume')) { Start-Sleep -Milliseconds 100 }
+      @(Get-Copied) | Should -Contain "claude --resume $($ids[1])" -Because 'y was pressed on the second row'
+      @(Get-Copied) | Should -Not -Contain "claude --resume $($ids[3])" -Because 'not on the row the selection ended on'
+      # and just before quitting
+      & tmux send-keys -t $s Home Down Down y q
+      $x = Wait-Exit $s 10
+      Test-CleanExit $x | Should -BeTrue
+      @(Get-Copied) | Should -Contain "claude --resume $($ids[2])" -Because 'a copy asked for just before q still happens'
     } finally {
       & tmux set-option -g set-clipboard $prev
       if ($s) { Stop-Ctop $s }; Stop-Ctop $hold
@@ -730,32 +752,55 @@ Describe 'the worker process' -Tag Integration -Skip:$script:noTmux {
       return $null
     }
   }
-  It 'quits at once while a large transcript is still being read; in one process the key waits for it' {
-    # a ~70 MB live transcript: its first scan is one long frame (about 5 s here)
-    $fx = New-Fixture (Join-Path $TestDrive 'busy') @()
-    $sid = '11111111-1111-4111-8111-111111111111'
-    New-Transcript (Join-Path $fx.Cfg "projects/-w/$sid.jsonl") $sid 30000   # the live session's
-    $cache = Join-Path $fx.Cfg 'ctop-scancache.json'
-    $ms = @{}
-    foreach ($mode in '-InProcess', '') {
-      Remove-Item -LiteralPath $cache -ErrorAction SilentlyContinue   # each run starts cold
-      $s = Start-Ctop $fx $mode
-      try {
-        Start-Sleep -Milliseconds 1500                                # running, and into that first frame
-        if (-not $mode) {                                             # the worker is busy: a key is still acknowledged
-          & tmux send-keys -t $s '+'
-          Wait-Screen $s 'updating…' 2 | Should -Not -BeNullOrEmpty
-        }
-        $sw = [Diagnostics.Stopwatch]::StartNew()
+  It 'takes keys and quits while reading a transcript never ends; in one process it cannot (<Mode>)' -ForEach @(
+    @{ Mode = 'worker'; CtopArgs = '' }, @{ Mode = 'one process'; CtopArgs = '-InProcess' }
+  ) {
+    # Deterministic, not timed: the live session's transcript is a named pipe nobody writes to, so opening it
+    # never returns. Whatever reads transcripts is stuck for good; the question is only whether keys still work.
+    $fx = New-Fixture (Join-Path $TestDrive "fifo-$($CtopArgs.Length)") @()
+    $t = Join-Path $fx.Cfg 'projects/-w/11111111-1111-4111-8111-111111111111.jsonl'
+    Remove-Item -LiteralPath $t; & mkfifo $t
+    $s = Start-Ctop $fx $CtopArgs
+    try {
+      Start-Sleep -Seconds 3                                         # well into the stuck read
+      if ($Mode -eq 'worker') {
+        Wait-Screen $s 'ctop .*starting' 5 | Should -Not -BeNullOrEmpty -Because 'the display process is up, the worker is stuck'
+        (Get-Screen $s) | Should -Not -Match 'updating' -Because 'no key yet: nothing to acknowledge (the negative control)'
+        & tmux send-keys -t $s '+'
+        Wait-Screen $s 'updating…' 3 | Should -Not -BeNullOrEmpty -Because 'a key, taken while the worker is stuck'
         & tmux send-keys -t $s q
-        $x = Wait-Exit $s 60
-        $ms[$mode] = $sw.ElapsedMilliseconds
-        Test-CleanExit $x | Should -BeTrue -Because "a clean exit ($mode): $($x.Screen) $($x.Stderr)"
-      } finally { Stop-Ctop $s }
+        $x = Wait-Exit $s 5
+        $x | Should -Not -BeNullOrEmpty -Because 'q quits whatever the worker is doing'
+        Test-CleanExit $x | Should -BeTrue
+      } else {
+        & tmux send-keys -t $s q
+        Wait-Exit $s 8 | Should -BeNullOrEmpty -Because 'one process stuck in a read never gets to the key: the control'
+      }
+    } finally {
+      # let whatever is stuck on the pipe go (an in-process ctop, or the worker left behind): a read-write
+      # open never blocks, and counts as the writer the stuck open is waiting for; closing it ends the file
+      try { [IO.File]::Open($t, 'Open', 'ReadWrite', 'ReadWrite').Dispose() } catch {}
+      Stop-Ctop $s
     }
-    Write-Host ("    q -> exit: one process {0} ms, with the worker {1} ms" -f $ms['-InProcess'], $ms[''])
-    $ms['-InProcess'] | Should -BeGreaterThan 2500 -Because 'the workload must be slow enough to tell the two apart'
-    $ms[''] | Should -BeLessThan 1500
+  }
+  It 'keeps its worker when started from a PowerShell whose location is not the process directory, with relative paths' {
+    # As when you Set-Location in an interactive pwsh, then run ctop: PowerShell's location and the
+    # process's working directory differ. A relative -PricingFile resolved against the wrong one killed
+    # the worker at start (ctop then ran in one process).
+    $fx = New-Fixture (Join-Path $TestDrive 'relpath') @()
+    $here = Join-Path $TestDrive 'relpath/where-you-are'; New-Item -ItemType Directory -Force -Path $here | Out-Null
+    [IO.File]::WriteAllText((Join-Path $here 'prices.json'), '[{"Match":"sonnet-5-5","In":4,"W5":5,"W1h":8,"Read":0.2,"Out":20}]')
+    $script:n++; $s = "ctop-it-$PID-$($script:n)"
+    & tmux new-session -d -s $s -x 200 -y 50 'sleep 600'
+    & tmux resize-window -t $s -x 200 -y 50 2>$null
+    $inner = "Set-Location '$here'; & '$($script:ctop)' -ClosedLog '$($fx.Log)' -NoColor -PricingFile ./prices.json"
+    & tmux respawn-pane -k -t $s "cd /; $($fx.Env) '$($script:pwsh)' -NoProfile -Command `"$inner`"; echo CTOP-EXITED `$?; sleep 60"
+    try {
+      Wait-Screen $s '(?m)^live-one .*\$0\.64\b' 30 | Should -Not -BeNullOrEmpty -Because 'the file''s doubled rates: $0.64'
+      Start-Sleep -Seconds 2
+      (Get-Screen $s) | Should -Not -Match 'worker stopped|running in one process'
+      Get-WorkerPid $s | Should -Not -BeNullOrEmpty -Because 'the worker is still running'
+    } finally { Stop-Ctop $s }
   }
   It 'carries on in one process when the worker dies, and says so' {
     $fx = New-Fixture (Join-Path $TestDrive 'fallback') @()

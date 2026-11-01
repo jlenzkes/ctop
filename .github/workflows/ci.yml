@@ -57,6 +57,15 @@ jobs:
           Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser -Force -SkipPublisherCheck
           ./tests/Run-Tests.ps1 -Integration ${{ runner.os == 'Linux' && 'Expect' || 'Skip' }}
 
+      # The same inputs through main's ctop and this one, side by side (tests/Compare-Versions.ps1); fails if
+      # this one fails a check. main's results are printed for comparison.
+      - name: Compare with main
+        if: runner.os == 'Linux'
+        run: |
+          git fetch --depth=1 origin main
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./tests/Compare-Versions.ps1 -Base FETCH_HEAD
+
   # Windows PowerShell 5.1, the version built into Windows: the script as committed (UTF-8 with BOM,
   # which 5.1 needs to read its non-ASCII characters), and the unit tests. The end-to-end tests need
   # tmux, so they run on Linux only.

@@ -261,8 +261,8 @@ Describe 'transcript identity is case-sensitive where the filesystem is' {
 
 Describe 'Get-LastAction: a question for you (AskUserQuestion)' {
   # The question's shape is the tool's own input schema: questions[] of question, header, options[] of
-  # label/description, multiSelect. What an answer looks like is not assumed: any newer user entry (the
-  # tool result) means it is no longer waiting.
+  # label/description, multiSelect. It is answered by a newer tool result for its call id (the API requires
+  # that link), or by a newer prompt; a result for another call in the same reply does not answer it.
   BeforeAll {
     $script:PriceVer = 2; $script:ScanVer = 2
     $ask = @{ type = 'tool_use'; id = 'toolu_q1'; name = 'AskUserQuestion'; input = @{ questions = @(
@@ -292,6 +292,22 @@ Describe 'Get-LastAction: a question for you (AskUserQuestion)' {
   It 'no longer shows it as waiting once a newer entry answers it' {
     $answer = @{ type = 'user'; sessionId = 's'; timestamp = '2026-10-31T05:20:00Z'; message = @{ role = 'user'; content = @(@{ type = 'tool_result'; tool_use_id = 'toolu_q1'; content = 'answered' }) } }
     $a = Get-LastAction (Write-T 'answered' @($asked, $answer)) 'q2'
+    $a.Last | Should -Match '^asked: Which database'
+    @($a.Questions).Count | Should -Be 0
+  }
+  It 'keeps waiting when another call made alongside the question gets its result first' {
+    # one reply, two tool calls: the question and a Read. The Read's result comes in; the question is unanswered.
+    $two = @{ type = 'assistant'; sessionId = 's'; timestamp = '2026-10-31T05:19:00Z'; message = @{ role = 'assistant'; model = 'm'
+              content = @($ask, @{ type = 'tool_use'; id = 'toolu_read1'; name = 'Read'; input = @{ file_path = '/x' } }) } }
+    $readDone = @{ type = 'user'; sessionId = 's'; timestamp = '2026-10-31T05:19:01Z'; message = @{ role = 'user'; content = @(@{ type = 'tool_result'; tool_use_id = 'toolu_read1'; content = 'file text' }) } }
+    $a = Get-LastAction (Write-T 'parallel' @($two, $readDone)) 'q4'
+    $a.Last | Should -Match '^asks: Which database'
+    @($a.Questions).Count | Should -Be 2
+    $a.State | Should -Be 'working' -Because 'the same as when the question is the newest entry'
+  }
+  It 'no longer shows it as waiting once a newer prompt comes in' {
+    $prompt = @{ type = 'user'; sessionId = 's'; timestamp = '2026-10-31T05:21:00Z'; message = @{ role = 'user'; content = 'never mind, use SQLite' } }
+    $a = Get-LastAction (Write-T 'moved-on' @($asked, $prompt)) 'q5'
     $a.Last | Should -Match '^asked: Which database'
     @($a.Questions).Count | Should -Be 0
   }

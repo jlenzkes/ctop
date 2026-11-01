@@ -30,6 +30,7 @@ Describe 'Import-PricingFile' {
     @{ Name = 'a negative rate';       Json = '[{"Match":"x","In":-1,"W5":1,"W1h":1,"Read":1,"Out":1}]';         Msg = '*entry 1*In*' }
     @{ Name = 'a rate that is text';   Json = '[{"Match":"x","In":"cheap","W5":1,"W1h":1,"Read":1,"Out":1}]';    Msg = '*entry 1*In*' }
     @{ Name = 'a broken regex';        Json = '[{"Match":"son(net","In":1,"W5":1,"W1h":1,"Read":1,"Out":1}]';    Msg = '*entry 1*Match*' }
+    @{ Name = 'an infinite rate';      Json = '[{"Match":"x","In":1e400,"W5":1,"W1h":1,"Read":1,"Out":1}]';      Msg = '*entry 1*In*' }
     @{ Name = 'a zero MaxPrompt';      Json = '[{"Match":"x","MaxPrompt":0,"In":1,"W5":1,"W1h":1,"Read":1,"Out":1}]'; Msg = '*entry 1*MaxPrompt*' }
   ) {
     $f = if ($null -eq $Json) { Join-Path $TestDrive 'nope.json' } else { Write-Prices "bad-$([guid]::NewGuid()).json" $Json }
