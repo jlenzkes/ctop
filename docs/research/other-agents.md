@@ -83,7 +83,19 @@ This is VS Code's chat format, not Claude Code's.
 
 The chat runs inside VS Code's own process, with no subprocess of its own.
 
-**Not looked at:** which fields hold the model name, token use and cost, and the `.jsonl` mutation-log format (`chatSessionOperationLog.ts`, `objectMutationLog.ts`).
+**Verified** (`chatSessionOperationLog.ts`, `requestSchema`): each saved request carries:
+- `timestamp`, `modelId`, `modelState`;
+- `promptTokens`, `completionTokens`, `contextUsage` (`currentTokens` / `tokenLimit`);
+- `copilotCredits` and `sessionCopilotCredits`.
+
+Cost is in **Copilot credits, not dollars** (`IChatUsage` in `chatService.ts`). Its comment says summing `copilotCredits` across responses "is only ever a lower bound on the session; prefer `sessionCopilotCredits`".
+
+**Verified** (`objectMutationLog.ts`, `EntryKind`): the `.jsonl` is a mutation log, one JSON entry per line.
+- The first entry is `{"kind":0,"v":<whole session>}`.
+- Then `{"kind":1,"k":<path>,"v":…}` (set), `{"kind":2,"k":<path>,"v":[…],"i":n}` (push onto an array, cutting it at `i` first if given), and `{"kind":3,"k":<path>}` (delete).
+- A path is a list of keys and array indexes.
+
+**Inference:** ctop can rebuild the current session by replaying the entries in order, and can do it incrementally, from the last byte read, as it already does for Claude Code transcripts.
 
 **Not looked at:** the Copilot CLI sessions VS Code also shows (`extensions/copilot/src/extension/chatSessions/copilotcli/`).
 
@@ -117,7 +129,23 @@ So there is a live signal, close to what ctop gets from Claude Code, with a `pid
 - If it cannot be opened, Cline falls back to a file backend (`FileSessionService`: `<sessions dir>/sessions.index.json`).
 - It logs `session_backend_fallback`.
 
-**Verified** (`session-manifest.ts`): each session also has a manifest. It holds `pid`, `status`, `started_at`, `ended_at`, `provider`, `model`, `cwd`, and `messages_path`.
+**Verified** (`session-manifest.ts`, `services/session-artifacts.ts`): each session also has a manifest. It holds `pid`, `status`, `started_at`, `ended_at`, `provider`, `model`, `cwd`, and `messages_path`.
+- Paths: `<sessions dir>/<id>/<id>.json` (the manifest), `<id>.messages.json` and `<id>.compaction.json`.
+
+**Verified** (`session/services/persistence-service.ts`, `updateSessionStatus`): a status change updates only the database row. The manifest is written:
+- at creation;
+- when the prompt or title changes, keeping the old status;
+- when Cline marks a dead `running` session `failed`.
+
+So **a manifest's `status` is not live**; the live status is only in `sessions.db`. A manifest's `pid` is still useful.
+
+**Verified** (same file, `reconcileDeadRunningSession`): Cline itself marks a `running` session whose `pid` is no longer alive as `failed`.
+
+**Verified** (`sdk/packages/shared/src/db/sqlite-db.ts:355`): the shared SQLite opener sets `PRAGMA journal_mode = WAL`. It uses `bun:sqlite` under Bun.
+- **Inference:** `sessions.db` goes through that opener (the session store imports `@cline/shared/db`).
+- So recent changes can sit in `sessions.db-wal`, and any reader must be a real SQLite engine. A hand-written file parser would miss them.
+
+**Not found:** token use or cost in `session/stores/conversation-store.ts` or `session/services/message-builder.ts`. Where Cline keeps them is still open.
 
 **Unverified:** that the VS Code extension really ends up on the SQLite backend on Windows, where it runs inside VS Code's extension host. Settle it with the first step above.
 
@@ -128,7 +156,7 @@ So there is a live signal, close to what ctop gets from Claude Code, with a `pid
 
 That is a design decision to make first.
 
-**Not looked at:** token use and cost per session; the hub (`sdk/packages/core/src/hub/discovery/instance-lock.ts`).
+**Not looked at:** the hub (`sdk/packages/core/src/hub/discovery/instance-lock.ts`), which might list running Cline processes.
 
 ## Roo Code
 
@@ -136,7 +164,22 @@ That is a design decision to make first.
 - `api_conversation_history.json`, `ui_messages.json`, `task_metadata.json`;
 - `history_item.json`, and an `_index.json`.
 
-**Unverified:** where those files live, and whether Roo has a live "running" signal. Roo forked from Cline before Cline's rewrite above, so it may differ; that is an inference.
+**Verified** (`RooCodeInc/Roo-Code` at `b867ec9`, 2026-05-15, the newest commit on `main` when cloned on 2026-11-01):
+- **Tasks:** `src/utils/storage.ts` puts them in `<base>/tasks/<taskId>/`. `<base>` is the extension's VS Code global storage, or the `customStoragePath` setting if set.
+- **History:** `src/core/task-persistence/TaskHistoryStore.ts` keeps each task's history item at `tasks/<taskId>/history_item.json`, with an index at `tasks/_index.json` "as a cache for fast list reads at startup".
+- **History item** (`packages/types/src/history.ts`): `id`, `ts`, `task`, `tokensIn`, `tokensOut`, `cacheWrites`, `cacheReads`, `totalCost`, `workspace`, `mode`, and `status` (`active` / `completed` / `delegated`). It has no `pid`.
+- **Asks** (`packages/types/src/message.ts`): `ui_messages.json` holds Roo's messages. An `ask` message whose type is in `interactiveAsks` (`followup`, `command`, `tool`, `use_mcp_server`) is one that waits on you; there is also an `idleAsks` list.
+
+**Inference:**
+- The newest entry in `ui_messages.json` tells "waiting on you" (an interactive ask) from "working".
+- `status: active` tells an open task from a finished one.
+- With no `pid`, "is it still running" must come from VS Code running plus how recently the task's files changed.
+
+**Unverified:**
+- how often `ui_messages.json` and `history_item.json` are rewritten during a turn;
+- the global storage folder name. The marketplace id in the README is `RooVeterinaryInc.roo-cline`; the folder is probably that, lowercased, but I haven't checked.
+
+**Observation:** `main`'s newest commit was 2026-05-15, while Cline's was 2026-10-30. I haven't checked whether Roo is still maintained.
 
 ## A correction
 
@@ -144,3 +187,40 @@ An earlier reply said supporting these would mean "no live 'is it running?' sign
 - Cline stores `status` and `pid`.
 - Copilot chat stores `modelState`.
 - The Claude agent writes Claude Code transcripts.
+
+## Proposed design (a proposal, not decided)
+
+**Shape:** one row per session whatever made it, with an AGENT column (`claude`, `copilot`, `cline`, `roo`) and a key to cycle which agents are shown. Each agent is a reader that returns the same row fields ctop has now:
+- id, name/title, STATE (working / waiting on you / idle / gone), pid if any, cwd, model;
+- tokens, context, cost (with its unit), last action, start and update times;
+- the file to peek at.
+
+The existing Claude Code reader stays as it is.
+
+**Per agent, cheapest first:**
+
+1. **Copilot's Claude agent.** Probably nearly free: its transcripts are ordinary Claude Code transcripts (inference, above). The work is labelling them, from the `AI_AGENT=github_copilot_vscode_agent` marker on the CLI process (Linux: `/proc/<pid>/environ`; Windows: unverified how). Blocked on the first step: does it appear in `claude agents --json`?
+
+2. **Copilot chat.**
+   - Read `workspaceStorage/*/chatSessions/*.jsonl` (and `.json`) changed within the keep window, replaying the mutation log incrementally.
+   - STATE comes from the newest request's `modelState`. Since the file can be up to about a minute behind, show its age, and treat `Pending` as gone if no VS Code process is running.
+   - Cost is in Copilot credits, shown as such, never mixed into dollar totals.
+   - **Unverified:** where VS Code's user data folder is on each OS. I believe Windows is `%APPDATA%\Code\User`, Linux `~/.config/Code/User`, macOS `~/Library/Application Support/Code/User`, plus Insiders/VSCodium variants. That is from memory; check the VS Code docs or source before relying on it.
+
+3. **Roo.**
+   - Read `tasks/_index.json` and each task's `history_item.json` (tokens, cost in dollars, `status`).
+   - "Waiting on you" comes from the newest `ui_messages.json` entry.
+   - "Alive" comes from VS Code running plus recent file changes, since there is no pid.
+
+4. **Cline.** The richest source (`status` and `pid`), but its live status is only in WAL-mode SQLite, which PowerShell can't read by itself. Options:
+   - a. Use the `sqlite3` command if it's on PATH, else fall back to (c). No new dependency for ctop.
+   - b. Bundle or download `Microsoft.Data.Sqlite` with its native library. Full fidelity, but ctop stops being one self-contained file.
+   - c. Manifests only: `pid` alive gives "open", and `<id>.messages.json` changes give "active". No running/idle split.
+
+   **Recommendation:** (a) with (c) as the fallback, and say on screen which one is in use.
+
+**Before any code:**
+- Run the first step (above).
+- Check where Cline keeps tokens and cost.
+- Check VS Code's user data paths from the source.
+- Capture one real file from each agent as a test fixture; until then, every reader is written against source reading only.
