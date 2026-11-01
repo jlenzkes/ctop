@@ -107,7 +107,12 @@ A second request in the same Copilot chat. Snapshots at 18:59:05Z (working) and 
   - No running process started between 18:55:30Z and 18:56:30Z.
   - So an already-running VS Code process (the Cline extension inside it) opened the database at 18:56:03.
   - At 18:43Z the files did not exist, so the extension does not keep the database open all the time: it opened it at some later moment.
-- **Inference:** the two PIDs are the extension hosts of two VS Code windows; their start times and process types would confirm it.
+- **Verified** (the user's `Get-CimInstance Win32_Process` output): both PIDs are VS Code extension hosts. Each has `--type=utility --utility-sub-type=node.mojom.NodeService`, and both have the same parent, 39412, VS Code's main process.
+  - **31248** started 2026-10-30 21:25:26 local (2026-10-31T04:25:26Z).
+  - **52584** started 2026-11-01 09:55:58 local (16:55:58Z).
+  - So the database was opened at 18:56:03Z by an extension host that had already been running for hours. Cline does not open it when it starts.
+- **A coincidence, not explained:** 18:56:03Z is 2 h 5 s after 52584 started. A two-hour timer in the extension is a guess. A search of Cline's file names found no reconciler, sweeper or heartbeat module, and the code was not read further.
+- **For ctop** (inference): an extension host holding `sessions.db` open is a sign Cline is active in VS Code, but not the only one. The live status still has to come from the database (`cline history --json`, or `sqlite3` where installed).
 - **Earlier guess, now verified:** the extension opened the database at 18:56:03. It was running then, and its source has a dead-session reconciler that opens the database. Unverified.
 - **To settle it:** compare `Get-Item ~\.cline\data\db\sessions.db-*` before and 30 s after "Developer: Reload Window".
 - **For ctop** (inference): wherever VS Code runs with Cline installed, Cline is running. A Cline session's `pid` should then name a live process while VS Code is open.
