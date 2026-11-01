@@ -146,6 +146,11 @@ The watch ran 19:42:07–19:45:12Z while the user gave Cline a small task.
     - Where: the session-target button at the bottom left of the Chat view ("Local") opens a list of harnesses: **Local**, **Cloud** (sign in), **Copilot**, **Codex**, **Claude**, and "Learn about harnesses…".
     - Choosing **Claude** shows "Download the Claude Agent. To use the Claude Agent, we need to download the Claude Agent SDK" with a **Download** button. The input reads "Chat with Claude", "No models available", and the footer shows "Claude" and "Ask Before Edits".
     - This matches the source: the SDK is fetched by VS Code (`claudeAgentSdkService.ts`), not taken from an installed Claude Code.
+    - **Verified** (the user's screenshot, 11:58 local, after the SDK download and a VS Code restart): the panel then reads "Choose how you want to use Claude. Sign in to GitHub to use GitHub Copilot models or reload the configuration if you have set up Claude elsewhere". "No models available"; clicking "reload the configuration" changed nothing.
+    - **Verified** (`claudeTransportMode.ts` at `1306698`): the agent runs in one of two modes. **proxy**: through Copilot, needs a GitHub sign-in, preferred when signed in. **native**: the user's own Claude credentials, no GitHub.
+      - Native mode is used only when the SDK's `accountInfo()` reports a credential: a `tokenSource` other than `none`, an `apiKeySource`, or a third-party `apiProvider` (Bedrock, Vertex, a gateway).
+      - The file says a `claude login` credential can be invisible to the environment and to `~/.claude/settings.json`, so only the SDK's own report counts.
+    - **Inference:** "reload the configuration" asks the SDK again, and on that machine it still reports no credential. Copilot's own Anthropic key (in VS Code's secret storage) is not one of the credentials the SDK looks for.
     - The new-session menu (top right, the `+` dropdown) offers New Chat, New Chat Editor, New Chat Window and **New Copilot CLI Session**; it does not list Claude. Copilot CLI sessions are another harness, not looked at.
 - **No VS Code Claude agent transcript appeared:** the Claude Code transcripts that changed during the watch were all from the user's own Claude Code extension session (`entrypoint` `claude-vscode`, project `c--dev-src-genai-mil`, with subagents).
 - **Copilot during the watch:**
