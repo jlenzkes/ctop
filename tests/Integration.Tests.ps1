@@ -408,7 +408,7 @@ Describe 'session lifecycle' -Tag Integration -Skip:$script:noTmux {
     $s = Start-Ctop $fx '-Keep inf -All'
     try {
       Wait-Screen $s '(?m)^h000 ' 30 | Should -Not -BeNullOrEmpty
-      (Get-Screen $s) | Should -Match '(?m)^h001 '
+      Wait-Screen $s '(?m)^h001 ' 10 | Should -Not -BeNullOrEmpty   # gone rows are built newest first, a few per frame
     } finally { Stop-Ctop $s }
   }
 }
@@ -714,6 +714,61 @@ Describe 'tree cost of a session that leaves' -Tag Integration -Skip:$script:noT
       $lines = [IO.File]::ReadAllLines($agent)
       [IO.File]::AppendAllLines($agent, [string[]]($lines * 4))
       Wait-Screen $s (& $tree 25 25) 10 | Should -Not -BeNullOrEmpty -Because 'the gone row follows its subagent transcripts'
+    } finally { Stop-Ctop $s }
+  }
+}
+
+Describe 'the worker process' -Tag Integration -Skip:$script:noTmux {
+  BeforeAll {
+    # the processes behind a tmux session: its shell, the ctop it runs, and that ctop's children
+    function Get-Children([int]$ppid) { @(& ps -o pid= --ppid $ppid 2>$null | ForEach-Object { [int]$_.Trim() } | Where-Object { $_ }) }
+    function Get-WorkerPid([string]$s) {
+      $shell = [int](& tmux display -p -t $s '#{pane_pid}')
+      foreach ($c in (Get-Children $shell)) {
+        foreach ($w in (Get-Children $c)) { if ((& ps -o args= -p $w) -match '-Worker') { return $w } }
+      }
+      return $null
+    }
+  }
+  It 'quits at once while a large transcript is still being read; in one process the key waits for it' {
+    # a ~70 MB live transcript: its first scan is one long frame (about 5 s here)
+    $fx = New-Fixture (Join-Path $TestDrive 'busy') @()
+    $sid = '11111111-1111-4111-8111-111111111111'
+    New-Transcript (Join-Path $fx.Cfg "projects/-w/$sid.jsonl") $sid 30000   # the live session's
+    $cache = Join-Path $fx.Cfg 'ctop-scancache.json'
+    $ms = @{}
+    foreach ($mode in '-InProcess', '') {
+      Remove-Item -LiteralPath $cache -ErrorAction SilentlyContinue   # each run starts cold
+      $s = Start-Ctop $fx $mode
+      try {
+        Start-Sleep -Milliseconds 1500                                # running, and into that first frame
+        if (-not $mode) {                                             # the worker is busy: a key is still acknowledged
+          & tmux send-keys -t $s '+'
+          Wait-Screen $s 'updating…' 2 | Should -Not -BeNullOrEmpty
+        }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        & tmux send-keys -t $s q
+        $x = Wait-Exit $s 60
+        $ms[$mode] = $sw.ElapsedMilliseconds
+        Test-CleanExit $x | Should -BeTrue -Because "a clean exit ($mode): $($x.Screen) $($x.Stderr)"
+      } finally { Stop-Ctop $s }
+    }
+    Write-Host ("    q -> exit: one process {0} ms, with the worker {1} ms" -f $ms['-InProcess'], $ms[''])
+    $ms['-InProcess'] | Should -BeGreaterThan 2500 -Because 'the workload must be slow enough to tell the two apart'
+    $ms[''] | Should -BeLessThan 1500
+  }
+  It 'carries on in one process when the worker dies, and says so' {
+    $fx = New-Fixture (Join-Path $TestDrive 'fallback') @()
+    $s = Start-Ctop $fx '-Keep 15m'
+    try {
+      Wait-Screen $s '(?m)^live-one ' 30 | Should -Not -BeNullOrEmpty
+      $w = Get-WorkerPid $s
+      $w | Should -Not -BeNullOrEmpty -Because 'ctop runs a worker by default'
+      & kill -9 $w
+      Wait-Screen $s 'worker stopped .*running in one process' 10 | Should -Not -BeNullOrEmpty
+      Wait-Screen $s '(?m)^live-one ' 10 | Should -Not -BeNullOrEmpty
+      & tmux send-keys -t $s '+'                                      # and it still answers keys
+      Wait-Screen $s 'keep 30m' 5 | Should -Not -BeNullOrEmpty
     } finally { Stop-Ctop $s }
   }
 }

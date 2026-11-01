@@ -87,15 +87,28 @@
   "MaxPrompt" (the row applies only up to that many prompt tokens). Every rate is required. Editing
   the file recomputes cached costs.
 
+.PARAMETER InProcess
+  Run as one process. By default ctop starts a second, hidden PowerShell process (a worker) that reads
+  transcripts, the roster and the process table and builds frames, while this one only reads keys and
+  draws: a slow frame (a large transcript read the first time, say) never holds up keys. If the worker
+  cannot start or stops, ctop carries on in one process by itself and says so.
+
 .PARAMETER Snapshot
   Print one frame as plain text and exit: every session listed (not a screenful), no colors, no keys,
   nothing written (no scan cache, no closed-log entries). For a pipe, a file, or sharing what ctop
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.10.31.12 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.01.1 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.11.01.1
+    - two processes: this one reads keys and draws; a hidden worker (the same script, -Worker) reads
+      transcripts, the roster and the process table and builds frames. A slow frame no longer holds up
+      keys: q quits at once while the first read of a ~70 MB transcript takes seconds (it waited for the
+      whole frame before), and a key pressed meanwhile shows "updating…". If the worker cannot start or
+      stops, ctop carries on in one process and says why. -InProcess runs as one process. From cxtop
+    - frame on the strip is now the time to build a frame; drawing is the display process's
   2026.10.31.12
     - -PricingFile: your own price table in place of the built-in one (JSON; every rate required; a bad
       file stops ctop with exit 2 and the reason). Cached costs are versioned by the file's content, so
@@ -293,10 +306,23 @@ param(
   [switch]$NoMouse,
   [string]$PricingFile = '',
   [switch]$Snapshot,
-  [switch]$Version
+  [switch]$InProcess,
+  [switch]$Version,
+  [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.10.31.12'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.11.01.1'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
+# A worker (see "worker process" near the end) is started with no parameters but -Worker: the display
+# process sends the ones it was given as the first line on the worker's input.
+if ($Worker) {
+  $settings = ConvertFrom-Json -InputObject ([Console]::In.ReadLine())
+  foreach ($p in @($settings.PSObject.Properties)) { Set-Variable -Name $p.Name -Value $p.Value -Scope Script; $PSBoundParameters[$p.Name] = $p.Value }
+}
+# Worker: builds frames for a display process. InProcess: one process does it all (-InProcess, -Snapshot,
+# or a worker that failed). Frontend (the default): keys and drawing here, everything else in a worker.
+$script:Mode = if ($Worker) { 'Worker' } elseif ($Snapshot -or $InProcess) { 'InProcess' } else { 'Frontend' }
+$script:ScriptPath = $PSCommandPath
+$script:BoundParams = @{} + $PSBoundParameters
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -356,9 +382,11 @@ function Clear-Screen {
 # ---- window size ----------------------------------------------------------------------------
 # Everything that sizes the screen asks here. A snapshot has no window (its output may be a pipe, where
 # the console reports -1): it is as wide as -MaxWidth (else the window, else 200) and as tall as needed.
-$script:SnapSize = $null
-function Get-WindowWidth { if ($script:SnapSize) { $script:SnapSize.W } else { [Console]::WindowWidth } }
-function Get-WindowHeight { if ($script:SnapSize) { $script:SnapSize.H } else { [Console]::WindowHeight } }
+# A worker has no window either: it draws at the size the display process sends with each request.
+$script:FixedSize = $null
+$script:ReadOnly = $false   # -Snapshot: nothing written
+function Get-WindowWidth { if ($script:FixedSize) { $script:FixedSize.W } else { [Console]::WindowWidth } }
+function Get-WindowHeight { if ($script:FixedSize) { $script:FixedSize.H } else { [Console]::WindowHeight } }
 
 # ---- terminal cell widths ------------------------------------------------------------
 # A terminal gives East Asian wide characters and most emoji two cells, and combining marks and
@@ -1502,7 +1530,7 @@ function ConvertFrom-RosterPoll([int]$ExitCode, [string]$Stdout, [string]$Stderr
 # ---- closed-sessions log ----------------------------------------------------------
 # Appended whenever a session leaves the roster; survives ctop restarts. Shown with 'x'.
 function Write-ClosedLog($sess, [datetime]$when, [string]$why = 'closed', [string]$successor = '') {
-  if ($script:SnapSize) { return }   # a snapshot writes nothing
+  if ($script:ReadOnly) { return }   # a snapshot writes nothing
   try {
     $file  = Find-Transcript $sess.sessionId
     $title = Get-SessionTitle $sess.sessionId $file
@@ -2750,8 +2778,9 @@ function Show-Help {
     'HEADER',
     '  title bar   clock; live sessions / working / idle; live subagents (stopped, orphaned); gone sessions',
     '  tick        display refresh period (ms). [ / ] adjust by 50ms; floor 50',
-    '  frame       measured ms of the last pass: roster / process harvest, cache save, build and draw',
-    '              (not the wait for keys) — the real floor for tick',
+    '  frame       measured ms to build the last frame: roster / process harvest, cache save, rows, table.',
+    '              ctop runs as two processes: this one reads keys and draws, a worker builds frames, so a',
+    '              slow frame never holds up keys (q quits at once; "updating…" means the worker is busy)',
     '  roster age  time since the last good `claude agents --json` result; * = poll in flight',
     '  last poll   measured ms that call took (runs async; display never waits on it). FAILED×N: the',
     '              last N polls failed (non-zero exit, no output, not a JSON array, or no answer within',
@@ -2941,12 +2970,10 @@ if ($PricingFile) {
 }
 try { $script:KeepMin = Resolve-Keep -Keep $Keep -SubagentWindowSeconds $(if ($PSBoundParameters.ContainsKey('SubagentWindow')) { $SubagentWindow } else { $null }) }
 catch { [Console]::Error.WriteLine("ctop: -Keep $($_.Exception.Message)"); exit 2 }
-# sessionId -> @{ Session; GoneAt; Cleared; Successor }: every session that left, this run or an earlier
-# one (closed log); the keep window picks which are drawn. Sessions that are live again drop out on the
-# first poll.
-$script:Departed = Read-ClosedHistory $script:ClosedLogPath
-# the same rule as for the live roster: background sessions only with -All
-foreach ($id in @($script:Departed.Keys)) { if (-not (Test-KindListed ([string]$script:Departed[$id].Session.kind) ([bool]$All))) { $script:Departed.Remove($id) } }
+$script:Departed = @{}      # filled by Initialize-Feed, in whichever process builds frames
+$script:FeedOwner = $false
+$script:LastFrameMs = 0
+$script:LastSave = Get-Date
 $script:ShowGone = $true
 $script:Poll     = $null
 $script:PollMs   = 0
@@ -3083,238 +3110,425 @@ function Resolve-Mouse($e, [string]$footer, [bool]$inPeek, [int]$selOrd) {
   return @{ Select = $ord }
 }
 
+# ---- one frame -------------------------------------------------------------------
+# Everything a frame needs from the outside world (roster, transcripts, processes) and everything it
+# draws, for one view: selection, peek, toggles, window size. The in-process loop calls it every tick;
+# in worker mode the worker process calls it for each request and sends the result back as JSON, so
+# the display process never waits on files. Returns the frame's lines and footer, the row ids in screen
+# order (for the keys), the mouse map, and what the copy keys need for the selected row.
+function Invoke-Frame($view) {
+  $frameSw = [Diagnostics.Stopwatch]::StartNew()
+  $selectedId = $view.SelectedId; $script:PeekId = $view.PeekId; $tick = [int]$view.Tick; $lastFrameMs = $script:LastFrameMs
+  $script:KeepMin = [int]$view.KeepMin; $script:ShowSubagents = [bool]$view.ShowSubagents; $script:Compact = [bool]$view.Compact
+  $script:SortMode = [int]$view.SortMode; $script:LayoutMode = [int]$view.LayoutMode; $script:ShowGone = [bool]$view.ShowGone
+  if (@($view.Actions) -contains 'poll' -and -not $script:Poll) { Start-RosterPoll }   # r
+  $sorted = @()
+  if (-not $script:ReadOnly -and ((Get-Date) - $script:LastSave).TotalSeconds -ge 60) { Save-ScanCache; $script:LastSave = Get-Date }
+
+  # feed: harvest a finished poll, and (re)start one if it's time
+  $fresh = Read-Roster
+  Read-ProcPoll
+  if (-not $script:Poll -and $script:PollAt -and
+      ((Get-Date) - $script:PollAt).TotalSeconds -ge $RosterInterval) { Start-RosterPoll }
+
+  # display
+  $script:KeptGone = @(Get-KeptDeparted $script:Departed (Get-Date) $script:KeepMin)   # once per frame: rows and the strip's count
+  $rows = @(Build-Rows)
+  # one pass (five Where-Object pipelines over a long history cost more than the rest of the header)
+  $topL = [System.Collections.Generic.List[object]]::new(); $goneN = 0; $subs = 0; $subsDone = 0; $subsOrph = 0
+  foreach ($r in $rows) {
+    if ($r._Parent) { if ($r._Done) { $subsDone++ } else { $subs++ }; if ($r._Orphaned) { $subsOrph++ } }
+    elseif ($r._Gone) { $goneN++ }
+    else { $topL.Add($r) }
+  }
+  $top = $topL.ToArray()
+  $working = @($top | Where-Object { $_.STATE -in 'working','thinking' -or $_.STATE -like 'waiting*' }).Count
+  $idle    = @($top | Where-Object { $_.STATE -eq 'idle' }).Count
+  $await   = @($top | Where-Object { $_.STATE -like 'awaiting*' -or $_.STATE -eq 'polling' }).Count
+  $rosterAge = if ($script:RosterAt) { Get-Since $script:RosterAt } else { '…' }
+  $keptGone  = $script:KeptGone.Count
+  $pollFlag  = if ($script:Poll) { '*' } else { ' ' }
+  $w = if ($MaxWidth -gt 0) { [math]::Min((Get-WindowWidth), $MaxWidth + 1) } else { (Get-WindowWidth) }
+  # title bar: name + clock on the left, counts right-aligned (within MaxWidth)
+  $left  = "  ctop  $(Get-Date -Format 'HH:mm:ss')"
+  $parts = @("$($top.Count) sessions", "$working working", "$idle idle")
+  if ($await) { $parts += "$await awaiting" }
+  if ($subs -or $subsDone) { $parts += "$subs subagents" + $(if ($subsDone) { " ($subsDone stopped" + $(if ($subsOrph) { ", $subsOrph orphaned" }) + ")" }) }
+  if ($goneN) { $parts += "$goneN gone" }
+  # narrow window: tighten the separators, then drop trailing counts, rather than cut mid-word
+  $right = ($parts -join '  ·  ') + '  '
+  if ($left.Length + 1 + $right.Length -gt $w - 1) { $right = ($parts -join ' · ') + ' ' }
+  while ($left.Length + 1 + $right.Length -gt $w - 1 -and $parts.Count -gt 3) { $parts = $parts[0..($parts.Count - 2)]; $right = ($parts -join ' · ') + ' ' }
+  $title = $left + (' ' * [math]::Max(1, ($w - 1) - $left.Length - $right.Length)) + $right
+  # instrument strip: fixed-width cells with explicit dividers
+  $strip = '  ' + (Cell 'tick'   "${tick}ms"        14) + '│ ' +
+                  (Cell 'frame'  "${lastFrameMs}ms" 14) + '│ ' +
+                  (Cell 'roster' "$rosterAge$pollFlag" 12) + '│ ' +
+                  $(if ($script:PollFail) { Cell 'poll' "FAILED×$($script:PollFails)" 16 } else { Cell 'poll' "$($script:PollMs)ms" 16 }) +
+           $(if ($script:Compact) { '│ compact ' }) +
+           $(if ($script:HiddenCols.Count) { '│ ' + (Cell 'hidden' "$($script:HiddenCols.Count) cols" 15) }) +
+           '│ ' + (Cell 'keep' (Format-Keep $script:KeepMin) 12) +
+           $(if ($keptGone) { '│ ' + (Cell 'gone' $(if ($script:GonePending -and $script:ShowGone) { "$($keptGone - $script:GonePending)/$keptGone" } else { "$keptGone$(if (-not $script:ShowGone) { ' hidden' })" }) 14) }) +
+           '│ ' + (Cell 'build' $script:CtopVersion 20)   # labeled and away from the clock: a bare date beside it reads as "now"
+  $frame = @()
+  $frame += @{ Text = $title; Inverse = $true }
+  $frame += @{ Text = $strip; Fg = 'DarkCyan' }
+  $frame += ''
+  if ($rows.Count -eq 0) {
+    # nothing to draw, live or gone: no row can be selected, peeked or copied
+    $script:BodyMap = $null; $sorted = @(); $selectedId = $null; $script:PeekId = $null
+    $hiddenGone = if (-not $script:ShowGone -and $script:KeptGone.Count) { "; g shows $($script:KeptGone.Count) gone" } else { '' }
+    $frame += if ($script:RosterAt) { "(no interactive sessions reported by 'claude agents --json'$hiddenGone)" }
+              elseif ($script:PollFail) { "('claude agents --json' failed: $($script:PollFail); retrying every $RosterInterval s)" }
+              else { '(polling…)' }
+  } else {
+    $sorted = @(Sort-Rows $rows)
+    if (-not $selectedId -or -not ($sorted._SessionId -contains $selectedId)) { $selectedId = $sorted[0]._SessionId }
+    # Render, then see which rows are on screen. A gone row that scrolled into view since the last frame
+    # was not refreshed by Build-Rows (only last frame's visible rows are): refresh it and render once
+    # more (only changed rows are re-formatted), so a visible age is never stale, even for one frame.
+    for ($pass = 0; $pass -lt 2; $pass++) {
+      $tbl  = @(Render-Table $sorted $selectedId)
+      # @(if …): an if's output unrolls, and a one-line body would come back as a bare string that the
+      # styling loop below then indexed character by character (a lone one-line row drew nothing)
+      $head = @($tbl[0..1]); $body = @(if ($tbl.Count -gt 2) { $tbl[2..($tbl.Count - 1)] })
+      # rows left for the body: the footer takes the last line, the title/strip/blank and the column
+      # header take the rest
+      $room = [math]::Max(3, (Get-WindowHeight) - 1 - $frame.Count - $head.Count)
+      $script:BodyY0 = $frame.Count + $head.Count   # screen line of the first body line (for mouse clicks)
+      $vis = @(); $where = ''
+      if ($body.Count -le $room) {
+        $script:ScrollTop = 0; $script:PageRows = [math]::Max(1, $sorted.Count); $script:BodyMap = $script:LineRow; $vis = @(0..($sorted.Count - 1))
+        $body = @(for ($li = 0; $li -lt $body.Count; $li++) { $x = $body[$li]; $rowOf = $script:LineRow[$li]; if ($x -is [string] -and $rowOf -ge 0) { Style-Line $x $sorted[$rowOf] $selectedId $false } else { $x } })
+      }
+      else {
+        # scroll just enough to keep every line of the selected row visible
+        if ($script:SelSpan) {
+          if ($script:SelSpan[0] -lt $script:ScrollTop) { $script:ScrollTop = $script:SelSpan[0] }
+          if ($script:SelSpan[1] -ge $script:ScrollTop + $room) { $script:ScrollTop = $script:SelSpan[1] - $room + 1 }
+        }
+        $script:ScrollTop = [math]::Max(0, [math]::Min($script:ScrollTop, $body.Count - $room))
+        $vTop = $script:ScrollTop; $end = $vTop + $room - 1
+        # a wrapped row cut by the window edge would read as a shorter row: leave it out entirely
+        $cutTop = if ($vTop -gt 0 -and $script:LineRow[$vTop] -ge 0 -and $script:LineRow[$vTop - 1] -eq $script:LineRow[$vTop]) { $script:LineRow[$vTop] } else { -2 }
+        $cutEnd = if ($end + 1 -lt $script:LineRow.Count -and $script:LineRow[$end] -ge 0 -and $script:LineRow[$end + 1] -eq $script:LineRow[$end]) { $script:LineRow[$end] } else { -2 }
+        $slice = [System.Collections.Generic.List[object]]::new(); $visRows = [System.Collections.Generic.List[int]]::new()
+        $script:BodyMap = [System.Collections.Generic.List[int]]::new()
+        for ($li = $vTop; $li -le $end -and $li -lt $body.Count; $li++) {
+          $rowOf = $script:LineRow[$li]
+          if ($rowOf -ge 0 -and ($rowOf -eq $cutTop -or $rowOf -eq $cutEnd)) { $slice.Add(''); $script:BodyMap.Add(-1); continue }
+          $x = $body[$li]; if ($x -is [string] -and $rowOf -ge 0) { $x = Style-Line $x $sorted[$rowOf] $selectedId $false }
+          $slice.Add($x); $script:BodyMap.Add($rowOf); if ($rowOf -ge 0) { $visRows.Add($rowOf) }
+        }
+        $vis = @($visRows | Select-Object -Unique)
+        $vMin = ($vis | Measure-Object -Minimum).Minimum; $vMax = ($vis | Measure-Object -Maximum).Maximum
+        $script:PageRows = [math]::Max(1, $vMax - $vMin)
+        $body = $slice.ToArray()
+        $where = "   │ rows $($vMin + 1)–$($vMax + 1) of $($sorted.Count)"   # where we are, in the instrument strip
+      }
+      $stale = @(foreach ($i in $vis) { $r = $sorted[$i]; if ($r._Gone -and -not $script:FreshIds.Contains([string]$r._SessionId)) { $r } })
+      foreach ($r in $stale) { Update-GoneRow $r; [void]$script:FreshIds.Add([string]$r._SessionId) }
+      if (-not $stale) { break }
+    }
+    # next frame refreshes what is on screen now, and the peeked row
+    $script:RefreshIds.Clear()
+    foreach ($i in $vis) { [void]$script:RefreshIds.Add([string]$sorted[$i]._SessionId) }
+    if ($script:PeekId) { [void]$script:RefreshIds.Add([string]$script:PeekId) }
+    if ($where) { $frame[1].Text = $frame[1].Text.TrimEnd() + $where }
+    $frame += $head + $body
+  }
+  $foot = Build-Footer
+  $lines = $frame; $footer = $foot
+  if ($script:PeekId) {
+    $pr = $sorted | Where-Object _SessionId -eq $script:PeekId | Select-Object -First 1
+    if ($pr) { $lines = Build-Peek $pr; $footer = "  live peek   ↑↓ other session   esc/enter close   t path   y resume   n contact   d ID   h help" }
+    else { $script:PeekId = $null }
+  }
+  # what t / y / n / d copy, for the selected row (the display process has no rows of its own)
+  $sel = if ($selectedId) { $sorted | Where-Object _SessionId -eq $selectedId | Select-Object -First 1 }
+  $copy = $null
+  if ($sel) {
+    $cid = Get-CopyId $sel
+    $copy = @{ Id = [string]$selectedId; Transcript = $(if ($sel._Transcript -and $sel._Transcript -ne '-') { [string]$sel._Transcript } else { '' })
+               Resume = "claude --resume $(if ($sel._Parent) { $sel._Parent } else { $sel._SessionId })"; Contact = (Format-Contact $sel); IdText = $cid.Text; IdWhat = $cid.What }
+  }
+  $script:LastFrameMs = [int]$frameSw.ElapsedMilliseconds
+  return @{ Lines = @($lines); Footer = $footer; Ids = @(foreach ($r in $sorted) { [string]$r._SessionId }); SelectedId = $selectedId
+            PeekId = $script:PeekId; PageRows = [int]$script:PageRows; BodyMap = @($script:BodyMap); BodyY0 = [int]$script:BodyY0; Copy = $copy
+            PollBusy = [bool]$script:Poll; Rev = $view.Rev }
+}
+
+# ---- views, keys and drawing (shared by both modes) -------------------------------------
+# A view is what the user controls: selection, peek, toggles, keep window, tick. Keys change it;
+# Invoke-Frame draws it. Rev counts changes, so a worker's frame can be matched to the view it drew.
+function New-View {
+  [pscustomobject]@{ Rev = 0; SelectedId = $null; PeekId = $null; Tick = [math]::Max(50, $Tick); KeepMin = $script:KeepMin
+                     ShowSubagents = [bool]$script:ShowSubagents; Compact = [bool]$script:Compact; SortMode = [int]$script:SortMode
+                     LayoutMode = [int]$script:LayoutMode; ShowGone = [bool]$script:ShowGone; Actions = @(); PendingCopy = $null }
+}
+# One key against the view and the last frame drawn (its row ids, page size). Returns what the loop must
+# do beyond redrawing: quit, help, closed (the log), poll, or copy-<t|y|n|d>; $null for nothing more.
+function Apply-Key($view, $k, $packet) {
+  $ids = @($packet.Ids); $idx = [array]::IndexOf($ids, [string]$view.SelectedId); $page = [math]::Max(1, [int]$packet.PageRows)
+  $to = $null
+  switch ($k.Key) {
+    'UpArrow'   { if ($idx -gt 0) { $to = $idx - 1 } }
+    'DownArrow' { if ($idx -ge 0 -and $idx -lt $ids.Count - 1) { $to = $idx + 1 } }
+    'PageUp'    { if ($ids.Count) { $to = [math]::Max(0, $idx - $page) } }
+    'PageDown'  { if ($ids.Count) { $to = [math]::Min($ids.Count - 1, [math]::Max(0, $idx) + $page) } }
+    'Home'      { if ($ids.Count) { $to = 0 } }
+    'End'       { if ($ids.Count) { $to = $ids.Count - 1 } }
+    'Enter'     { $view.PeekId = if ($view.PeekId) { $null } else { $view.SelectedId }; $view.Rev++; return $null }
+    'Spacebar'  { $view.PeekId = if ($view.PeekId) { $null } else { $view.SelectedId }; $view.Rev++; return $null }
+    'Escape'    { if ($view.PeekId) { $view.PeekId = $null; $view.Rev++ }; return $null }
+  }
+  if ($null -ne $to) {
+    $view.SelectedId = $ids[$to]; if ($view.PeekId) { $view.PeekId = $view.SelectedId }; $view.Rev++; return $null
+  }
+  $c = [string]$k.KeyChar
+  switch -CaseSensitive ($c) {
+    'q' { if ($view.PeekId) { $view.PeekId = $null; $view.Rev++; return $null }; return 'quit' }
+    'r' { $view.Actions = @(@($view.Actions) + 'poll'); $view.Rev++; return 'poll' }
+    '+' { $view.KeepMin = Step-Keep $view.KeepMin 1 }
+    '=' { $view.KeepMin = Step-Keep $view.KeepMin 1 }   # + without Shift
+    '-' { $view.KeepMin = Step-Keep $view.KeepMin -1 }
+    ']' { $view.Tick = [math]::Max(50, [int]$view.Tick - 50) }
+    '[' { $view.Tick = [math]::Min(5000, [int]$view.Tick + 50) }
+    's' { $view.ShowSubagents = -not $view.ShowSubagents }
+    'c' { $view.Compact = -not $view.Compact }
+    'o' { $view.SortMode = ([int]$view.SortMode + 1) % $script:SortModes.Count }
+    'v' { $view.LayoutMode = ([int]$view.LayoutMode + 1) % $script:Layouts.Count }
+    'g' { $view.ShowGone = -not $view.ShowGone }
+    'h' { return 'help' }
+    'x' { return 'closed' }
+    { $_ -in 't', 'y', 'n', 'd' } { return "copy-$c" }
+    default { return $null }
+  }
+  $view.Rev++
+  return $null
+}
+# t / y / n / d copy from the frame drawn for the current selection; when the selection has moved on since
+# (a worker frame still on its way), the copy waits for the frame that matches it.
+function Invoke-CopyKey([string]$what, $packet, $view) {
+  $c = $packet.Copy
+  if (-not $c -or [string]$c.Id -ne [string]$view.SelectedId) { $view.PendingCopy = $what; return }
+  $view.PendingCopy = $null
+  switch ($what) {
+    't' { if ($c.Transcript) { Copy-Text $c.Transcript 'transcript path' } }
+    'y' { Copy-Text $c.Resume 'resume command' }
+    'n' { Copy-Text $c.Contact 'contact' }
+    'd' { Copy-Text $c.IdText $c.IdWhat }
+  }
+}
+# Draw a frame (with a copy flash in the footer while it lasts) and keep what the mouse needs.
+function Show-Packet($packet, [string]$note = '') {
+  $foot = if ((Get-Date) -lt $script:FlashUntil) { "  ► $($script:Flash)" } elseif ($note) { $note } else { [string]$packet.Footer }
+  $script:ShownFooter = $foot
+  $script:BodyMap = @($packet.BodyMap); $script:BodyY0 = [int]$packet.BodyY0
+  Write-Frame @($packet.Lines) $foot
+}
+# Keys and mouse waiting now, against the view; returns 'quit' or $null. Shared by both loops.
+function Read-Keys($view, $packet) {
+  $any = $false
+  while ($null -ne ($inp = Next-Input)) {
+    $any = $true
+    $k = $inp
+    if ($inp -isnot [ConsoleKeyInfo]) {   # a mouse event
+      $ids = @($packet.Ids)
+      $act = Resolve-Mouse $inp $script:ShownFooter ([bool]$view.PeekId) ([array]::IndexOf($ids, [string]$view.SelectedId))
+      if (-not $act) { continue }
+      if ($null -ne $act.Select -and $act.Select -lt $ids.Count) { $view.SelectedId = $ids[$act.Select]; $view.Rev++ }
+      if (-not $act.Key) { continue }
+      $k = $act.Key
+    }
+    $what = Apply-Key $view $k $packet
+    switch -Wildcard ($what) {
+      'quit'   { return 'quit' }
+      'help'   { Show-Help; $view.Rev++ }
+      'closed' { Show-Closed; $view.Rev++ }
+      'copy-*' { Invoke-CopyKey $what.Substring(5) $packet $view }
+    }
+  }
+  if ($any) { return 'keys' }
+  return $null
+}
+
+# ---- data feed --------------------------------------------------------------------------
+# Whoever builds frames owns the feed: the closed-sessions history, the transcript index, the roster
+# poll and the scan cache. In worker mode that is the worker; the display process reads none of it.
+function Initialize-Feed {
+  # sessionId -> @{ Session; GoneAt; Cleared; Successor }: every session that left, this run or an earlier
+  # one (closed log); the keep window picks which are drawn. Sessions that are live again drop out on the
+  # first poll. The same rule as for the live roster: background sessions only with -All.
+  $script:Departed = Read-ClosedHistory $script:ClosedLogPath
+  foreach ($id in @($script:Departed.Keys)) { if (-not (Test-KindListed ([string]$script:Departed[$id].Session.kind) ([bool]$All))) { $script:Departed.Remove($id) } }
+  Update-TranscriptIndex
+  Start-RosterPoll
+  Load-ScanCache
+  $script:LastSave = Get-Date
+  $script:FeedOwner = $true
+}
+
+# ---- one process -------------------------------------------------------------------------
+# Build, draw, then service keys until the next tick. Every key already typed is handled before the next
+# frame however long the last one took; a burst (+ + +) is applied together and drawn once.
+function Invoke-InProcessLoop($view) {
+  $winW = Get-WindowWidth; $winH = Get-WindowHeight
+  while ($true) {
+    if ((Get-WindowWidth) -ne $winW -or (Get-WindowHeight) -ne $winH) {
+      $winW = Get-WindowWidth; $winH = Get-WindowHeight
+      Clear-Screen   # the terminal reflows old lines on resize; wipe them, including the last column
+    }
+    $packet = Invoke-Frame $view
+    $view.Actions = @(); $view.SelectedId = $packet.SelectedId; $view.PeekId = $packet.PeekId
+    if ($view.PendingCopy) { Invoke-CopyKey $view.PendingCopy $packet $view }
+    Show-Packet $packet
+    $loopStart = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+      $r = Read-Keys $view $packet
+      if ($r -eq 'quit') { return }
+      if ($r -or $loopStart.ElapsedMilliseconds -ge [int]$view.Tick) { break }
+      # a poll that just finished mid-sleep: draw it now rather than waiting out the tick
+      if ($script:Poll -and $script:Poll.Proc.HasExited -and $script:Poll.Out.IsCompleted) { break }
+      Start-Sleep -Milliseconds ([math]::Min(20, [math]::Max(1, [int]$view.Tick - $loopStart.ElapsedMilliseconds)))
+    }
+  }
+}
+
+# ---- worker process ---------------------------------------------------------------------
+# By default ctop runs as two processes: this one only reads keys and draws, and a worker (the same
+# script, started with -Worker) reads transcripts, the roster and the process table and builds frames.
+# One request (the view and the window size) and one reply (the frame) per line, as JSON escaped to
+# ASCII so neither side's encoding matters. One request is in flight at a time, always the newest view,
+# so a slow frame never stops keys (q included) from being read and acknowledged.
+function ConvertTo-AsciiJson($value) {
+  $j = ConvertTo-Json -InputObject $value -Compress -Depth 8
+  [regex]::Replace($j, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
+}
+function Start-Worker {
+  $psi = [Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName = (Get-Process -Id $PID).Path
+  $onWindows = $IsWindows -or $env:OS -eq 'Windows_NT'
+  $psi.Arguments = '-NoProfile -NonInteractive ' + $(if ($onWindows) { '-ExecutionPolicy Bypass ' }) + "-File `"$($script:ScriptPath)`" -Worker"
+  $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+  $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+  $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+  $proc = [Diagnostics.Process]::Start($psi)
+  # settings: the parameters this run was given (the worker starts with none of them)
+  $settings = @{}
+  foreach ($k in $script:BoundParams.Keys) { if ($k -notin 'Worker', 'Snapshot', 'Version', 'InProcess', 'NoMouse') { $v = $script:BoundParams[$k]; $settings[$k] = if ($v -is [Management.Automation.SwitchParameter]) { [bool]$v } else { $v } } }
+  $proc.StandardInput.WriteLine((ConvertTo-AsciiJson $settings)); $proc.StandardInput.Flush()
+  return @{ Proc = $proc; Err = $proc.StandardError.ReadToEndAsync(); Reply = $null }
+}
+# Closing its input tells the worker to stop: it saves its scan cache and exits on its own. Quitting does
+# not wait for that: a worker busy with a slow frame finishes it, finds no one to send it to, and exits.
+# (Killing it would lose the cache save.)
+function Stop-Worker($w) {
+  if (-not $w) { return }
+  try { $w.Proc.StandardInput.Close() } catch {}
+  try { $null = $w.Proc.WaitForExit(200) } catch {}
+}
+function Get-WorkerFault($w) {
+  $err = ''; try { if ($w.Err.IsCompleted) { $err = ([string]$w.Err.Result -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1) } } catch {}
+  $code = ''; try { if ($w.Proc.HasExited) { $code = "exit $($w.Proc.ExitCode)" } } catch {}
+  ((@($code, $err) | Where-Object { $_ }) -join ': ')
+}
+# The worker's own loop: settings came on its first input line (see the top of the script).
+function Invoke-WorkerLoop {
+  try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {}
+  Initialize-Feed
+  while ($null -ne ($line = [Console]::In.ReadLine())) {
+    $req = ConvertFrom-Json -InputObject $line
+    $script:FixedSize = @{ W = [int]$req.W; H = [int]$req.H }
+    $p = Invoke-Frame $req.View
+    [Console]::Out.WriteLine((ConvertTo-AsciiJson $p)); [Console]::Out.Flush()
+  }
+}
+# The display process: keys, requests, replies, drawing. Falls back to one process if the worker fails.
+function Invoke-FrontendLoop {
+  $view = New-View
+  $packet = @{ Lines = @(@{ Text = "  ctop  $(Get-Date -Format 'HH:mm:ss')   starting…"; Inverse = $true }); Footer = '  h help   q quit'; Ids = @(); PageRows = 10; BodyMap = @(); BodyY0 = 0; Rev = -1 }
+  $w = $null
+  try { $w = Start-Worker } catch { $w = $null; $fault = $_.Exception.Message }
+  if (-not $w) { return (Invoke-Fallback $view "worker did not start: $fault") }
+  $sent = -1; $tickSw = [Diagnostics.Stopwatch]::StartNew(); $dirty = $true; $waitSw = [Diagnostics.Stopwatch]::new(); $noted = $false
+  $winW = Get-WindowWidth; $winH = Get-WindowHeight
+  try {
+    while ($true) {
+      if ((Read-Keys $view $packet) -eq 'quit') { return }
+      if ((Get-WindowWidth) -ne $winW -or (Get-WindowHeight) -ne $winH) {
+        $winW = Get-WindowWidth; $winH = Get-WindowHeight; Clear-Screen; $view.Rev++; $dirty = $true
+      }
+      if ($w.Reply -and $w.Reply.IsCompleted) {
+        $line = $null; try { $line = $w.Reply.Result } catch {}
+        $w.Reply = $null
+        if ($null -eq $line) { return (Invoke-Fallback $view "worker stopped ($(Get-WorkerFault $w))" $w) }
+        $packet = ConvertFrom-Json -InputObject $line
+        if ([int]$packet.Rev -eq [int]$view.Rev) { $view.SelectedId = $packet.SelectedId; $view.PeekId = $packet.PeekId }
+        if ($view.PendingCopy) { Invoke-CopyKey $view.PendingCopy $packet $view }
+        $dirty = $true
+      }
+      if (-not $w.Reply) {
+        if ($w.Proc.HasExited) { return (Invoke-Fallback $view "worker stopped ($(Get-WorkerFault $w))" $w) }
+        if ($view.Rev -ne $sent -or $tickSw.ElapsedMilliseconds -ge [int]$view.Tick) {
+          $req = @{ W = $winW; H = $winH; View = $view }
+          try { $w.Proc.StandardInput.WriteLine((ConvertTo-AsciiJson $req)); $w.Proc.StandardInput.Flush() }
+          catch { return (Invoke-Fallback $view "worker stopped ($(Get-WorkerFault $w))" $w) }
+          $w.Reply = $w.Proc.StandardOutput.ReadLineAsync()
+          $sent = $view.Rev; $view.Actions = @(); $tickSw.Restart(); $waitSw.Restart(); $noted = $false
+        }
+      }
+      if ($dirty) { Show-Packet $packet; $dirty = $false }
+      elseif (-not $noted -and $w.Reply -and [int]$packet.Rev -ne [int]$view.Rev -and $waitSw.ElapsedMilliseconds -ge 300) {
+        Show-Packet $packet '  updating…   (the worker is busy: keys are taken, q quits)'; $noted = $true   # a key, acknowledged
+      }
+      elseif ((Get-Date) -ge $script:FlashUntil -and $script:ShownFooter -like '  ►*') { Show-Packet $packet }   # a flash ran out
+      Start-Sleep -Milliseconds 10
+    }
+  } finally { Stop-Worker $w }
+}
+# No worker: carry on in this process, and say why on the footer for a while.
+function Invoke-Fallback($view, [string]$why, $w = $null) {
+  Stop-Worker $w
+  $script:Mode = 'InProcess'
+  $script:Flash = "$why; running in one process"; $script:FlashUntil = (Get-Date).AddSeconds(10)
+  Initialize-Feed
+  Invoke-InProcessLoop $view
+}
+
 # Windows consoles default to the OEM code page (437), which lacks ▁ ▼ ↑ ↓ … — they print as ? or .
 # Switch to UTF-8 for ctop's lifetime; the original is restored on exit.
 $origOutEnc = [Console]::OutputEncoding
 if ($Snapshot) {
   $cw = $(try { [Console]::WindowWidth } catch { 0 })
-  $script:SnapSize = @{ W = $(if ($MaxWidth -gt 0) { $MaxWidth + 1 } elseif ($cw -gt 0) { $cw } else { 201 }); H = 100000 }
-  $script:GoneBuildMs = [int]::MaxValue   # every row in the one frame
-  $snapPass = 0
+  $script:FixedSize = @{ W = $(if ($MaxWidth -gt 0) { $MaxWidth + 1 } elseif ($cw -gt 0) { $cw } else { 201 }); H = 100000 }
+  $script:ReadOnly = $true                 # writes nothing: no scan cache, no closed-log entries
+  $script:GoneBuildMs = [int]::MaxValue    # every row in the one frame
 }
-try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {}
+if ($script:Mode -ne 'Worker') { try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {} }
 try {
-  if (-not $Snapshot) {
+  if ($script:Mode -eq 'Worker') { Invoke-WorkerLoop }
+  elseif ($Snapshot) {
+    Initialize-Feed
+    while (-not (Read-Roster) -and $script:Poll) { Start-Sleep -Milliseconds 25 }   # the one frame shows the roster
+    # the strip is built before the table finds which columns fit (hidden N cols), so it is a frame behind:
+    # print the second frame, which also times the first as "frame"
+    $view = New-View
+    $null = Invoke-Frame $view
+    $packet = Invoke-Frame $view
+    $sw = $script:FixedSize.W - 1
+    foreach ($item in @($packet.Lines)) {
+      $t = Strip-Ansi (Protect-TerminalText $(if ($item -is [string]) { $item } else { [string]$item.Text }))
+      [Console]::Out.WriteLine((Limit-Cells $t $sw).TrimEnd())
+    }
+  }
+  else {
     [Console]::CursorVisible = $false
     Clear-Screen
     $Host.UI.RawUI.WindowTitle = 'ctop'
     Enable-Mouse
-  }
-  Update-TranscriptIndex
-  Start-RosterPoll
-  if ($Snapshot) {   # the one frame shows the roster: wait for it (or for its failure / deadline)
-    while (-not (Read-Roster) -and $script:Poll) { Start-Sleep -Milliseconds 25 }
-  }
-  $frameSw = [System.Diagnostics.Stopwatch]::new()
-  $lastFrameMs = 0
-  Load-ScanCache
-  $lastSave = Get-Date
-  $winW = (Get-WindowWidth); $winH = (Get-WindowHeight)
-  while ($true) {
-    # "frame" on the strip times this whole pass (cache save, roster / process harvest, build, draw), so
-    # it is the cost the tick has to cover; only the wait for input below is left out
-    $frameSw.Restart()
-    if (((Get-Date) - $lastSave).TotalSeconds -ge 60) { Save-ScanCache; $lastSave = Get-Date }
-    $loopStart = [System.Diagnostics.Stopwatch]::StartNew()
-    if ((Get-WindowWidth) -ne $winW -or (Get-WindowHeight) -ne $winH) {
-      $winW = (Get-WindowWidth); $winH = (Get-WindowHeight)
-      Clear-Screen   # the terminal reflows old lines on resize; wipe them, including the last column
-    }
-
-    # feed: harvest a finished poll, and (re)start one if it's time
-    $fresh = Read-Roster
-    Read-ProcPoll
-    if (-not $script:Poll -and $script:PollAt -and
-        ((Get-Date) - $script:PollAt).TotalSeconds -ge $RosterInterval) { Start-RosterPoll }
-
-    # display
-    $script:KeptGone = @(Get-KeptDeparted $script:Departed (Get-Date) $script:KeepMin)   # once per frame: rows and the strip's count
-    $rows = @(Build-Rows)
-    # one pass (five Where-Object pipelines over a long history cost more than the rest of the header)
-    $topL = [System.Collections.Generic.List[object]]::new(); $goneN = 0; $subs = 0; $subsDone = 0; $subsOrph = 0
-    foreach ($r in $rows) {
-      if ($r._Parent) { if ($r._Done) { $subsDone++ } else { $subs++ }; if ($r._Orphaned) { $subsOrph++ } }
-      elseif ($r._Gone) { $goneN++ }
-      else { $topL.Add($r) }
-    }
-    $top = $topL.ToArray()
-    $working = @($top | Where-Object { $_.STATE -in 'working','thinking' -or $_.STATE -like 'waiting*' }).Count
-    $idle    = @($top | Where-Object { $_.STATE -eq 'idle' }).Count
-    $await   = @($top | Where-Object { $_.STATE -like 'awaiting*' -or $_.STATE -eq 'polling' }).Count
-    $rosterAge = if ($script:RosterAt) { Get-Since $script:RosterAt } else { '…' }
-    $keptGone  = $script:KeptGone.Count
-    $pollFlag  = if ($script:Poll) { '*' } else { ' ' }
-    $w = if ($MaxWidth -gt 0) { [math]::Min((Get-WindowWidth), $MaxWidth + 1) } else { (Get-WindowWidth) }
-    # title bar: name + clock on the left, counts right-aligned (within MaxWidth)
-    $left  = "  ctop  $(Get-Date -Format 'HH:mm:ss')"
-    $parts = @("$($top.Count) sessions", "$working working", "$idle idle")
-    if ($await) { $parts += "$await awaiting" }
-    if ($subs -or $subsDone) { $parts += "$subs subagents" + $(if ($subsDone) { " ($subsDone stopped" + $(if ($subsOrph) { ", $subsOrph orphaned" }) + ")" }) }
-    if ($goneN) { $parts += "$goneN gone" }
-    # narrow window: tighten the separators, then drop trailing counts, rather than cut mid-word
-    $right = ($parts -join '  ·  ') + '  '
-    if ($left.Length + 1 + $right.Length -gt $w - 1) { $right = ($parts -join ' · ') + ' ' }
-    while ($left.Length + 1 + $right.Length -gt $w - 1 -and $parts.Count -gt 3) { $parts = $parts[0..($parts.Count - 2)]; $right = ($parts -join ' · ') + ' ' }
-    $title = $left + (' ' * [math]::Max(1, ($w - 1) - $left.Length - $right.Length)) + $right
-    # instrument strip: fixed-width cells with explicit dividers
-    $strip = '  ' + (Cell 'tick'   "${tick}ms"        14) + '│ ' +
-                    (Cell 'frame'  "${lastFrameMs}ms" 14) + '│ ' +
-                    (Cell 'roster' "$rosterAge$pollFlag" 12) + '│ ' +
-                    $(if ($script:PollFail) { Cell 'poll' "FAILED×$($script:PollFails)" 16 } else { Cell 'poll' "$($script:PollMs)ms" 16 }) +
-             $(if ($script:Compact) { '│ compact ' }) +
-             $(if ($script:HiddenCols.Count) { '│ ' + (Cell 'hidden' "$($script:HiddenCols.Count) cols" 15) }) +
-             '│ ' + (Cell 'keep' (Format-Keep $script:KeepMin) 12) +
-             $(if ($keptGone) { '│ ' + (Cell 'gone' $(if ($script:GonePending -and $script:ShowGone) { "$($keptGone - $script:GonePending)/$keptGone" } else { "$keptGone$(if (-not $script:ShowGone) { ' hidden' })" }) 14) }) +
-             '│ ' + (Cell 'build' $script:CtopVersion 20)   # labeled and away from the clock: a bare date beside it reads as "now"
-    $frame = @()
-    $frame += @{ Text = $title; Inverse = $true }
-    $frame += @{ Text = $strip; Fg = 'DarkCyan' }
-    $frame += ''
-    if ($rows.Count -eq 0) {
-      # nothing to draw, live or gone: no row can be selected, peeked or copied
-      $script:BodyMap = $null; $sorted = @(); $selectedId = $null; $script:PeekId = $null
-      $hiddenGone = if (-not $script:ShowGone -and $script:KeptGone.Count) { "; g shows $($script:KeptGone.Count) gone" } else { '' }
-      $frame += if ($script:RosterAt) { "(no interactive sessions reported by 'claude agents --json'$hiddenGone)" }
-                elseif ($script:PollFail) { "('claude agents --json' failed: $($script:PollFail); retrying every $RosterInterval s)" }
-                else { '(polling…)' }
-    } else {
-      $sorted = @(Sort-Rows $rows)
-      if (-not $selectedId -or -not ($sorted._SessionId -contains $selectedId)) { $selectedId = $sorted[0]._SessionId }
-      # Render, then see which rows are on screen. A gone row that scrolled into view since the last frame
-      # was not refreshed by Build-Rows (only last frame's visible rows are): refresh it and render once
-      # more (only changed rows are re-formatted), so a visible age is never stale, even for one frame.
-      for ($pass = 0; $pass -lt 2; $pass++) {
-        $tbl  = @(Render-Table $sorted $selectedId)
-        # @(if …): an if's output unrolls, and a one-line body would come back as a bare string that the
-        # styling loop below then indexed character by character (a lone one-line row drew nothing)
-        $head = @($tbl[0..1]); $body = @(if ($tbl.Count -gt 2) { $tbl[2..($tbl.Count - 1)] })
-        # rows left for the body: the footer takes the last line, the title/strip/blank and the column
-        # header take the rest
-        $room = [math]::Max(3, (Get-WindowHeight) - 1 - $frame.Count - $head.Count)
-        $script:BodyY0 = $frame.Count + $head.Count   # screen line of the first body line (for mouse clicks)
-        $vis = @(); $where = ''
-        if ($body.Count -le $room) {
-          $script:ScrollTop = 0; $script:PageRows = [math]::Max(1, $sorted.Count); $script:BodyMap = $script:LineRow; $vis = @(0..($sorted.Count - 1))
-          $body = @(for ($li = 0; $li -lt $body.Count; $li++) { $x = $body[$li]; $rowOf = $script:LineRow[$li]; if ($x -is [string] -and $rowOf -ge 0) { Style-Line $x $sorted[$rowOf] $selectedId $false } else { $x } })
-        }
-        else {
-          # scroll just enough to keep every line of the selected row visible
-          if ($script:SelSpan) {
-            if ($script:SelSpan[0] -lt $script:ScrollTop) { $script:ScrollTop = $script:SelSpan[0] }
-            if ($script:SelSpan[1] -ge $script:ScrollTop + $room) { $script:ScrollTop = $script:SelSpan[1] - $room + 1 }
-          }
-          $script:ScrollTop = [math]::Max(0, [math]::Min($script:ScrollTop, $body.Count - $room))
-          $vTop = $script:ScrollTop; $end = $vTop + $room - 1
-          # a wrapped row cut by the window edge would read as a shorter row: leave it out entirely
-          $cutTop = if ($vTop -gt 0 -and $script:LineRow[$vTop] -ge 0 -and $script:LineRow[$vTop - 1] -eq $script:LineRow[$vTop]) { $script:LineRow[$vTop] } else { -2 }
-          $cutEnd = if ($end + 1 -lt $script:LineRow.Count -and $script:LineRow[$end] -ge 0 -and $script:LineRow[$end + 1] -eq $script:LineRow[$end]) { $script:LineRow[$end] } else { -2 }
-          $slice = [System.Collections.Generic.List[object]]::new(); $visRows = [System.Collections.Generic.List[int]]::new()
-          $script:BodyMap = [System.Collections.Generic.List[int]]::new()
-          for ($li = $vTop; $li -le $end -and $li -lt $body.Count; $li++) {
-            $rowOf = $script:LineRow[$li]
-            if ($rowOf -ge 0 -and ($rowOf -eq $cutTop -or $rowOf -eq $cutEnd)) { $slice.Add(''); $script:BodyMap.Add(-1); continue }
-            $x = $body[$li]; if ($x -is [string] -and $rowOf -ge 0) { $x = Style-Line $x $sorted[$rowOf] $selectedId $false }
-            $slice.Add($x); $script:BodyMap.Add($rowOf); if ($rowOf -ge 0) { $visRows.Add($rowOf) }
-          }
-          $vis = @($visRows | Select-Object -Unique)
-          $vMin = ($vis | Measure-Object -Minimum).Minimum; $vMax = ($vis | Measure-Object -Maximum).Maximum
-          $script:PageRows = [math]::Max(1, $vMax - $vMin)
-          $body = $slice.ToArray()
-          $where = "   │ rows $($vMin + 1)–$($vMax + 1) of $($sorted.Count)"   # where we are, in the instrument strip
-        }
-        $stale = @(foreach ($i in $vis) { $r = $sorted[$i]; if ($r._Gone -and -not $script:FreshIds.Contains([string]$r._SessionId)) { $r } })
-        foreach ($r in $stale) { Update-GoneRow $r; [void]$script:FreshIds.Add([string]$r._SessionId) }
-        if (-not $stale) { break }
-      }
-      # next frame refreshes what is on screen now, and the peeked row
-      $script:RefreshIds.Clear()
-      foreach ($i in $vis) { [void]$script:RefreshIds.Add([string]$sorted[$i]._SessionId) }
-      if ($script:PeekId) { [void]$script:RefreshIds.Add([string]$script:PeekId) }
-      if ($where) { $frame[1].Text = $frame[1].Text.TrimEnd() + $where }
-      $frame += $head + $body
-    }
-    if ($Snapshot) {
-      # the strip is built before the table finds which columns fit (hidden N cols), so it is a frame behind:
-      # print the second frame, which also times the first as "frame"
-      $snapPass++
-      if ($snapPass -lt 2) { $lastFrameMs = [int]$frameSw.ElapsedMilliseconds; continue }
-      $sw = $script:SnapSize.W - 1
-      foreach ($item in $frame) {
-        $t = Strip-Ansi (Protect-TerminalText $(if ($item -is [string]) { $item } else { [string]$item.Text }))
-        [Console]::Out.WriteLine((Limit-Cells $t $sw).TrimEnd())
-      }
-      break
-    }
-    $foot = Build-Footer
-    if ((Get-Date) -lt $script:FlashUntil) { $foot = "  ► $($script:Flash)" }
-    if ($script:PeekId) {
-      $pr = $sorted | Where-Object _SessionId -eq $script:PeekId | Select-Object -First 1
-      if ($pr) {
-        $pf = "  live peek   ↑↓ other session   esc/enter close   t path   y resume   n contact   d ID   h help"
-        if ((Get-Date) -lt $script:FlashUntil) { $pf = "  ► $($script:Flash)" }
-        Write-Frame (Build-Peek $pr) $pf
-      } else { $script:PeekId = $null; Write-Frame $frame $foot }
-    } else {
-      Write-Frame $frame $foot
-    }
-    $lastFrameMs = [int]$frameSw.ElapsedMilliseconds
-
-    # Service input, then sleep out the rest of the tick. Every key already typed is handled before the
-    # next frame however long the last one took: a frame slower than the tick must never stop ctop
-    # reading the keyboard (q included). A burst (+ + +) is applied together and drawn once.
-    $repaint = $false
-    while ($true) {
-      $inp = Next-Input
-      if ($null -ne $inp) {
-        $idx = [array]::IndexOf(@($sorted._SessionId), $selectedId)
-        $k = $inp
-        if ($inp -isnot [ConsoleKeyInfo]) {   # a mouse event
-          $act = Resolve-Mouse $inp $(if ($script:PeekId) { $pf } else { $foot }) ([bool]$script:PeekId) $idx
-          if (-not $act) { continue }
-          if ($null -ne $act.Select -and $act.Select -lt $sorted.Count) { $selectedId = $sorted[$act.Select]._SessionId; $idx = $act.Select; $repaint = $true }
-          if (-not $act.Key) { continue }
-          $k = $act.Key
-        }
-        # NOTE: in PowerShell, break/continue inside `switch` only leave the switch, not the
-        # enclosing while — so we set a flag and break the sleep loop explicitly below.
-        switch ($k.Key) {
-          'UpArrow'   { if ($idx -gt 0) { $selectedId = $sorted[$idx - 1]._SessionId }; if ($script:PeekId) { $script:PeekId = $selectedId }; $repaint = $true }
-          'DownArrow' { if ($idx -ge 0 -and $idx -lt $sorted.Count - 1) { $selectedId = $sorted[$idx + 1]._SessionId }; if ($script:PeekId) { $script:PeekId = $selectedId }; $repaint = $true }
-          'PageUp'    { if ($sorted.Count) { $selectedId = $sorted[[math]::Max(0, $idx - $script:PageRows)]._SessionId; if ($script:PeekId) { $script:PeekId = $selectedId } }; $repaint = $true }
-          'PageDown'  { if ($sorted.Count) { $selectedId = $sorted[[math]::Min($sorted.Count - 1, [math]::Max(0, $idx) + $script:PageRows)]._SessionId; if ($script:PeekId) { $script:PeekId = $selectedId } }; $repaint = $true }
-          'Home'      { if ($sorted.Count) { $selectedId = $sorted[0]._SessionId; if ($script:PeekId) { $script:PeekId = $selectedId } }; $repaint = $true }
-          'End'       { if ($sorted.Count) { $selectedId = $sorted[-1]._SessionId; if ($script:PeekId) { $script:PeekId = $selectedId } }; $repaint = $true }
-          'Enter'     { $script:PeekId = if ($script:PeekId) { $null } else { $selectedId }; $repaint = $true }
-          'Spacebar'  { $script:PeekId = if ($script:PeekId) { $null } else { $selectedId }; $repaint = $true }
-          'Escape'    { if ($script:PeekId) { $script:PeekId = $null; $repaint = $true } }
-        }
-        switch ($k.KeyChar) {
-          'q' { if ($script:PeekId) { $script:PeekId = $null; $repaint = $true } else { return } }
-          'r' { if (-not $script:Poll) { Start-RosterPoll } }
-          '+' { $script:KeepMin = Step-Keep $script:KeepMin 1;  $repaint = $true }
-          '=' { $script:KeepMin = Step-Keep $script:KeepMin 1;  $repaint = $true }   # + without Shift
-          '-' { $script:KeepMin = Step-Keep $script:KeepMin -1; $repaint = $true }
-          ']' { $tick = [math]::Max(50,   $tick - 50); $repaint = $true }
-          '[' { $tick = [math]::Min(5000, $tick + 50); $repaint = $true }
-          'h' { Show-Help; $repaint = $true }
-          's' { $script:ShowSubagents = -not $script:ShowSubagents; $repaint = $true }
-          'c' { $script:Compact = -not $script:Compact; $repaint = $true }
-          'o' { $script:SortMode = ($script:SortMode + 1) % $script:SortModes.Count; $repaint = $true }
-          'v' { $script:LayoutMode = ($script:LayoutMode + 1) % $script:Layouts.Count; $repaint = $true }
-          'g' { $script:ShowGone = -not $script:ShowGone; $repaint = $true }
-          'x' { Show-Closed; $repaint = $true }
-          't' { $sel = $sorted | Where-Object _SessionId -eq $selectedId | Select-Object -First 1; if ($sel -and $sel._Transcript -ne '-') { Copy-Text $sel._Transcript 'transcript path' } }
-          'n' { $sel = $sorted | Where-Object _SessionId -eq $selectedId | Select-Object -First 1; if ($sel) { Copy-Text (Format-Contact $sel) 'contact' } }
-          'd' { $sel = $sorted | Where-Object _SessionId -eq $selectedId | Select-Object -First 1; if ($sel) { $cid = Get-CopyId $sel; Copy-Text $cid.Text $cid.What } }
-          'y' { $sel = $sorted | Where-Object _SessionId -eq $selectedId | Select-Object -First 1; if ($sel) { $id = if ($sel._Parent) { $sel._Parent } else { $sel._SessionId }; Copy-Text "claude --resume $id" 'resume command' } }
-        }
-        continue   # drain everything already typed before drawing
-      }
-      if ($repaint -or $loopStart.ElapsedMilliseconds -ge $tick) { break }
-      # if a poll just finished mid-sleep, repaint now rather than waiting out the tick
-      if ($script:Poll -and $script:Poll.Proc.HasExited -and $script:Poll.Out.IsCompleted) { break }
-      Start-Sleep -Milliseconds ([math]::Min(20, [math]::Max(1, $tick - $loopStart.ElapsedMilliseconds)))
-    }
+    if ($script:Mode -eq 'InProcess') { Initialize-Feed; Invoke-InProcessLoop (New-View) }
+    else { Invoke-FrontendLoop }
   }
 }
 catch {
@@ -3323,18 +3537,20 @@ catch {
 finally {
   Stop-RosterPoll $script:Poll
   if ($script:ProcJob) { Remove-Job $script:ProcJob -Force -ErrorAction SilentlyContinue }
-  try { [Console]::OutputEncoding = $origOutEnc } catch {}
-  if (-not $Snapshot) {   # a snapshot changed none of this, and writes nothing
-    Disable-Mouse   # give the console its QuickEdit / mouse mode back, crash or not
-    [Console]::CursorVisible = $true
-    Save-ScanCache
-    $Host.UI.RawUI.WindowTitle = $origTitle
-    [Console]::SetCursorPosition(0, (Get-WindowHeight) - 1)
-    Write-Host ''
-  }
-  if ($script:Fatal) {
-    Write-Host (Protect-TerminalText "ctop $script:CtopVersion stopped: $($script:Fatal.Exception.GetType().Name): $($script:Fatal.Exception.Message)") -ForegroundColor Red
-    Write-Host $script:Fatal.ScriptStackTrace -ForegroundColor DarkGray
+  if ($script:FeedOwner -and -not $script:ReadOnly) { Save-ScanCache }
+  if ($script:Mode -ne 'Worker') {
+    try { [Console]::OutputEncoding = $origOutEnc } catch {}
+    if (-not $Snapshot) {   # a snapshot changed none of this
+      Disable-Mouse   # give the console its QuickEdit / mouse mode back, crash or not
+      [Console]::CursorVisible = $true
+      $Host.UI.RawUI.WindowTitle = $origTitle
+      [Console]::SetCursorPosition(0, (Get-WindowHeight) - 1)
+      Write-Host ''
+    }
+    if ($script:Fatal) {
+      Write-Host (Protect-TerminalText "ctop $script:CtopVersion stopped: $($script:Fatal.Exception.GetType().Name): $($script:Fatal.Exception.Message)") -ForegroundColor Red
+      Write-Host $script:Fatal.ScriptStackTrace -ForegroundColor DarkGray
+    }
   }
 }
 # a crash is a failure to whoever ran ctop (a wrapper, a test): say so on stderr and in the exit status

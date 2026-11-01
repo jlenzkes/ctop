@@ -21,6 +21,9 @@ Everything is read locally. ctop makes no model calls and uses no tokens.
 
 - **PowerShell**: PowerShell 7 (`pwsh`) or Windows PowerShell 5.1. See [Tested on](#tested-on) for
   which versions have been run, and how far.
+- **Two processes**: by default ctop starts a second, hidden PowerShell process (the same script) that
+  reads transcripts, the roster and the process table, so a slow read never holds up the keyboard. Use
+  `-InProcess` to run as one; ctop falls back to one process by itself if the worker can't start.
 - **Claude Code** on `PATH`, with the `claude agents --json` command. ctop stops with an error
   at startup if `claude` can't be found.
 - **Operating system**: Windows, or Linux in the Debian and Fedora / RHEL families. On Linux the
@@ -104,6 +107,7 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release not
 | `-All`            |                    | Include background sessions (`kind == "background"`). |
 | `-NoMouse`        |                    | Windows: leave the mouse to the terminal (see [Mouse](#mouse)). |
 | `-PricingFile`    |                    | A JSON price table in place of the built-in one (see [Pricing](#pricing)). |
+| `-InProcess`      |                    | Run as one process instead of a display process plus a worker (see [Requirements](#requirements)). |
 | `-Snapshot`       |                    | Print one frame as plain text and exit: every session listed, no colors, nothing written. Width: `-MaxWidth`, else the window's, else 200. |
 | `-Version`        |                    | Print the version and exit. |
 
@@ -285,8 +289,9 @@ Release notes are kept in the script's `.NOTES` help section. When cutting a bui
 Tests use [Pester](https://pester.dev) 5:
 
 - `tests/Keep.Tests.ps1`, `Display.Tests.ps1`, `Transcript.Tests.ps1`, `Clipboard.Tests.ps1`,
-  `Encoding.Tests.ps1`, `Rows.Tests.ps1`, `Process.Tests.ps1` (its process tests run on Windows only):
-  unit tests. They load the functions from `ctop.ps1` without running it
+  `Encoding.Tests.ps1`, `Rows.Tests.ps1`, `Contact.Tests.ps1`, `Pricing.Tests.ps1`, `Worker.Tests.ps1`
+  (keys, and the worker run as a real process), `Process.Tests.ps1` (its process tests run on Windows
+  only): unit tests. They load the functions from `ctop.ps1` without running it
   (`tests/Import-Ctop.ps1`), so they need no `claude` and no terminal.
 - `tests/Integration.Tests.ps1` (tag `Integration`): drives the real ctop in tmux against a fake
   `claude` and a 300-session history, checking that keys are never dropped, that frames stay within the
