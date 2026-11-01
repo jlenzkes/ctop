@@ -17,7 +17,7 @@ Findings so far, each labelled verified, inference or unverified: `docs/research
 
 **When this work resumes, start with:** one Claude agent chat in VS Code, on a VS Code-only machine as well as one with Claude Code. Then check whether it appears in `claude agents --json` and `~/.claude/sessions/`, and whether its transcript is in `~/.claude/projects/`. Also run one Cline task and check `~/.cline/data/db/sessions.db`. Do this before writing code.
 
-## Next PR: flaky tests seen in CI (2026-11-01, PR #2 push run 41330604496's sibling, run 41330600708)
+## Next PR: flaky tests seen in CI (2026-11-01: PR #2, push run 41330600708 for c144eb6)
 
 Same code passed in the other run, so these are flakes, not a code problem; the failed jobs were re-run.
 - **`tests/Worker.Tests.ps1`, 'starts a frame every tick…' (Windows PowerShell 5.1):** asserts the *maximum* gap between frame starts is under 330 ms; one gap was 354 ms. The bug it guards gives ~416 ms. Fix: assert the median gap (and print the max).
