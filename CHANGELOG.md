@@ -9,8 +9,9 @@ Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build numbe
 - a malformed Cline manifest or conversation is not parsed again until it changes, so one broken file can
   no longer use up every frame's reading time and keep older sessions from loading; a file that could not
   be opened is tried again after 5 s
-- `-Snapshot` reads every Cline session before it prints (it printed after two frames' worth), and says
-  so if any file is still unread
+- `-Snapshot` reads every Cline session before it prints (it printed after two frames' worth), and notes
+  any file that was left for later. A file that cannot be read or parsed is not retried there: its row
+  shows what was read of it before, or nothing
 - without the `claude` command, a registry entry caught half-written no longer ends its session: while
   its process runs, the session stays listed (it was shown as gone and logged as closed)
 - a gone session keeps its VIA label when ctop is restarted (the closed log had it; it was not read back)
