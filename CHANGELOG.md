@@ -2,6 +2,22 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.02.3 — Sol's audit of PRs #3 and #4 (2026.11.01.3 to 2026.11.02.2)
+
+- an ended Cline session shows its final cost, tokens and last action: a conversation that changed after
+  it was cached is read again (it showed what was cached while the session ran)
+- a malformed Cline manifest or conversation is not parsed again until it changes, so one broken file can
+  no longer use up every frame's reading time and keep older sessions from loading; a file that could not
+  be opened is tried again after 5 s
+- `-Snapshot` reads every Cline session before it prints (it printed after two frames' worth), and notes
+  any file that was left for later. A file that cannot be read or parsed is not retried there: its row
+  shows what was read of it before, or nothing
+- without the `claude` command, a registry entry caught half-written no longer ends its session: while
+  its process runs, the session stays listed (it was shown as gone and logged as closed)
+- a gone session keeps its VIA label when ctop is restarted (the closed log had it; it was not read back)
+- the agent probe (2026.11.02.2) reads a transcript line's `entrypoint`, `version` and `userType` only at
+  its top level, as labels: fields of the same names inside a tool's input were printed
+
 ## 2026.11.02.2 — from a review of 2026.11.01.3
 
 - release notes moved here from the script's `.NOTES` help section, which keeps the version line
