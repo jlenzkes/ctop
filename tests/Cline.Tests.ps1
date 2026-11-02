@@ -205,3 +205,61 @@ Describe 'Update-ClineRoster: a long history is read a little at a time' {
     @($script:ClineRows | Where-Object { $_.Act.Cost -eq 0.5 }).Count | Should -Be 6
   }
 }
+
+Describe 'Update-ClineRoster: what changed is read again, and a bad file does not hold up the rest (Sol, PR #3/#4 findings 2 and 3)' {
+  BeforeAll {
+    Mock Get-GitInfo { @{ Branch = '-'; Worktree = $false; Main = '' } }
+    $alive = { param($id) (Get-Date).AddHours(-5) }
+  }
+  BeforeEach { Reset-Cline; $script:KeepMin = -1 }
+  AfterEach { $env:CLINE_SESSION_DATA_DIR = $null }
+  It 'reads an ended session''s final conversation, not the one it cached while the session ran' {
+    $root = Join-Path $TestDrive ("stale-" + [guid]::NewGuid()); $env:CLINE_SESSION_DATA_DIR = $root
+    New-ClineSession $root '9_stale' @{ status = 'running'; pid = 101 } @((Prompt 'go'), (Reply @(@{ type = 'text'; text = 'still working' }) @{ inputTokens = 1; cost = 0.25 })) | Out-Null
+    Update-ClineRoster $alive
+    $script:ClineRows[0].Act.Cost | Should -Be 0.25
+    # it ends: the conversation gets its last reply, and the manifest says completed
+    New-ClineSession $root '9_stale' @{ status = 'completed'; pid = 101; exit_code = 0; ended_at = (Iso (Get-Date)) } @((Prompt 'go'), (Reply @(@{ type = 'text'; text = 'still working' }) @{ inputTokens = 1; cost = 0.25 }), (Prompt 'and?'), (Reply @(@{ type = 'text'; text = 'all done' }) @{ inputTokens = 1; cost = 1.0 })) | Out-Null
+    for ($i = 0; $i -lt 3; $i++) { Update-ClineRoster $alive }
+    $script:ClineRows[0].GoneAt | Should -Not -BeNullOrEmpty
+    $script:ClineRows[0].Act.Cost | Should -Be 1.25
+    $script:ClineRows[0].Act.Last | Should -Be 'all done'
+    $script:ClinePending | Should -Be 0
+  }
+  It 'counts a changed ended conversation as still to read when there is no time for it, and reads it on a later call' {
+    $root = Join-Path $TestDrive ("stale2-" + [guid]::NewGuid()); $env:CLINE_SESSION_DATA_DIR = $root
+    foreach ($n in 1, 2) { New-ClineSession $root "8_end$n" @{ status = 'completed'; pid = 1; ended_at = (Iso (Get-Date)) } @((Prompt 'p'), (Reply @(@{ type = 'text'; text = 'one' }) @{ cost = 0.5 })) | Out-Null }
+    Update-ClineRoster $alive    # everything read: no budget given
+    foreach ($n in 1, 2) { New-ClineSession $root "8_end$n" @{ status = 'completed'; pid = 1; ended_at = (Iso (Get-Date)) } @((Prompt 'p'), (Reply @(@{ type = 'text'; text = 'two' }) @{ cost = 2.0 })) | Out-Null }
+    Update-ClineRoster $alive 0  # no time: one file is read a call, the rest is counted (manifests were rewritten too)
+    $script:ClinePending | Should -BeGreaterThan 0
+    for ($n = 0; $n -lt 4 -and $script:ClinePending; $n++) { Update-ClineRoster $alive 0 }
+    $script:ClinePending | Should -Be 0
+    @($script:ClineRows | Where-Object { $_.Act.Cost -eq 2.0 }).Count | Should -Be 2
+  }
+  It 'does not parse an unchanged malformed manifest again, so older sessions still load' {
+    $root = Join-Path $TestDrive ("bad-" + [guid]::NewGuid()); $env:CLINE_SESSION_DATA_DIR = $root
+    New-ClineSession $root '7_good' @{ status = 'idle'; pid = 101 } | Out-Null
+    $old = (Get-Date).AddMinutes(-10)
+    [IO.File]::SetLastWriteTime((Join-Path $root '7_good/7_good.json'), $old)
+    $bad = Join-Path $root '7_bad1'; New-Item -ItemType Directory -Force -Path $bad | Out-Null
+    [IO.File]::WriteAllText((Join-Path $bad '7_bad1.json'), '{"version":1,"session_id":"7_ba')   # newest, and stays broken
+    for ($i = 0; $i -lt 3; $i++) { Update-ClineRoster $alive 0 }
+    @($script:ClineRows).Count | Should -Be 1
+    $script:ClineRows[0].M.session_id | Should -Be '7_good'
+    $script:ClinePending | Should -Be 0
+    # once the broken one is rewritten whole, it is read
+    New-ClineSession $root '7_bad1' @{ status = 'idle'; pid = 101 } | Out-Null
+    Update-ClineRoster $alive 0
+    @($script:ClineRows).Count | Should -Be 2
+  }
+  It 'does not keep an ended session with a malformed conversation pending forever' {
+    $root = Join-Path $TestDrive ("badmsg-" + [guid]::NewGuid()); $env:CLINE_SESSION_DATA_DIR = $root
+    $dir = New-ClineSession $root '6_badm' @{ status = 'completed'; pid = 1; ended_at = (Iso (Get-Date)) }
+    [IO.File]::WriteAllText((Join-Path $dir '6_badm.messages.json'), '{"version":1,"messages":[{"ro')
+    Update-ClineRoster $alive 0
+    Update-ClineRoster $alive 0
+    $script:ClinePending | Should -Be 0
+    @($script:ClineRows).Count | Should -Be 1
+  }
+}

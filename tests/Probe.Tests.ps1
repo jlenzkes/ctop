@@ -15,6 +15,9 @@ Describe 'the agent probe' {
     Put 'claude/projects/-w/s1.jsonl' ((@(
       @{ type = 'user'; entrypoint = 'sdk-ts'; version = '2.1.316'; userType = 'external'; message = @{ role = 'user'; content = "$secret prompt" } }
       @{ type = 'assistant'; entrypoint = 'sdk-ts'; version = '2.1.316'; message = @{ role = 'assistant'; content = @(@{ type = 'text'; text = "$secret reply" }) } }
+      # a tool call whose input has fields named like the line's own metadata (Sol, PR #3/#4 finding 1):
+      # no top-level entrypoint, version or userType on this line, so only the nested ones could match
+      @{ type = 'assistant'; message = @{ role = 'assistant'; content = @(@{ type = 'tool_use'; name = 'Bash'; input = @{ entrypoint = "$secret-ep"; userType = "$secret-ut"; version = "$secret-v" } }) } }
     ) | ForEach-Object { $_ | ConvertTo-Json -Depth 8 -Compress }) -join "`n") -Raw
     # VS Code: a Copilot chat as a mutation log (kind 0 = whole session, then kind 1 sets)
     $session = @{ version = 3; sessionId = 'c1'; customTitle = "$secret title"; requests = @(
@@ -67,6 +70,9 @@ Describe 'the agent probe' {
       Start-Sleep -Seconds 3
       $chatFile = Join-Path $root 'vscode/User/workspaceStorage/abc123/chatSessions/c1.jsonl'
       [IO.File]::AppendAllText($chatFile, "`n" + (@{ kind = 1; k = @('requests', 1, 'modelState'); v = @{ value = 1; completedAt = 1793500009000 } } | ConvertTo-Json -Depth 8 -Compress))
+      # a transcript line written while it watches: top-level entrypoint sdk-ts, and a tool input with its own
+      $tline = @{ type = 'assistant'; entrypoint = 'sdk-ts'; message = @{ role = 'assistant'; content = @(@{ type = 'tool_use'; name = 'Bash'; input = @{ entrypoint = "$secret-wep" } }) } } | ConvertTo-Json -Depth 8 -Compress
+      [IO.File]::AppendAllText((Join-Path $root 'claude/projects/-w/s1.jsonl'), "`n" + $tline)
       $man = Join-Path $root 'cline/data/sessions/k1/k1.json'
       [IO.File]::WriteAllText($man, ([IO.File]::ReadAllText($man) -replace '"running"', '"idle"'))
       if (-not $wp.WaitForExit(60000)) { $wp.Kill(); throw 'the watch did not end' }
@@ -79,6 +85,12 @@ Describe 'the agent probe' {
   }
   It 'never prints the content of prompts, replies, titles or paths' {
     $script:report | Should -Not -Match $secret
+  }
+  It 'reads a transcript line''s own entrypoint, version and userType, never fields of the same name inside a tool''s input' {
+    $script:report | Should -Not -Match $secret
+    $script:watch | Should -Not -Match $secret
+    $script:report | Should -Match 'entrypoint=sdk-ts \(2\)'
+    $script:watch | Should -Match 'claude transcript \w+: .*s1\.jsonl.*entrypoint: sdk-ts\s*$|claude transcript \w+: .*s1\.jsonl.*entrypoint: sdk-ts\r?\n'
   }
   It 'reports Claude Code: the registry entry and who wrote the transcript' {
     $script:report | Should -Match 'entrypoint="sdk-ts"\s+status="busy"'

@@ -48,7 +48,7 @@ param(
   [int]$WatchSeconds = 0
 )
 $ErrorActionPreference = 'Stop'
-$ProbeVersion = '2026.11.02.1'
+$ProbeVersion = '2026.11.02.2'
 $onWindows = $IsWindows -or $env:OS -eq 'Windows_NT'
 $onMac = (-not $onWindows) -and $IsMacOS
 $homeDir = [Environment]::GetFolderPath('UserProfile')
@@ -77,6 +77,22 @@ function Safe($v) {
 }
 # Copilot's ResponseModelState (src/vs/workbench/contrib/chat/common/chatService/chatService.ts)
 function State-Name($n) { $names = @('Pending', 'Complete', 'Cancelled', 'Failed', 'NeedsInput'); if ($n -is [int] -or $n -is [long]) { if ($n -ge 0 -and $n -lt $names.Count) { return "$n $($names[$n])" } }; Safe $n }
+# A transcript line's own metadata: the named fields at its top level only (a tool's input can carry fields of
+# the same names, and they are content), each shown only when it looks like a label, else as (other). Lines
+# over 256 KB are not parsed: @{} (their metadata is not counted).
+function Get-LineMeta([string]$line, [string[]]$keys) {
+  $r = @{}
+  if ($line.Length -gt 262144) { return $r }
+  $o = $null; try { $o = ConvertFrom-Json -InputObject $line -ErrorAction Stop } catch { return $r }
+  if ($null -eq $o -or $o -is [array]) { return $r }
+  $names = @($o.PSObject.Properties.Name)
+  foreach ($k in $keys) {
+    if ($names -notcontains $k) { continue }
+    $v = $o.$k
+    if ($v -is [string]) { $r[$k] = if ($v -match '^[A-Za-z0-9._-]{1,40}$') { $v } else { '(other)' } }
+  }
+  return $r
+}
 function Keys($o) { if ($null -eq $o) { return '-' }; (@($o.PSObject.Properties.Name) | Sort-Object) -join ', ' }
 # Show the allowed fields of an object, Safe-formatted, plus the names of all its fields
 function Show-Fields($o, [string[]]$allow, [string]$indent) {
@@ -142,10 +158,11 @@ if (Test-Path -LiteralPath $cdir) {
       $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite'); $sr = [IO.StreamReader]::new($fs)
       try {
         for ($i = 0; $i -lt 2000 -and $null -ne ($line = $sr.ReadLine()); $i++) {
+          $meta = Get-LineMeta $line @('entrypoint', 'version', 'userType', 'type')
           foreach ($k in 'entrypoint', 'version', 'userType') {
-            if ($line -match ('"' + $k + '":"([^"]{1,40})"')) { $vals["$k=$($Matches[1])"] = 1 + [int]$vals["$k=$($Matches[1])"] }
+            if ($meta.ContainsKey($k)) { $vals["$k=$($meta[$k])"] = 1 + [int]$vals["$k=$($meta[$k])"] }
           }
-          if ($line -match '^\{"type":"([a-z_-]{1,30})"' -or $line -match '"type":"(user|assistant|system|attachment|summary)"') { $types[$Matches[1]] = 1 + [int]$types[$Matches[1]] }
+          if ($meta.ContainsKey('type')) { $types[$meta.type] = 1 + [int]$types[$meta.type] }
         }
       } finally { $fs.Dispose() }
     } catch {}
@@ -441,7 +458,9 @@ while ($t0.Elapsed.TotalSeconds -lt $WatchSeconds) {
       if ($old -and $old.Len -eq $f.Length) { continue }
       $from = if ($old) { [long]$old.Len } else { [Math]::Max(0, $f.Length - 65536) }
       $added = Read-From $f.FullName $from
-      $ep = @([regex]::Matches($added, '"entrypoint":"([^"]{1,40})"') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique) -join ','
+      # each whole line's own entrypoint (the first line read from the middle of a file does not parse: skipped)
+      $ep = @(foreach ($line in ($added -split "`r?`n")) { if ($line.Trim()) { $m = Get-LineMeta $line @('entrypoint'); if ($m.ContainsKey('entrypoint')) { $m.entrypoint } } }) | Sort-Object -Unique
+      $ep = @($ep) -join ','
       W "claude transcript $(if ($old) { 'grew' } else { 'changed' }): $(Show-Path $f.FullName)  $(Show-Size $f.Length)  entrypoint: $(if ($ep) { $ep } else { '-' })"
       $txSeen[$f.FullName] = @{ Len = $f.Length; Time = $f.LastWriteTimeUtc }
     }

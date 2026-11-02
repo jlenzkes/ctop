@@ -67,3 +67,44 @@ Describe 'Get-EntrypointLabel (VIA)' {
     Get-EntrypointLabel $In | Should -BeExactly $Out
   }
 }
+
+Describe 'Read-ClosedHistory keeps what a gone session ran in (VIA after a restart)' {
+  It 'restores entrypoint from the closed log' {
+    $log = Join-Path $TestDrive 'closed-via.jsonl'
+    [IO.File]::WriteAllText($log, (@{ closedAt = '2026-11-01T22:00:00Z'; why = 'closed'; name = 'n1'; sessionId = 's-via'; pid = 77; startedAt = 1793500000000
+                                     kind = 'interactive'; entrypoint = 'sdk-ts' } | ConvertTo-Json -Compress) + "`n")
+    $h = Read-ClosedHistory $log
+    $h['s-via'].Session.entrypoint | Should -Be 'sdk-ts'
+    Get-EntrypointLabel ([string]$h['s-via'].Session.entrypoint) | Should -Be 'sdk'
+  }
+}
+
+Describe 'Get-RegistryRoster: an entry caught half-written is not a session that ended (Sol, PR #3/#4 finding 5)' {
+  BeforeAll {
+    $script:ConfigDir = Join-Path $TestDrive 'cfg-half'; $ConfigDir = $script:ConfigDir
+    $reg = Join-Path $ConfigDir 'sessions'; New-Item -ItemType Directory -Force -Path $reg | Out-Null
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $good = '{"pid":' + $PID + ',"sessionId":"s-live","kind":"interactive","entrypoint":"sdk-ts","status":"idle","startedAt":' + $now + '}'
+    $file = Join-Path $reg "$PID.json"
+  }
+  It 'keeps the session while its entry cannot be read and its process still runs' {
+    [IO.File]::WriteAllText($file, $good)
+    $script:Roster = @(Get-RegistryRoster)
+    @($script:Roster).Count | Should -Be 1
+    [IO.File]::WriteAllText($file, $good.Substring(0, 30))   # being rewritten
+    $r = @(Get-RegistryRoster)
+    $r.Count | Should -Be 1
+    $r[0].sessionId | Should -Be 's-live'
+  }
+  It 'drops it once its process is gone, readable or not' {
+    $dead = 2147483000
+    $script:Roster = @([pscustomobject]@{ pid = $dead; sessionId = 's-dead'; kind = 'interactive'; startedAt = $now })
+    [IO.File]::WriteAllText((Join-Path $reg "$dead.json"), '{"pid":2147483000,"sessionId":"s-de')
+    @(Get-RegistryRoster | Where-Object { $_.sessionId -eq 's-dead' }).Count | Should -Be 0
+  }
+  It 'does not invent a session from an unreadable entry it never knew' {
+    $script:Roster = @()
+    [IO.File]::WriteAllText($file, $good.Substring(0, 30))
+    @(Get-RegistryRoster).Count | Should -Be 0
+  }
+}

@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.02.2 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.02.3 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -136,7 +136,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.02.2'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.02.3'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -1436,7 +1436,7 @@ function Read-ClosedHistory([string]$Path) {
     } catch { continue }
     if ($h.ContainsKey($id) -and $h[$id].GoneAt -ge $at) { continue }
     $sess = [pscustomobject]@{ sessionId = $id; name = $r.name; title = $r.title; cwd = $r.cwd; pid = $r.pid; startedAt = $r.startedAt
-                               kind = $(if ($r.kind) { [string]$r.kind } else { 'interactive' }) }
+                               kind = $(if ($r.kind) { [string]$r.kind } else { 'interactive' }); entrypoint = $r.entrypoint }   # entrypoint: VIA
     $h[$id] = @{ Session = $sess; GoneAt = $at; Cleared = ($r.why -eq 'cleared'); Successor = $(if ($r.successor) { [string]$r.successor } else { '' }) }
   }
   return $h
@@ -1526,18 +1526,23 @@ function Show-Closed {
 # Agent SDK, such as VS Code's own Claude agent (seen 2026-11-01 on Linux and on Windows, with and without a
 # claude command installed). `claude agents --json` lists the same sessions. Without the claude command,
 # ctop reads these files itself. The *.key files beside them hold secrets: never opened.
+# Entries that could not be read this time (being rewritten, or locked) are named in RegistryUnreadable by
+# the pid in their file name (<pid>.json), so the caller can tell them from sessions that ended.
+$script:RegistryUnreadable = @()
 function Read-SessionRegistry([string]$dir) {
   $list = [Collections.Generic.List[object]]::new()
+  $unread = [Collections.Generic.List[string]]::new()
   foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq '.json' })) {
     $o = $null
     try {
       $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
       try { $text = [IO.StreamReader]::new($fs).ReadToEnd() } finally { $fs.Dispose() }
       $o = ConvertFrom-Json -InputObject $text -ErrorAction Stop
-    } catch { continue }   # being written, or not a session entry
-    if ($null -eq $o -or -not $o.pid -or -not $o.sessionId) { continue }
+    } catch { if ($f.BaseName -match '^\d+$') { $unread.Add($f.BaseName) }; continue }   # being written, or not a session entry
+    if ($null -eq $o -or -not $o.pid -or -not $o.sessionId) { if ($f.BaseName -match '^\d+$') { $unread.Add($f.BaseName) }; continue }
     $list.Add($o)
   }
+  $script:RegistryUnreadable = $unread.ToArray()
   return $list.ToArray()   # callers wrap in @(): none, one or many
 }
 # A registry file can outlive its session (a crash leaves it behind), and its pid can then be given to
@@ -1559,7 +1564,19 @@ function Get-ProcessStart([int]$id) {
   if (-not $p) { return $null }
   try { return $p.StartTime } catch { return 'unknown' }
 }
-function Get-RegistryRoster { @(Read-SessionRegistry (Join-Path $ConfigDir 'sessions') | Where-Object { Test-RegistryLive $_ ${function:Get-ProcessStart} }) }
+# An entry that cannot be read this time (Claude Code rewrites it in place, so a read can catch it half-written)
+# is not a session that ended: while its process still runs, the session the last roster had for that pid
+# stays. Dropping it would list it as gone and write a false "closed" line to the closed log.
+function Get-RegistryRoster {
+  $live = @(Read-SessionRegistry (Join-Path $ConfigDir 'sessions') | Where-Object { Test-RegistryLive $_ ${function:Get-ProcessStart} })
+  $have = @{}; foreach ($e in $live) { $have[[string]$e.pid] = $true }
+  $kept = @(foreach ($id in @($script:RegistryUnreadable)) {
+    if ($have.ContainsKey($id)) { continue }
+    $prev = @($script:Roster | Where-Object { $_ -and [string]$_.pid -eq $id }) | Select-Object -First 1
+    if ($prev -and (Test-RegistryLive $prev ${function:Get-ProcessStart})) { $prev }
+  })
+  @($live) + @($kept)
+}
 # What a session runs in, from its registry entrypoint: cli, vscode (Claude Code's VS Code extension), sdk
 # (the Claude Agent SDK: VS Code's own Claude agent, or any other program built on it), remote (Claude Code
 # on the web); anything else as it is, cleaned and cut short. '-' when unknown.
@@ -1614,7 +1631,16 @@ function Read-SharedText([string]$path) {
 # rewrites a manifest in place, so a read can catch it half-written: then the last good copy stands.
 # Parsing is capped at $budgetMs per call, newest first: a long history must not hold a frame for seconds
 # (300 manifests take ~0.5 s); what is left is counted in ClineManifestPending and parsed on the next calls.
-$script:ClineManifests = @{}   # manifest path -> @{ Length; Write; M; Began; Ended }
+$script:ClineManifests = @{}   # manifest path -> @{ Length; Write; M; Began; Ended; Failed; RetryAt }
+# Is a cache entry for this version of the file (same length and write time)? A read that failed is
+# remembered for that version too (Failed), so an unchanged broken file is not parsed again every frame: it
+# is read again when it changes. A file that could not be opened at all (locked: RetryAt) is retried after
+# a few seconds even if unchanged.
+$script:ClineRetrySec = 5
+function Test-ClineFresh($c, [IO.FileInfo]$f) {
+  if (-not $c -or $c.Length -ne $f.Length -or $c.Write -ne $f.LastWriteTimeUtc) { return $false }
+  return (-not $c.RetryAt -or (Get-Date) -lt $c.RetryAt)
+}
 $script:ClineManifestPending = 0
 function Read-ClineManifests([string]$dir, [int]$budgetMs = [int]::MaxValue) {
   $list = [Collections.Generic.List[object]]::new()
@@ -1632,19 +1658,24 @@ function Read-ClineManifests([string]$dir, [int]$budgetMs = [int]::MaxValue) {
   foreach ($f in $arr) {
     $seen[$f.FullName] = $true
     $c = $script:ClineManifests[$f.FullName]
-    if (-not ($c -and $c.Length -eq $f.Length -and $c.Write -eq $f.LastWriteTimeUtc)) {
+    if (-not (Test-ClineFresh $c $f)) {
       if ($parsed -and $sw.ElapsedMilliseconds -ge $budgetMs) { $script:ClineManifestPending++ }   # at least one a call: always progress
       else {
         $parsed++
-        $m = $null
-        try { $m = ConvertFrom-Json -InputObject (Read-SharedText $f.FullName) -ErrorAction Stop } catch { }
+        $text = $null; $m = $null; $retry = $null
+        try { $text = Read-SharedText $f.FullName } catch { $retry = (Get-Date).AddSeconds($script:ClineRetrySec) }
+        if ($null -ne $text) { try { $m = ConvertFrom-Json -InputObject $text -ErrorAction Stop } catch { } }
         if ($null -ne $m -and $m.session_id -and $null -ne $m.pid -and $m.status) {
           $c = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; M = $m; Began = (ConvertFrom-IsoTime $m.started_at); Ended = (ConvertFrom-IsoTime $m.ended_at) }
-          $script:ClineManifests[$f.FullName] = $c
+        } else {
+          # half-written, not a manifest, or not readable: this version is not tried again; the last good
+          # copy, if any, stands
+          $c = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; M = $(if ($c) { $c.M }); Began = $(if ($c) { $c.Began }); Ended = $(if ($c) { $c.Ended }); Failed = $true; RetryAt = $retry }
         }
+        $script:ClineManifests[$f.FullName] = $c
       }
     }
-    if ($c) { $list.Add(@{ M = $c.M; File = $f; Began = $c.Began; Ended = $c.Ended }) }
+    if ($c -and $c.M) { $list.Add(@{ M = $c.M; File = $f; Began = $c.Began; Ended = $c.Ended }) }
   }
   foreach ($k in @($script:ClineManifests.Keys)) { if (-not $seen.ContainsKey($k)) { $script:ClineManifests.Remove($k) } }
   return $list.ToArray()   # callers wrap in @()
@@ -1660,12 +1691,18 @@ function Read-ClineMessages([string]$path, [switch]$CachedOnly) {
   $f = $null; try { $f = [IO.FileInfo]::new($path) } catch { return $out }
   if (-not $f.Exists) { return $out }
   $c = $script:ClineMsgCache[$f.FullName]
-  if ($c -and $c.Length -eq $f.Length -and $c.Write -eq $f.LastWriteTimeUtc) { return $c.Result }
-  if ($CachedOnly) { if ($c) { return $c.Result } else { return $null } }
+  if (Test-ClineFresh $c $f) { if ($c.Result) { return $c.Result } else { return $out } }
+  if ($CachedOnly) { if ($c -and $c.Result) { return $c.Result } else { return $null } }
   if ($f.Length -gt 64MB) { $out.Last = '(conversation file over 64 MB: not read)'; $script:ClineMsgCache[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Result = $out }; return $out }
-  $o = $null
-  try { $o = ConvertFrom-Json -InputObject (Read-SharedText $f.FullName) -ErrorAction Stop } catch { }
-  if ($null -eq $o) { if ($c) { return $c.Result } else { return $out } }   # caught mid-write: the last good read stands
+  $text = $null; $o = $null; $retry = $null
+  try { $text = Read-SharedText $f.FullName } catch { $retry = (Get-Date).AddSeconds($script:ClineRetrySec) }
+  if ($null -ne $text) { try { $o = ConvertFrom-Json -InputObject $text -ErrorAction Stop } catch { } }
+  if ($null -eq $o) {
+    # caught mid-write, or not readable: the last good read stands, and this version is not tried again
+    $prev = if ($c) { $c.Result } else { $null }
+    $script:ClineMsgCache[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Result = $prev; Failed = $true; RetryAt = $retry }
+    if ($prev) { return $prev } else { return $out }
+  }
   $turns = 0; $tools = 0; $counts = @{}; $last = $null
   foreach ($msg in @($o.messages)) {
     if ($null -eq $msg) { continue }
@@ -1713,6 +1750,13 @@ function Read-ClineMessages([string]$path, [switch]$CachedOnly) {
   $script:ClineMsgCache[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Result = $out }
   return $out
 }
+# Is what Read-ClineMessages has for this file up to date (or is there no file to read)?
+function Test-ClineMessagesFresh([string]$path) {
+  if (-not $path) { return $true }
+  $f = $null; try { $f = [IO.FileInfo]::new($path) } catch { return $true }
+  if (-not $f.Exists) { return $true }
+  return (Test-ClineFresh $script:ClineMsgCache[$f.FullName] $f)
+}
 # The Cline sessions to list, read every -RosterInterval s: open ones (status idle / running / pending,
 # pid alive since the session started) and, inside the keep window, ended ones: gone when Cline recorded
 # the end, else when its files were last written (an open status with no process: its window closed, and
@@ -1747,11 +1791,18 @@ function Update-ClineRoster([scriptblock]$getStart = ${function:Get-ProcessStart
       if (-not $goneAt) { $goneAt = $lastWrite }
       if (-not (Test-KeepWindow $goneAt $now $script:KeepMin)) { continue }
     }
-    $act = Read-ClineMessages $msgPath -CachedOnly
-    if ($null -eq $act -or -not $goneAt) {   # an open session is always read; an ended one within the budget, and at least one a call
-      if (-not $goneAt -or -not $readOne -or $sw.ElapsedMilliseconds -lt $budgetMs) { $act = Read-ClineMessages $msgPath; if ($goneAt) { $readOne = $true } }
+    # an open session's conversation is always read; an ended one's, when it changed, within the budget and
+    # at least one a call. One left for later shows its last read (or nothing) and counts as pending, so the
+    # next frames carry on until it is read: a conversation that changed is never left stale.
+    $fresh = Test-ClineMessagesFresh $msgPath
+    if ($fresh -or -not $goneAt -or -not $readOne -or $sw.ElapsedMilliseconds -lt $budgetMs) {
+      $act = Read-ClineMessages $msgPath
+      if ($goneAt -and -not $fresh) { $readOne = $true }
+    } else {
+      $pending++
+      $act = Read-ClineMessages $msgPath -CachedOnly
+      if ($null -eq $act) { $act = Read-ClineMessages '' }
     }
-    if ($null -eq $act) { $pending++; $act = Read-ClineMessages '' }
     $list.Add(@{ M = $m; Status = $status; Kind = $kind; Began = $x.Began; GoneAt = $goneAt; Open = $open; LastWrite = $lastWrite
                  MsgPath = $msgPath; Act = $act })
   }
@@ -3910,6 +3961,7 @@ if ($Snapshot) {
   $script:FixedSize = @{ W = $(if ($MaxWidth -gt 0) { $MaxWidth + 1 } elseif ($cw -gt 0) { $cw } else { 201 }); H = 100000 }
   $script:ReadOnly = $true                 # writes nothing: no scan cache, no closed-log entries
   $script:GoneBuildMs = [int]::MaxValue    # every row in the one frame
+  $script:ClineBuildMs = [int]::MaxValue   # every Cline session's files, too
 }
 if ($script:Mode -ne 'Worker') { try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {} }
 try {
@@ -3933,6 +3985,7 @@ try {
       [Console]::Out.WriteLine((Limit-Cells $t $sw).TrimEnd())
     }
     if ($procNote) { [Console]::Out.WriteLine($procNote) }
+    if ($script:ClinePending) { [Console]::Out.WriteLine("note: $($script:ClinePending) Cline file(s) not read yet: their rows show what was read before") }
   }
   else {
     [Console]::CursorVisible = $false

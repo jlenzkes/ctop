@@ -179,6 +179,29 @@ Describe 'a snapshot (-Snapshot)' {
     $row | Should -Match '\b42K\b' -Because 'CTX: 900 + 41000 + 100'
     $row | Should -Match 'execute_command: ls logs'
   }
+  It 'reads every Cline session''s conversation before it prints, however many there are (Sol, PR #3/#4 finding 4)' {
+    # the per-frame read limit is for the live display; a snapshot prints one frame and exits
+    $fx = New-Fixture (Join-Path $TestDrive 'snap-cline-many') @() -NoLive
+    $fx.NoClaude = $true
+    $fx.Cline = Join-Path $fx.Cfg 'cline-many'
+    $filler = 'x' * 2000
+    $replies = @(for ($k = 0; $k -lt 40; $k++) { [ordered]@{ role = 'assistant'; content = @(@{ type = 'text'; text = $filler }); metrics = @{ inputTokens = 1; cost = 0.01 } } })
+    $msgText = [ordered]@{ version = 1; messages = $replies } | ConvertTo-Json -Depth 8
+    $ended = [DateTime]::UtcNow.AddMinutes(-5).ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    for ($n = 0; $n -lt 80; $n++) {
+      $id = '17936{0:d8}_m{0:d4}' -f $n; $dir = Join-Path $fx.Cline $id; New-Item -ItemType Directory -Force -Path $dir | Out-Null
+      $m = [ordered]@{ version = 1; session_id = $id; source = 'vscode'; pid = 1; started_at = $ended; ended_at = $ended; status = 'completed'; exit_code = 0
+                       interactive = $true; provider = 'anthropic'; model = 'claude-sonnet-5'; cwd = '/w'; workspace_root = '/w'; enable_tools = $true
+                       enable_spawn = $false; enable_teams = $false; messages_path = (Join-Path $dir "$id.messages.json") }
+      [IO.File]::WriteAllText((Join-Path $dir "$id.json"), ($m | ConvertTo-Json))
+      [IO.File]::WriteAllText((Join-Path $dir "$id.messages.json"), $msgText)
+    }
+    $x = Invoke-Snapshot $fx @('-MaxWidth', '400', '-Keep', 'inf')
+    $x.Code | Should -Be 0 -Because $x.Err
+    $rows = @($x.Text -split "`r?`n" | Where-Object { $_ -match '^cline-m\d{4} ' })
+    $rows.Count | Should -Be 80
+    @($rows | Where-Object { $_ -match '\$0\.40' }).Count | Should -Be 80 -Because 'every row''s cost is read: 40 replies at $0.01'
+  }
   It 'says why when the roster cannot be read, and still exits' {
     $fx = New-Fixture (Join-Path $TestDrive 'snap-bad') @() -NoLive
     Set-FakeClaude $fx '' 'not-json'
