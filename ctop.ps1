@@ -100,9 +100,15 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.01.4 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.02.1 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
+  2026.11.02.1
+    - Cline sessions, read from Cline's own files: ~/.cline/data/sessions/<id>/<id>.json (the manifest:
+      status, pid, model, cwd, times) and <id>.messages.json (tokens, cost, the last action). No SQLite
+      and no cline command needed. An open session counts while its pid (in VS Code, the window's
+      extension host) runs and started no later than the session; ended ones stay for the keep window.
+      VIA reads cline; peek, n and d work for them; y has no resume command to copy
   2026.11.01.4
     - runs without the claude command: VS Code alone (its built-in Claude agent) leaves none. ctop then
       reads Claude Code's live-session registry, ~/.claude/sessions/<pid>.json, itself, keeping an
@@ -350,7 +356,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.01.4'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.11.02.1'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -1473,6 +1479,18 @@ function Format-Contact($r, [string]$machine = [Environment]::MachineName) {
     $lines.Add('A subagent is reached through its parent session: message that session about it.')
     return ($lines -join "`n")
   }
+  if ($r._Agent -eq 'cline') {
+    $m = $r._Cline.M
+    $lines.Add('Cline session' + $(if ([string]$m.source -eq 'vscode') { ' (VS Code)' } elseif ($m.source) { " ($(& $c $m.source))" } else { '' }))
+    & $row 'Session ID' (& $c $r._SessionId)
+    if ($r.TITLE) { & $row 'Title' (& $c $r.TITLE) }
+    & $row 'State' (& $c $r.STATE)
+    if ($r.CWD -and $r.CWD -ne '-') { & $row 'Directory' (& $c $r.CWD) }
+    & $row 'Machine' (& $c $machine)
+    if ($r._Transcript -and $r._Transcript -ne '-') { & $row 'Messages' (& $c $r._Transcript) }
+    $lines.Add('ctop knows no way to message a Cline session from outside Cline.')
+    return ($lines -join "`n")
+  }
   $src = $r._Src
   # the address is the session's own name (claude agents --json: name); the row's NAME can be a stand-in
   # (an unnamed background session is shown by its job id), which no one can message
@@ -1720,13 +1738,15 @@ function Read-SessionRegistry([string]$dir) {
 # another process. An entry counts as live only while its pid names a process that started no later than
 # the session did: a process that got the pid afterwards started after it. $getStart: pid -> the process's
 # start time, $null when no process has that pid, or 'unknown' when the start time cannot be read.
-function Test-RegistryLive($entry, [scriptblock]$getStart) {
-  $start = & $getStart ([int]$entry.pid)
+function Test-RegistryLive($entry, [scriptblock]$getStart) { Test-ProcessSince ([int]$entry.pid) (ConvertFrom-UnixMs $entry.startedAt) $getStart }
+# $id names a process that started no later than $began (+5 s): the one that wrote the entry, not a later
+# process given the same pid. $began $null, or a start time that cannot be read: the process is enough.
+function Test-ProcessSince([int]$id, $began, [scriptblock]$getStart) {
+  $start = & $getStart $id
   if ($null -eq $start) { return $false }
   if ($start -is [string]) { return $true }   # cannot tell: the process is there
-  $began = ConvertFrom-UnixMs $entry.startedAt
   if (-not $began) { return $true }
-  return ([datetime]$start -le $began.AddSeconds(5))
+  return ([datetime]$start -le ([datetime]$began).AddSeconds(5))
 }
 function Get-ProcessStart([int]$id) {
   $p = Get-Process -Id $id -ErrorAction SilentlyContinue
@@ -1745,6 +1765,286 @@ function Get-EntrypointLabel([string]$entrypoint) {
     '^sdk-'           { return 'sdk' }
     default           { if ($e.Length -gt 12) { return $e.Substring(0, 12) } else { return $e } }
   }
+}
+
+# ---- Cline ----------------------------------------------------------------------
+# Cline (its VS Code extension and its CLI) keeps a folder per session in its sessions folder:
+#   <id>/<id>.json           the manifest: session_id, source (vscode, cli, …), pid, status, started_at,
+#                            ended_at, exit_code, interactive, provider, model, cwd, prompt, metadata.title,
+#                            messages_path
+#   <id>/<id>.messages.json  the conversation; each model reply carries metrics: inputTokens, outputTokens,
+#                            cacheReadTokens, cacheWriteTokens, cost
+# (read in Cline's source, cline/cline a6507a6: sdk/packages/core/src/session/models/session-manifest.ts,
+# sdk/packages/core/src/services/session-data.ts, sdk/packages/shared/src/llms/messages.ts). Status:
+# idle, running, pending while the session is open; completed, failed, cancelled once it has ended.
+# Seen on Windows 2026-11-01: the manifest's status follows the session (running -> idle within 8 s), and
+# its pid is the extension host of the VS Code window it runs in, so a live pid means "the window is open",
+# not "working": the status says which. A window closed under it ends as failed, exit code 1.
+# No SQLite and no cline command are needed: Cline's sessions.db holds the same rows.
+function Get-ClineSessionsDir {
+  # as Cline resolves it (sdk/packages/shared/src/storage/paths.ts)
+  $v = "$env:CLINE_SESSION_DATA_DIR".Trim(); if ($v) { return $v }
+  $data = "$env:CLINE_DATA_DIR".Trim()
+  if (-not $data) {
+    $root = "$env:CLINE_DIR".Trim(); if (-not $root) { $root = Join-Path $HOME '.cline' }
+    $data = Join-Path $root 'data'
+  }
+  return (Join-Path $data 'sessions')
+}
+# An ISO 8601 time as a local DateTime, or $null. PowerShell 7's ConvertFrom-Json has already made it a
+# DateTime; Windows PowerShell 5.1 leaves it a string.
+function ConvertFrom-IsoTime($v) {
+  if ($null -eq $v) { return $null }
+  if ($v -is [datetime]) { return $v.ToLocalTime() }
+  $d = [DateTimeOffset]::MinValue
+  if ([DateTimeOffset]::TryParse([string]$v, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$d)) { return $d.LocalDateTime }
+  return $null
+}
+function Read-SharedText([string]$path) {
+  $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+  try { return [IO.StreamReader]::new($fs).ReadToEnd() } finally { $fs.Dispose() }
+}
+# Every session folder's manifest, parsed once per change (one stat per session per poll otherwise). Cline
+# rewrites a manifest in place, so a read can catch it half-written: then the last good copy stands.
+# Parsing is capped at $budgetMs per call, newest first: a long history must not hold a frame for seconds
+# (300 manifests take ~0.5 s); what is left is counted in ClineManifestPending and parsed on the next calls.
+$script:ClineManifests = @{}   # manifest path -> @{ Length; Write; M; Began; Ended }
+$script:ClineManifestPending = 0
+function Read-ClineManifests([string]$dir, [int]$budgetMs = [int]::MaxValue) {
+  $list = [Collections.Generic.List[object]]::new()
+  $script:ClineManifestPending = 0
+  $di = [IO.DirectoryInfo]::new($dir)
+  if (-not $di.Exists) { $script:ClineManifests = @{}; return $list.ToArray() }
+  $dirs = @(); try { $dirs = $di.GetDirectories() } catch { }
+  $files = [Collections.Generic.List[IO.FileInfo]]::new()
+  foreach ($d in $dirs) { $f = [IO.FileInfo]::new([IO.Path]::Combine($d.FullName, $d.Name + '.json')); if ($f.Exists) { $files.Add($f) } }
+  $arr = $files.ToArray(); $keys = [long[]]::new($arr.Count)
+  for ($i = 0; $i -lt $arr.Count; $i++) { $keys[$i] = -$arr[$i].LastWriteTimeUtc.Ticks }
+  [Array]::Sort($keys, $arr)   # newest first
+  $seen = @{}; $parsed = 0
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  foreach ($f in $arr) {
+    $seen[$f.FullName] = $true
+    $c = $script:ClineManifests[$f.FullName]
+    if (-not ($c -and $c.Length -eq $f.Length -and $c.Write -eq $f.LastWriteTimeUtc)) {
+      if ($parsed -and $sw.ElapsedMilliseconds -ge $budgetMs) { $script:ClineManifestPending++ }   # at least one a call: always progress
+      else {
+        $parsed++
+        $m = $null
+        try { $m = ConvertFrom-Json -InputObject (Read-SharedText $f.FullName) -ErrorAction Stop } catch { }
+        if ($null -ne $m -and $m.session_id -and $null -ne $m.pid -and $m.status) {
+          $c = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; M = $m; Began = (ConvertFrom-IsoTime $m.started_at); Ended = (ConvertFrom-IsoTime $m.ended_at) }
+          $script:ClineManifests[$f.FullName] = $c
+        }
+      }
+    }
+    if ($c) { $list.Add(@{ M = $c.M; File = $f; Began = $c.Began; Ended = $c.Ended }) }
+  }
+  foreach ($k in @($script:ClineManifests.Keys)) { if (-not $seen.ContainsKey($k)) { $script:ClineManifests.Remove($k) } }
+  return $list.ToArray()   # callers wrap in @()
+}
+# What a session's conversation says: the same fields as Get-LastAction, from <id>.messages.json, read
+# again only when the file changes. Tokens and cost are Cline's own figures, summed over its replies;
+# CTX is the newest reply's input (fresh + cache read + cache write), as for Claude Code.
+$script:ClineMsgCache = @{}   # path -> @{ Length; Write; Result }
+# -CachedOnly: no read; the last result (even of an older version of the file), or $null if there is none.
+function Read-ClineMessages([string]$path, [switch]$CachedOnly) {
+  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0 }
+  if (-not $path) { return $out }
+  $f = $null; try { $f = [IO.FileInfo]::new($path) } catch { return $out }
+  if (-not $f.Exists) { return $out }
+  $c = $script:ClineMsgCache[$f.FullName]
+  if ($c -and $c.Length -eq $f.Length -and $c.Write -eq $f.LastWriteTimeUtc) { return $c.Result }
+  if ($CachedOnly) { if ($c) { return $c.Result } else { return $null } }
+  if ($f.Length -gt 64MB) { $out.Last = '(conversation file over 64 MB: not read)'; $script:ClineMsgCache[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Result = $out }; return $out }
+  $o = $null
+  try { $o = ConvertFrom-Json -InputObject (Read-SharedText $f.FullName) -ErrorAction Stop } catch { }
+  if ($null -eq $o) { if ($c) { return $c.Result } else { return $out } }   # caught mid-write: the last good read stands
+  $turns = 0; $tools = 0; $counts = @{}; $last = $null
+  foreach ($msg in @($o.messages)) {
+    if ($null -eq $msg) { continue }
+    $last = $msg
+    $blocks = @(if ($msg.content -is [string]) { [pscustomobject]@{ type = 'text'; text = [string]$msg.content } } else { $msg.content })
+    if ($msg.role -eq 'user') {
+      if (@($blocks | Where-Object { $_ -and $_.type -eq 'text' -and "$($_.text)".Trim() }).Count) {
+        $turns++
+        if ($msg.ts) { $out.TurnStart = ConvertFrom-UnixMs $msg.ts }
+      }
+    } elseif ($msg.role -eq 'assistant') {
+      foreach ($b in $blocks) {
+        if ($b -and $b.type -eq 'tool_use') { $tools++; $n = [string]$b.name; if ($n) { $counts[$n] = 1 + [int]$counts[$n] } }
+      }
+      $mt = $msg.metrics
+      if ($mt) {
+        $in = [long]$mt.inputTokens; $cr = [long]$mt.cacheReadTokens; $cw = [long]$mt.cacheWriteTokens
+        $out.InTok += $in; $out.OutTok += [long]$mt.outputTokens; $out.CacheR += $cr; $out.CacheW += $cw
+        $cost = 0.0; if ([double]::TryParse("$($mt.cost)", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$cost) -and -not [double]::IsNaN($cost) -and -not [double]::IsInfinity($cost) -and $cost -gt 0) { $out.Cost += $cost }
+        if ($in + $cr + $cw -gt 0) { $out.Ctx = [math]::Round(($in + $cr + $cw) / 1000) }
+      }
+      if ($msg.modelInfo -and $msg.modelInfo.id) { $out.Model = ([string]$msg.modelInfo.id -replace '^claude-', '') }
+    }
+  }
+  $out.Turns = $turns; $out.Tools = $tools
+  $out.ToolMix = ($counts.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ' · '
+  # STATE and LAST ACTION from the newest message, as for Claude Code: a tool call = working, a prompt or a
+  # tool result = thinking (the model's turn), a reply = idle
+  if ($last) {
+    $blocks = @(if ($last.content -is [string]) { [pscustomobject]@{ type = 'text'; text = [string]$last.content } } else { $last.content })
+    $b = @($blocks | Where-Object { $_ -and $_.type -in 'text', 'tool_use', 'tool_result' }) | Select-Object -Last 1
+    $text = ''
+    if ($b -and $b.type -eq 'tool_use') {
+      $out.State = 'working'
+      $arg = ''; if ($b.input) { foreach ($p in $b.input.PSObject.Properties) { if ($p.Value -is [string] -and $p.Value.Trim()) { $arg = $p.Value; break } } }
+      $text = [string]$b.name + $(if ($arg) { ': ' + $arg })
+    } elseif ($b -and $b.type -eq 'tool_result') {
+      $out.State = 'thinking'; $text = "result of $($b.name)"
+    } elseif ($b) {
+      $out.State = if ($last.role -eq 'user') { 'thinking' } else { 'idle' }
+      $text = $(if ($last.role -eq 'user') { 'prompt: ' } else { '' }) + [string]$b.text
+    }
+    if ($text) { $out.LastFull = $text; $out.Last = (Clean $text).Trim() }
+  }
+  $script:ClineMsgCache[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Result = $out }
+  return $out
+}
+# The Cline sessions to list, read every -RosterInterval s: open ones (status idle / running / pending,
+# pid alive since the session started) and, inside the keep window, ended ones: gone when Cline recorded
+# the end, else when its files were last written (an open status with no process: its window closed, and
+# Cline will mark it failed the next time it runs). Reading is capped at $budgetMs per call, as for Claude
+# Code's gone rows: an open session's conversation is always read, an ended one's only within the budget
+# (else its last read, or empty fields), and ClinePending makes the next frames carry on.
+$script:ClineAt = [datetime]::MinValue
+$script:ClineRows = @()
+$script:ClinePending = 0
+$script:ClineBuildMs = 120
+function Update-ClineRoster([scriptblock]$getStart = ${function:Get-ProcessStart}, [int]$budgetMs = $(if ($null -ne $script:ClineBuildMs) { $script:ClineBuildMs } else { 120 })) {
+  $now = Get-Date
+  $script:ClineAt = $now
+  $sw = [Diagnostics.Stopwatch]::StartNew(); $readOne = $false
+  $list = [Collections.Generic.List[object]]::new()
+  $entries = @(Read-ClineManifests (Get-ClineSessionsDir) $budgetMs)
+  $pending = $script:ClineManifestPending
+  foreach ($x in $entries) {
+    $m = $x.M
+    $kind = if ($m.interactive -eq $false) { 'headless' } else { 'interactive' }
+    if (-not (Test-KindListed $kind ([bool]$All))) { continue }
+    $status = ([string]$m.status).Trim().ToLowerInvariant()
+    $open = $status -in 'idle', 'running', 'pending'
+    if (-not $open -and $x.Ended -and -not (Test-KeepWindow $x.Ended $now $script:KeepMin)) { continue }   # ended before the window
+    $live = $open -and (Test-ProcessSince ([int]$m.pid) $x.Began $getStart)
+    $msgPath = if ("$($m.messages_path)".Trim()) { [string]$m.messages_path } else { [IO.Path]::Combine($x.File.DirectoryName, [string]$m.session_id + '.messages.json') }
+    $lastWrite = $x.File.LastWriteTime
+    try { $mf = [IO.FileInfo]::new($msgPath); if ($mf.Exists -and $mf.LastWriteTime -gt $lastWrite) { $lastWrite = $mf.LastWriteTime } } catch { }
+    $goneAt = $null
+    if (-not $live) {
+      if (-not $open) { $goneAt = $x.Ended }
+      if (-not $goneAt) { $goneAt = $lastWrite }
+      if (-not (Test-KeepWindow $goneAt $now $script:KeepMin)) { continue }
+    }
+    $act = Read-ClineMessages $msgPath -CachedOnly
+    if ($null -eq $act -or -not $goneAt) {   # an open session is always read; an ended one within the budget, and at least one a call
+      if (-not $goneAt -or -not $readOne -or $sw.ElapsedMilliseconds -lt $budgetMs) { $act = Read-ClineMessages $msgPath; if ($goneAt) { $readOne = $true } }
+    }
+    if ($null -eq $act) { $pending++; $act = Read-ClineMessages '' }
+    $list.Add(@{ M = $m; Status = $status; Kind = $kind; Began = $x.Began; GoneAt = $goneAt; Open = $open; LastWrite = $lastWrite
+                 MsgPath = $msgPath; Act = $act })
+  }
+  $script:ClineRows = $list.ToArray()
+  $script:ClinePending = $pending
+}
+# A Cline session as a ctop row: the same fields as a Claude Code row (Build-Rows), _Agent = 'cline'.
+function New-ClineRow($e, [bool]$sample) {
+  $m = $e.M; $act = $e.Act; $id = [string]$m.session_id; $gone = $e.GoneAt
+  $state = if ($gone) { 'gone ' + (Get-Since $gone) }
+           elseif ($e.Status -eq 'running') { if ($act.State -in 'working', 'thinking') { $act.State } else { 'working' } }
+           else { $e.Status }   # idle, pending
+  $cwd = Normalize-Path ([string]$m.cwd)
+  $git = Get-GitInfo $cwd
+  $startMs = if ($e.Began) { ([DateTimeOffset]$e.Began).ToUnixTimeMilliseconds() } else { $null }
+  $title = if ($m.metadata -and "$($m.metadata.title)".Trim()) { [string]$m.metadata.title } elseif ("$($m.prompt)".Trim()) { (([string]$m.prompt).Trim() -split "`n")[0] } else { '' }
+  $model = if ($act.Model -and $act.Model -ne '-') { $act.Model } elseif ($m.model) { ([string]$m.model -replace '^claude-', '') } else { '-' }
+  $active = $state -in 'working', 'thinking'
+  if ($sample -and (Test-SampleActivity ([bool]$gone) $script:History[$id])) { Add-Sample $id $state 0 }
+  if ($gone) { [void]$script:FreshIds.Add($id) }   # built every frame: never stale on screen
+  [pscustomobject]@{
+    NAME     = 'cline-' + $(if ($id -match '_([^_]+)$') { $Matches[1] } else { $id })
+    TITLE    = $title
+    KIND     = $e.Kind
+    VIA      = 'cline'
+    STATE    = $state
+    PID      = if ($null -ne $m.pid) { $m.pid } else { '-' }
+    'CPU(s)' = '-'   # the pid is VS Code's extension host, shared with every other extension: its CPU is not Cline's
+    'MEM(MB)'= '-'
+    AGE      = if ($startMs) { Get-Age $startMs } else { '-' }
+    IDLE     = Get-Since $e.LastWrite
+    TURN     = if ($act.TurnStart -and $active) { Get-Since $act.TurnStart } else { '' }
+    TURNS    = $act.Turns
+    TOOLS    = $act.Tools
+    CTX      = if ($act.Ctx -ne '-') { "$($act.Ctx)K" } else { '-' }
+    CMP      = ''
+    MODEL    = $model
+    BRANCH   = $(if ($git.Worktree) { 'wt:' + $git.Branch } else { $git.Branch })
+    COST     = if ($act.Cost -gt 0) { '${0:N2}' -f $act.Cost } else { '-' }
+    RATE     = Format-Rate ([double]$act.Cost) $e.Began (Get-Date)
+    ACTIVITY = $script:History[$id]
+    'LAST ACTION' = $act.Last
+    CWD      = $cwd
+    _Agent      = 'cline'
+    _Cline      = $e
+    _SessionId  = $id
+    _Parent     = $null
+    _Git        = $git
+    _Jobs       = @()
+    _KidJobs    = 0
+    _Helpers    = 0
+    _Hooks      = @()
+    _LaunchCwd  = $cwd
+    _Order      = 1000000
+    _Gone       = $gone
+    _Cleared    = $false
+    _Successor  = ''
+    _LaunchedBy = $null
+    _AgentCost  = 0.0
+    _AgentN     = 0
+    _Act        = $act
+    _Transcript = $e.MsgPath
+    _StartedAt  = $e.Began
+    _Src        = [pscustomobject]@{ sessionId = $id; startedAt = $startMs; cwd = [string]$m.cwd; pid = $m.pid; kind = $e.Kind; title = $title }
+    _LiveKids   = 0
+    _Group = $null; _TreeCost = $null; _LaunchCost = $null; _LaunchN = $null; _Launcher = $null; _LaunchedNames = $null; _TreeLast = $null
+    _Lines = $null; _LinesSig = $null; _Dirty = $true; _Widths = $null
+  }
+}
+function Build-ClinePeek([object]$r) {
+  $pw = (Get-WindowWidth) - 2
+  $m = $r._Cline.M; $e = $r._Cline
+  $source = [string]$m.source
+  $where = switch -Regex ($source) { '^vscode$' { 'in VS Code' } '^cli$' { 'in the cline command' } default { if ($source) { "from $source" } else { '' } } }
+  $ended = if ($e.Open) { $null } else { "  ENDED        Cline recorded it as $($e.Status)$(if ($null -ne $m.exit_code) { ", exit code $($m.exit_code)" })" + $(if ($e.Status -eq 'failed') { '   (also how a session ends when its VS Code window closes)' } else { '' }) }
+  $lines = @(
+    @{ Text = "  ctop — $($r.NAME.Trim())   (live)"; Inverse = $true },
+    '',
+    "  NAME         $($r.NAME.Trim())      a Cline session $where",
+    $(if ($r.TITLE) { Peek-Block 'TITLE' $r.TITLE $pw } else { $null }),
+    $(if ($r._Gone) { "  GONE         $(Get-Since $r._Gone) ago" } else { $null }),
+    $ended,
+    $(if ($r._Gone -and $e.Open) { "  NOTE         Cline still lists it as $($e.Status), but its process (pid $($m.pid)) has gone: its window or command was closed" } else { $null }),
+    "  KIND         $($r.KIND)",
+    "  STATE        $(Paint $r.STATE (Cell-Color 'STATE' $r))      Cline says: $($e.Status)",
+    "  PID          $($r.PID)      $(if ($source -eq 'vscode') { "the VS Code window's extension host: it lives as long as the window, and runs every other extension too" } else { '' })",
+    "  STARTED      $(if ($r._StartedAt) { $r._StartedAt.ToString('yyyy-MM-dd HH:mm:ss') } else { '-' })   (age $($r.AGE))",
+    "  IDLE         $($r.IDLE)      TURN $(Paint $(if ($r.TURN) { $r.TURN } else { '-' }) (Cell-Color 'TURN' $r))      TURNS $($r.TURNS)",
+    $(Peek-Block 'TOOLS' "$($r.TOOLS) calls$(if ($r._Act.ToolMix) { ':  ' + $r._Act.ToolMix })" $pw),
+    "  CTX          $($r.CTX) tokens in context      MODEL $(Paint $r.MODEL (Cell-Color 'MODEL' $r))$(if ($m.provider) { " ($($m.provider))" })      BRANCH $($r.BRANCH)",
+    "  COST         $($r.COST) as Cline reports it$(if ($r.RATE -and $r.RATE -ne '-') { "   ($($r.RATE)/h)" })     tokens: in $($r._Act.InTok)  out $($r._Act.OutTok)  cache read $($r._Act.CacheR)  cache write $($r._Act.CacheW)",
+    "  ACTIVITY     $(Paint-Spark $r.ACTIVITY)   ($(Paint-Spark '█') working  $(Paint-Spark '▒') thinking  $(Paint-Spark '·') idle, 1 char = 2 s, newest right)",
+    $(Peek-Block 'LAST ACTION' $(if ($r._Act.LastFull) { $r._Act.LastFull } else { $r.'LAST ACTION' }) $pw),
+    "  CWD          $($r.CWD)",
+    "  SESSION ID   $($r._SessionId)",
+    "  MESSAGES     $($r._Transcript)"
+  )
+  $flat = @(); foreach ($l in $lines) { if ($null -eq $l) { continue }; $flat += $l }
+  return ,$flat
 }
 
 # ---- roster feed (asynchronous) ---------------------------------------------
@@ -2388,6 +2688,7 @@ function Build-Rows {
     $prow
     if ($script:ShowSubagents) { $kids }
   }
+  foreach ($ce in $script:ClineRows) { if ($ce.GoneAt -and -not $script:ShowGone) { continue }; New-ClineRow $ce $sample }
 }
 
 # Sort parents, keep each parent's subagent rows directly beneath it.
@@ -2907,6 +3208,7 @@ function Get-QuestionLines([object[]]$qs, [int]$width) {
   return ,$out
 }
 function Build-Peek([object]$r) {
+  if ($r._Agent -eq 'cline') { return ,(Build-ClinePeek $r) }
   $pw = (Get-WindowWidth) - 2
   $lines = @(
     @{ Text = "  ctop — $($r.NAME.Trim())   (live)"; Inverse = $true },   # keeps the └: says "subagent" at a glance
@@ -3092,8 +3394,15 @@ function Show-Help {
     '  TITLE      the task description the spawner gave it. KIND reads subagent, or subagent·bg for one',
     '             spawned in the background (the spawner kept working instead of waiting for it)',
     '',
+    'CLINE   a Cline session (its VS Code extension or its cline command) is read from its folder in',
+    '  ~/.cline/data/sessions (or CLINE_SESSION_DATA_DIR / CLINE_DATA_DIR / CLINE_DIR): STATE from the status',
+    '  Cline records (running: working, or thinking when its newest message is a prompt or a tool result),',
+    '  the rest from <id>.messages.json. COST is the cost Cline records, not ctop''s price table. PID is the',
+    '  VS Code window''s extension host, so CPU and MEM are left blank. Ended sessions stay for the keep window.',
+    '',
     'COLUMNS   (source: J = claude agents --json, R = Claude Code''s session registry (~/.claude/sessions),',
-    '           O = OS, T = transcript file — heuristic. Without the claude command, J comes from R too)',
+    '           O = OS, T = transcript file — heuristic. Without the claude command, J comes from R too.',
+    '           A Cline session (VIA cline) is read from Cline''s own files instead: see CLINE below)',
     'MOUSE   (Windows; -NoMouse turns it off)  click a row to select it, click it again or double-click',
     '  to peek, wheel to move, click a footer item for its key, click in peek to close it. To select',
     '  text in the terminal while ctop runs, hold Shift while dragging.',
@@ -3106,7 +3415,8 @@ function Show-Help {
     '                 (untitled) = the picker shows Untitled too. Subagents: their task description',
     '  KIND        J  interactive (terminal / VS Code), background (agent view), subagent, subagent·bg',
     '  VIA         R  what the session runs in: cli, vscode (the Claude Code extension), sdk (the Claude',
-    '                 Agent SDK: VS Code''s own Claude agent, or another program built on it), remote',
+    '                 Agent SDK: VS Code''s own Claude agent, or another program built on it), remote,',
+    '                 cline (a Cline session)',
     '  TURN        T  time since your last prompt — how long Claude has been on this turn (blank when idle).',
     '                 Yellow >= 10 min, red >= 30 min',
     '  IDLE        T  time since the transcript was last written to',
@@ -3358,6 +3668,7 @@ function Invoke-Frame($view) {
   # feed: harvest a finished poll, and (re)start one if it's time
   $fresh = Read-Roster
   Read-ProcPoll
+  if ($script:ClinePending -or ((Get-Date) - $script:ClineAt).TotalSeconds -ge $RosterInterval -or @($view.Actions) -contains 'poll') { Update-ClineRoster }
   if (-not $script:Poll -and $script:PollAt -and
       ((Get-Date) - $script:PollAt).TotalSeconds -ge $RosterInterval) { Start-RosterPoll }
 
@@ -3483,7 +3794,7 @@ function Invoke-Frame($view) {
   if ($sel) {
     $cid = Get-CopyId $sel
     $copy = @{ Id = [string]$sel._SessionId; Transcript = $(if ($sel._Transcript -and $sel._Transcript -ne '-') { [string]$sel._Transcript } else { '' })
-               Resume = "claude --resume $(if ($sel._Parent) { $sel._Parent } else { $sel._SessionId })"; Contact = (Format-Contact $sel); IdText = $cid.Text; IdWhat = $cid.What }
+               Resume = $(if ($sel._Agent) { '' } else { "claude --resume $(if ($sel._Parent) { $sel._Parent } else { $sel._SessionId })" }); Contact = (Format-Contact $sel); IdText = $cid.Text; IdWhat = $cid.What }
   }
   if ($script:Roster.Count -and @($sorted).Count) { $script:LiveShown = $true }
   $script:LastFrameMs = [int]$frameSw.ElapsedMilliseconds
@@ -3566,7 +3877,7 @@ function Complete-PendingCopies($packet, $view) {
 function Copy-From([string]$what, $c) {
   switch ($what) {
     't' { if ($c.Transcript) { Copy-Text $c.Transcript 'transcript path' } }
-    'y' { Copy-Text $c.Resume 'resume command' }
+    'y' { if ($c.Resume) { Copy-Text $c.Resume 'resume command' } }   # none for a Cline session
     'n' { Copy-Text $c.Contact 'contact' }
     'd' { Copy-Text $c.IdText $c.IdWhat }
   }

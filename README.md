@@ -1,6 +1,7 @@
 # ctop
 
 A `top`-style live view of your running [Claude Code](https://code.claude.com) sessions, in the terminal.
+It lists [Cline](https://github.com/cline/cline) sessions too (see [Requirements](#requirements)).
 
 ctop polls `claude agents --json` for the session roster, then fills in each row from local
 sources: the session's transcript under `~/.claude/projects/`, and the OS process table. It shows,
@@ -31,6 +32,14 @@ Everything is read locally. ctop makes no model calls and uses no tokens.
   - **`claude` on `PATH`:** ctop runs `claude agents --json`, as before.
   - **No `claude` command:** ctop reads Claude Code's live-session registry, `~/.claude/sessions/*.json`, itself. That covers VS Code alone, where VS Code's built-in Claude agent runs Claude Code through the Claude Agent SDK. It writes that registry and its transcripts, which was tested on Windows with nothing from Anthropic installed.
   - **VIA column:** says which a session is: `cli`, `vscode` (the Claude Code extension) or `sdk` (VS Code's Claude agent, or another program built on the SDK).
+- **Cline sessions** (its VS Code extension, or its `cline` command) are listed too, with VIA `cline`. ctop reads them from Cline's own files, with no SQLite and no `cline` command needed:
+  - `~/.cline/data/sessions/<id>/<id>.json`: the session's status (idle, running, ended), its process, model and folder. The folder moves with `CLINE_SESSION_DATA_DIR`, `CLINE_DATA_DIR` or `CLINE_DIR`, as in Cline.
+  - `<id>.messages.json` beside it: tokens, cost and the last action.
+  - **What is shown differently:**
+    - COST is the cost Cline records, not ctop's price table.
+    - CPU and MEM are blank, because in VS Code the session's process is the window's extension host, shared with every other extension.
+    - `y` has no resume command to copy.
+  - **How it was checked:** the manifest's status and process were seen on Windows with a real Cline task (its status followed the task within 8 s). The messages file was read from Cline's source (`cline/cline` at `a6507a6`), not yet from a real file. `tools/Probe-AgentSources.ps1` now reports its field names, to check that.
 - **Operating system**: Windows, or Linux in the Debian and Fedora / RHEL families. On Linux the
   process table comes from `ps -ww -eo pid,ppid,etimes,…` (procps) and `/proc/<pid>/stat`; without
   `ps`, ctop still runs but can't see background jobs. macOS is untested: the process-table code is
@@ -224,11 +233,11 @@ The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meani
 
 ## Tested on
 
-What has actually been run, as of build `2026.11.01.4`. Anything not listed here is untested.
+What has actually been run, as of build `2026.11.02.1`. Anything not listed here is untested.
 
-**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (381, less those
+**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (409, less those
 that cannot apply: Linux skips the two Windows process tests; Windows skips the two that need a
-case-sensitive filesystem; Windows PowerShell 5.1 also skips the flag-width test: 379, 379 and 378 run).
+case-sensitive filesystem; Windows PowerShell 5.1 also skips the flag-width test: 407, 407 and 406 run).
 They include the worker run as a real process, the display against a worker that misbehaves, `-Snapshot`
 and the command line run as processes, on Windows PowerShell 5.1 too.
 *End to end*: the integration tests (41), which drive the real ctop in tmux against a fake `claude`
@@ -320,7 +329,9 @@ The cache and the DLL are rebuilt as needed and can be deleted at any time. Dele
   process that outlives `claude` and keeps its output open is no longer `claude`'s child and is not
   stopped; ctop drops that poll and polls again all the same.
 - COST is computed at API list price from per-turn token usage, the same basis as `/usage`. It
-  is not your plan's billing.
+  is not your plan's billing. A Cline session's COST is the cost Cline itself records for each reply.
+- Cline's session files are not documented either. ctop reads them as Cline's source writes them
+  (`cline/cline` at `a6507a6`), and a field it can't find shows `-`.
 
 ## Versioning
 
@@ -362,7 +373,7 @@ Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser
 
 `tools/Probe-AgentSources.ps1` reports what the coding agents that can run Claude leave on a computer:
 Claude Code, VS Code's Copilot (its chats and its Claude agent), Cline and Roo Code. It is research for
-showing their sessions in ctop. It reads only, and prints where each agent's files are, how many and how
+showing their sessions in ctop. For Cline's conversation files it prints only counts and field names. It reads only, and prints where each agent's files are, how many and how
 recent, their field names, and values that say nothing about your work (ids, status, model, token counts,
 times), never prompts, replies, titles or command lines. Run it while an agent is working:
 

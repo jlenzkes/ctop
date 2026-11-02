@@ -36,7 +36,10 @@ Describe 'the agent probe' {
     # Cline: a session manifest and its messages
     Put 'cline/data/sessions/k1/k1.json' @{ version = 1; session_id = 'k1'; source = 'vscode'; pid = 777; started_at = '2026-11-01T10:00:00Z'; status = 'running'; interactive = $true
                                              provider = 'anthropic'; model = 'claude-sonnet-4-5'; cwd = "/w/$secret"; workspace_root = '/w'; enable_tools = $true; enable_spawn = $false; enable_teams = $false; prompt = "$secret first prompt" }
-    Put 'cline/data/sessions/k1/k1.messages.json' @(@{ role = 'user'; content = "$secret msg" })
+    Put 'cline/data/sessions/k1/k1.messages.json' @{ version = 1; updated_at = '2026-11-01T10:01:00Z'; agent = 'lead'; sessionId = 'k1'; messages = @(
+      @{ role = 'user'; content = "$secret msg" },
+      @{ role = 'assistant'; ts = 1793500000000; content = @(@{ type = 'text'; text = "$secret reply" }, @{ type = 'tool_use'; id = 't1'; name = 'read_file'; input = @{ path = "/w/$secret" } })
+         modelInfo = @{ id = 'claude-sonnet-4-5'; provider = 'anthropic' }; metrics = @{ inputTokens = 10; outputTokens = 2; cacheReadTokens = 300; cacheWriteTokens = 4; cost = 0.01 } }) }
 
     $pwsh = (Get-Process -Id $PID).Path
     $onWindows = $IsWindows -or $env:OS -eq 'Windows_NT'
@@ -100,9 +103,14 @@ Describe 'the agent probe' {
   }
   It 'reports a Cline session from its manifest, and says when sqlite3 is missing' {
     $script:report | Should -Match 'status="running"\s+source="vscode"\s+pid=777'
-    $script:report | Should -Match 'messages\.json: a list of 1'
+    $script:report | Should -Match 'messages\.json: fields agent, messages, sessionId, updated_at, version'
     $script:report | Should -Match 'sessions\.db: not found'
     $script:report | Should -Match 'started_at="?2026-11-01T10:00:00' -Because 'a date, not (object): PowerShell 7 reads ISO strings as dates'
+  }
+  It 'sums up a Cline messages file by counts and field names, not its text' {
+    $script:report | Should -Match 'messages: 2\s+roles: "assistant" 1, "user" 1'
+    $script:report | Should -Match 'content blocks: "text" 1, "tool_use" 1, \(plain text\) 1'
+    $script:report | Should -Match 'with metrics: 1\s+metrics fields: cacheReadTokens, cacheWriteTokens, cost, inputTokens, outputTokens\s+modelInfo fields: id, provider\s+with ts: 1'
   }
   It 'reads cline history --json when cline is installed, showing status and model, not the prompt or title' {
     $script:report | Should -Match 'cline history --json: 1 rows'

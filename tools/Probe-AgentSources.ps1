@@ -48,7 +48,7 @@ param(
   [int]$WatchSeconds = 0
 )
 $ErrorActionPreference = 'Stop'
-$ProbeVersion = '2026.11.01.3'
+$ProbeVersion = '2026.11.02.1'
 $onWindows = $IsWindows -or $env:OS -eq 'Windows_NT'
 $onMac = (-not $onWindows) -and $IsMacOS
 $homeDir = [Environment]::GetFolderPath('UserProfile')
@@ -335,11 +335,34 @@ if (Test-Path -LiteralPath $kdir) {
   foreach ($s in (Newest $sess)) {
     Say "      $($s.Name)  changed $(Show-Time $s.LastWriteTimeUtc)  files: $((@(Get-ChildItem -LiteralPath $s.FullName -File -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name) ($(Show-Time $_.LastWriteTimeUtc))" })) -join ', ')"
     $m = Read-Json (Join-Path $s.FullName "$($s.Name).json") 2MB
-    if ($m) { Show-Fields $m @('status', 'source', 'pid', 'interactive', 'provider', 'model', 'started_at', 'ended_at', 'exit_code', 'version') '        manifest: ' }
+    if ($m) {
+      Show-Fields $m @('status', 'source', 'pid', 'interactive', 'provider', 'model', 'started_at', 'ended_at', 'exit_code', 'version') '        manifest: '
+      if ($m.metadata) { Say "        manifest metadata fields: $(Keys $m.metadata)" }
+    }
     $msgs = Read-Json (Join-Path $s.FullName "$($s.Name).messages.json")
     if ($null -ne $msgs) {
       if ($msgs -is [array]) { Say "        messages.json: a list of $(@($msgs).Count); last item fields: $(Keys @($msgs)[-1])" }
-      else { Say "        messages.json: fields $(Keys $msgs)" }
+      else {
+        Say "        messages.json: fields $(Keys $msgs)"
+        # what ctop reads from it, as counts and field names only (no text): roles, content block types,
+        # and the replies' metrics (tokens, cost) and modelInfo
+        $list = @($msgs.messages | Where-Object { $null -ne $_ })
+        if ($list.Count) {
+          $roles = @{}; $types = @{}; $mk = @{}; $ik = @{}; $withMetrics = 0; $withTs = 0
+          foreach ($x in $list) {
+            $roles[(Safe $x.role)] = 1 + [int]$roles[(Safe $x.role)]
+            if ($x.content -is [string]) { $types['(plain text)'] = 1 + [int]$types['(plain text)'] }
+            else { foreach ($b in @($x.content)) { if ($b -and $b.type) { $types[(Safe $b.type)] = 1 + [int]$types[(Safe $b.type)] } } }
+            if ($x.metrics) { $withMetrics++; foreach ($n in $x.metrics.PSObject.Properties.Name) { $mk[$n] = 1 } }
+            if ($x.modelInfo) { foreach ($n in $x.modelInfo.PSObject.Properties.Name) { $ik[$n] = 1 } }
+            if ($null -ne $x.ts) { $withTs++ }
+          }
+          $fmt = { param($h) $k = [string[]]@($h.Keys); [Array]::Sort($k, [StringComparer]::Ordinal); (@($k | ForEach-Object { "$_ $($h[$_])" })) -join ', ' }   # ordinal: the same order everywhere
+          Say "        messages: $($list.Count)   roles: $(& $fmt $roles)"
+          Say "        content blocks: $(& $fmt $types)"
+          Say "        with metrics: $withMetrics   metrics fields: $((@($mk.Keys) | Sort-Object) -join ', ')   modelInfo fields: $((@($ik.Keys) | Sort-Object) -join ', ')   with ts: $withTs"
+        }
+      }
     }
   }
 }

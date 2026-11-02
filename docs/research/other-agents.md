@@ -315,8 +315,8 @@ The extension creates sessions through `ClineCore` from `@cline/core` (`apps/vsc
 
 **Verified** (`sdk/packages/shared/src/storage/paths.ts`):
 - The Cline dir is `$CLINE_DIR`, else `~/.cline`.
-- The data dir is `<cline dir>/data`.
-- Sessions are in `<data>/sessions`; the database dir is `$CLINE_DB_DATA_DIR`, else `<data>/db`.
+- The data dir is `$CLINE_DATA_DIR`, else `<cline dir>/data` (`resolveClineDataDir`; this line corrected 2026-11-02, the variable was missed before).
+- Sessions are in `$CLINE_SESSION_DATA_DIR`, else `<data>/sessions` (`resolveSessionDataDir`; also missed before). The database dir is `$CLINE_DB_DATA_DIR`, else `<data>/db`.
 
 **Verified** (`sdk/packages/core/src/services/storage/sqlite-session-store.ts`): the database is `<db dir>/sessions.db`, SQLite. The `sessions` table holds:
 - `session_id`, `source`, `pid`;
@@ -351,7 +351,38 @@ So **a manifest's `status` is not live**; the live status is only in `sessions.d
 - **Inference:** `sessions.db` goes through that opener (the session store imports `@cline/shared/db`).
 - So recent changes can sit in `sessions.db-wal`, and any reader must be a real SQLite engine. A hand-written file parser would miss them.
 
-**Not found:** token use or cost in `session/stores/conversation-store.ts` or `session/services/message-builder.ts`. Where Cline keeps them is still open.
+**Not found:** token use or cost in `session/stores/conversation-store.ts` or `session/services/message-builder.ts`.
+
+**Found (2026-11-02), verified from source at `a6507a6`, not yet from a real file:** tokens and cost are in `<id>.messages.json`.
+- **The file** (`buildMessagesFilePayload`, `sdk/packages/core/src/services/session-data.ts`) is `{ version: 1, updated_at, agent, sessionId, taskType?, origin, messages: [...], system_prompt? }`. It is rewritten whole with `writeFileSync`, not atomically (`persistSessionMessages`, `session/stores/session-manifest-store.ts`).
+- **Each message** (`MessageWithMetadata`, `sdk/packages/shared/src/llms/messages.ts`) has:
+  - `role`: user or assistant;
+  - `content`: a string, or blocks of type `text`, `tool_use` (`name`, `input`), `tool_result` (`name`), `thinking` and others;
+  - optional `modelInfo { id, provider }`, `ts` and `metrics { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, cost }`.
+- **Metrics:** `withLatestAssistantTurnMetadata` stamps `metrics` on each assistant reply, falling back to the run's `usage.totalCost` for the last one.
+- **Inference:** `cost` is in US dollars, as Cline's UI shows dollars. Unverified.
+- **Inference:** `inputTokens` excludes cache reads, as in Anthropic's API, so ctop's CTX adds them, as it does for Claude Code. Unverified.
+- **To settle both:** run the probe (2026.11.02.1) during a Cline task, and compare one reply's figures with Cline's own display.
+
+**Manifest fields** (`SessionManifestSchema`, `session/models/session-manifest.ts`): `version` 1, `session_id`, `source`, `pid`, `started_at`, `ended_at?`, `exit_code?`, `status`, `interactive`, `provider`, `model`, `cwd`, `workspace_root`, `team_name?`, `enable_tools`, `enable_spawn`, `enable_teams`, `prompt?`, `metadata?` (with `title`, `persistence-service.ts`), `messages_path?`, `compaction_path?`.
+
+**Status values** (`SESSION_STATUS_VALUES`, `sdk/packages/shared/src/session/records.ts`): `idle`, `running` and `pending` are open (`NON_TERMINAL_SESSION_STATUSES`); `completed`, `failed` and `cancelled` are ended.
+
+## Step 2 in ctop (build 2026.11.02.1)
+
+- **How ctop reads Cline:**
+  - It reads every `<sessions>/<id>/<id>.json`, parsing each again only when it changes.
+  - A session is live while its status is open and its `pid` names a process that started no later than `started_at` + 5 s.
+  - An ended session is gone at `ended_at`. An open one whose process has gone is gone at its files' last write.
+  - Ended sessions stay listed for the keep window.
+- **What a row shows:**
+  - **STATE:** `running` gives working (the newest message is a tool call) or thinking (a prompt or a tool result). `idle` and `pending` show as they are.
+  - **TOKENS, COST, CTX, LAST ACTION, TURNS, TOOLS:** from the messages file.
+  - **VIA:** `cline`.
+  - **CPU and MEM:** blank, because the pid is the window's extension host.
+- **Cost of reading** (300 sessions, 393 KB conversations, PowerShell 7.6.9 in this container):
+  - A poll with everything cached took 20–60 ms over four runs.
+  - With keep set to inf, the 300 conversations were read about 5 per frame (cap 120 ms a call, at least one a call): 57 calls, the longest 239 ms. Read all at once, the first poll had taken 6.7 s.
 
 **Unverified:** that the VS Code extension really ends up on the SQLite backend on Windows, where it runs inside VS Code's extension host. Settle it with the first step above.
 
