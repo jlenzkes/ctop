@@ -83,10 +83,17 @@ BeforeAll {
     # whatever -x / -y say (AlmaLinux 9's 3.2a did), and a ctop started before the resize landed drew a
     # 24-row frame (Debian 12's 3.3a, once: a peek cut short). So: a placeholder, the resize, a check
     # that tmux reports the size, and only then ctop, in that same pane.
-    & tmux new-session -d -s $s -x 200 -y $height 'sleep 600'
+    $made = (& tmux new-session -d -s $s -x 200 -y $height 'sleep 600' 2>&1) -join ' '
     & tmux resize-window -t $s -x 200 -y $height 2>$null
     $sw = [Diagnostics.Stopwatch]::StartNew()
     while ((& tmux display -p -t $s '#{pane_width}x#{pane_height}') -ne "200x$height" -and $sw.Elapsed.TotalSeconds -lt 5) { Start-Sleep -Milliseconds 50 }
+    if ((& tmux display -p -t $s '#{pane_width}x#{pane_height}' 2>$null) -ne "200x$height") {
+      # Seen once in CI (ubuntu:22.04): display printed nothing for 5 s. Say what tmux says, for next time.
+      Write-Host "    tmux did not report a 200x$height pane for $s within 5 s ($(& tmux -V 2>&1))"
+      Write-Host "    new-session said: $(if ($made) { $made } else { '(nothing)' })"
+      Write-Host "    display says: $((& tmux display -p -t $s '#{session_name} #{pane_width}x#{pane_height} pid #{pane_pid} dead #{pane_dead}' 2>&1) -join ' ')"
+      Write-Host "    sessions: $((& tmux list-sessions -F '#{session_name} #{window_width}x#{window_height}' 2>&1) -join '; ')"
+    }
     & tmux display -p -t $s '#{pane_width}x#{pane_height}' | Should -Be "200x$height" -Because 'ctop must start in a pane of the size the test reads'
     & tmux respawn-pane -k -t $s $cmd
     return $s

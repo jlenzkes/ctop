@@ -27,8 +27,10 @@ Everything is read locally. ctop makes no model calls and uses no tokens.
   or sends something it can't read. The worker costs some startup: about 0.5 s more to the first frame
   in the Linux container this was measured in. If a frame is more than 5 s late, the footer says how old
   the screen is.
-- **Claude Code** on `PATH`, with the `claude agents --json` command. ctop stops with an error
-  at startup if `claude` can't be found.
+- **Claude Code sessions to show.** ctop finds them in either of two ways:
+  - **`claude` on `PATH`:** ctop runs `claude agents --json`, as before.
+  - **No `claude` command:** ctop reads Claude Code's live-session registry, `~/.claude/sessions/*.json`, itself. That covers VS Code alone, where VS Code's built-in Claude agent runs Claude Code through the Claude Agent SDK. It writes that registry and its transcripts, which was tested on Windows with nothing from Anthropic installed.
+  - **VIA column:** says which a session is: `cli`, `vscode` (the Claude Code extension) or `sdk` (VS Code's Claude agent, or another program built on the SDK).
 - **Operating system**: Windows, or Linux in the Debian and Fedora / RHEL families. On Linux the
   process table comes from `ps -ww -eo pid,ppid,etimes,…` (procps) and `/proc/<pid>/stat`; without
   `ps`, ctop still runs but can't see background jobs. macOS is untested: the process-table code is
@@ -222,11 +224,11 @@ The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meani
 
 ## Tested on
 
-What has actually been run, as of build `2026.11.01.3`. Anything not listed here is untested.
+What has actually been run, as of build `2026.11.01.4`. Anything not listed here is untested.
 
-**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (350, less those
+**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (381, less those
 that cannot apply: Linux skips the two Windows process tests; Windows skips the two that need a
-case-sensitive filesystem; Windows PowerShell 5.1 also skips the flag-width test: 348, 348 and 347 run).
+case-sensitive filesystem; Windows PowerShell 5.1 also skips the flag-width test: 379, 379 and 378 run).
 They include the worker run as a real process, the display against a worker that misbehaves, `-Snapshot`
 and the command line run as processes, on Windows PowerShell 5.1 too.
 *End to end*: the integration tests (41), which drive the real ctop in tmux against a fake `claude`
@@ -340,6 +342,8 @@ Tests use [Pester](https://pester.dev) 5:
 - `tests/Snapshot.Tests.ps1` and `Cli.Tests.ps1`: run ctop as a process against a fake `claude` (a shell
   script, or a `.cmd` on Windows), output to pipes: `-Snapshot`, and which command lines it refuses. No
   terminal, so they run on every CI job, Windows included.
+- `tests/Probe.Tests.ps1`: `tools/Probe-AgentSources.ps1` (below) against fixtures for every agent, with
+  a planted string in every prompt, reply and title that must not appear in its report.
 - `tests/Integration.Tests.ps1` (tag `Integration`): drives the real ctop in tmux against a fake
   `claude` and a 300-session history, checking that keys are never dropped, that building a frame (the
   `frame` figure on the strip: building only, not drawing it or sending it from the worker) takes under
@@ -354,6 +358,16 @@ Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser
 ./tests/Run-Tests.ps1                     # everything; fails if the integration tests are skipped
 ./tests/Run-Tests.ps1 -Integration Skip   # unit tests only (Windows, or no tmux)
 ./tests/Compare-Versions.ps1              # main's ctop and this one, side by side (Linux, tmux)
+```
+
+`tools/Probe-AgentSources.ps1` reports what the coding agents that can run Claude leave on a computer:
+Claude Code, VS Code's Copilot (its chats and its Claude agent), Cline and Roo Code. It is research for
+showing their sessions in ctop. It reads only, and prints where each agent's files are, how many and how
+recent, their field names, and values that say nothing about your work (ids, status, model, token counts,
+times), never prompts, replies, titles or command lines. Run it while an agent is working:
+
+```powershell
+pwsh -File ./tools/Probe-AgentSources.ps1 -OutFile probe.txt
 ```
 
 `Run-Tests.ps1` is what CI runs. It prints how many unit and integration tests passed, failed and were

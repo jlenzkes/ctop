@@ -66,7 +66,7 @@ BeforeAll {
     $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
     $psi.EnvironmentVariables['CLAUDE_CONFIG_DIR'] = $fx.Cfg
-    $psi.EnvironmentVariables['PATH'] = $fx.Bin + [IO.Path]::PathSeparator + $env:PATH
+    $psi.EnvironmentVariables['PATH'] = if ($fx.NoClaude) { $script:pathWithoutClaude } else { $fx.Bin + [IO.Path]::PathSeparator + $env:PATH }
     $p = [Diagnostics.Process]::Start($psi)
     $p.StandardInput.Close()
     $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
@@ -74,6 +74,12 @@ BeforeAll {
     $p.WaitForExit()
     @{ Code = $p.ExitCode; Text = $out.Result; Err = $err.Result }
   }
+  # this PATH, less every folder holding a claude command (a real one may be installed where tests run)
+  $script:pathWithoutClaude = @(foreach ($folder in ($env:PATH -split [IO.Path]::PathSeparator)) {
+      if (-not $folder) { continue }
+      $has = $false; foreach ($n in 'claude', 'claude.exe', 'claude.cmd') { if (Test-Path -LiteralPath (Join-Path $folder $n)) { $has = $true } }
+      if (-not $has) { $folder }
+    }) -join [IO.Path]::PathSeparator
   # cells on screen, for plain text (East Asian wide characters count two)
   function Get-CellWidthForTest([string]$t) { $t.Length + [regex]::Matches($t, '[ᄀ-ᅟ⺀-꓏가-힣豈-﫿＀-｠￠-￦]').Count }
 }
@@ -120,6 +126,29 @@ Describe 'a snapshot (-Snapshot)' {
     $x = Invoke-Snapshot $fx @('-PricingFile', $prices)
     $x.Code | Should -Be 2
     $x.Err | Should -Match '-PricingFile: pricing file entry 1: Read'
+  }
+  It 'lists the sessions in Claude Code''s registry when there is no claude command, with what each runs in' {
+    # VS Code alone: its Claude agent writes <config>/sessions/<pid>.json; there is no claude to ask
+    $fx = New-Fixture (Join-Path $TestDrive 'snap-noclaude') @() -NoLive
+    $fx.NoClaude = $true
+    $reg = Join-Path $fx.Cfg 'sessions'; New-Item -ItemType Directory -Force -Path $reg | Out-Null
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    [IO.File]::WriteAllText((Join-Path $reg "$PID.json"), ('{"pid":' + $PID + ',"sessionId":"11111111-1111-4111-8111-111111111111","name":"live-one","kind":"interactive","entrypoint":"sdk-ts","cwd":"/w","status":"waiting","startedAt":' + $now + '}'))
+    $x = Invoke-Snapshot $fx @('-MaxWidth', '400')
+    $x.Code | Should -Be 0 -Because $x.Err
+    $x.Err.Trim() | Should -BeNullOrEmpty
+    $row = @($x.Text -split "`r?`n" | Where-Object { $_ -match '^live-one ' })[0]
+    $row | Should -Not -BeNullOrEmpty -Because $x.Text
+    $row | Should -Match '\bwaiting\b' -Because 'its status comes from the registry'
+    $row | Should -Match '\bsdk\b' -Because 'VIA: the Claude Agent SDK (entrypoint sdk-ts)'
+  }
+  It 'says there are no sessions when there is no claude command and no registry, and still exits 0' {
+    $fx = New-Fixture (Join-Path $TestDrive 'snap-noclaude-empty') @() -NoLive
+    $fx.NoClaude = $true
+    $x = Invoke-Snapshot $fx @()
+    $x.Code | Should -Be 0 -Because $x.Err
+    $x.Text | Should -Match 'no Claude Code sessions running'
+    $x.Text | Should -Not -Match "claude agents --json' failed"
   }
   It 'says why when the roster cannot be read, and still exits' {
     $fx = New-Fixture (Join-Path $TestDrive 'snap-bad') @() -NoLive

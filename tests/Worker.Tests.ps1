@@ -109,13 +109,16 @@ Describe 'Invoke-InProcessLoop (one process)' {
     Mock Invoke-Frame { $script:starts.Add($script:clock.Elapsed.TotalMilliseconds); Start-Sleep -Milliseconds 150; @{ Ids = @(); SelectedId = $null; PeekId = $null } }
     Mock Show-Packet { }
     Mock Complete-PendingCopies { }
-    Mock Read-Keys { if ($script:starts.Count -ge 5) { 'quit' } else { $null } }
+    Mock Read-Keys { if ($script:starts.Count -ge 8) { 'quit' } else { $null } }
     Mock Get-WindowWidth { 120 }; Mock Get-WindowHeight { 40 }
     $script:Poll = $null
     Invoke-InProcessLoop ([pscustomobject]@{ Tick = 250; Actions = @(); SelectedId = $null; PeekId = $null; PendingCopies = @(); CopyFor = $null })
     $gaps = @(for ($i = 1; $i -lt $script:starts.Count; $i++) { $script:starts[$i] - $script:starts[$i - 1] })
     Write-Host ("    frame starts every: {0} ms" -f (($gaps | ForEach-Object { [int]$_ }) -join ' '))
-    ($gaps | Measure-Object -Maximum).Maximum | Should -BeLessThan 330 -Because 'a tick from frame start to frame start, not tick + frame'
+    # The median of 7 gaps: one slow scheduling slot on a shared CI runner (354 ms once, Windows PowerShell
+    # 5.1) is not the bug. The bug (a tick counted from frame end) makes every gap ~400 ms or more.
+    $median = @($gaps | Sort-Object)[[math]::Floor($gaps.Count / 2)]
+    $median | Should -BeLessThan 330 -Because 'a tick from frame start to frame start, not tick + frame'
   }
 }
 
