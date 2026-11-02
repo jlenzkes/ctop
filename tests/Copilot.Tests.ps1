@@ -182,7 +182,7 @@ Describe 'Update-CopilotRoster and New-CopilotRow' {
     $by = @{}; foreach ($r in $rows) { $by[$r._SessionId] = $r }
     $by['aaaaaaaa-working'].STATE | Should -Be 'working'
     $by['aaaaaaaa-working'].VIA | Should -Be 'copilot'
-    $by['aaaaaaaa-working'].CWD | Should -Be '/home/u/proj a'
+    $by['aaaaaaaa-working'].CWD | Should -Be (Normalize-Path '/home/u/proj a')   # (\home\u\proj a on Windows)
     $by['aaaaaaaa-working'].NAME | Should -Be 'copilot-aaaaaaaa'
     $by['bbbbbbbb-asks'].STATE | Should -Be 'waiting'
     $by['cccccccc-done'].STATE | Should -Be 'idle'
