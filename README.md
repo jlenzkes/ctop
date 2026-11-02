@@ -129,7 +129,7 @@ documentation says "Enforcement of these policies only occurs on Windows platfor
 ```
 
 Press `h` while it runs for the full help: every column, every STATE, the colors, and how to read
-them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference and release notes.
+them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference. Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 ### Parameters
 
@@ -160,7 +160,9 @@ ctop does not start.
 
 Environment: `CTOP_TRACE=<file>` appends startup timings to that file: each process (display, worker)
 writes a line as it reaches each phase, from the script running to the first frame with sessions in it.
-Use it to see where a slow start goes.
+Use it to see where a slow start goes. It also records the errors ctop otherwise swallows (it reads
+files that other programs are writing, and treats a failed read as "not there yet"): each distinct one
+once, with the script line it happened on, so a column stuck at `-` can be traced to a cause.
 
 ### Keys
 
@@ -233,11 +235,11 @@ The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meani
 
 ## Tested on
 
-What has actually been run, as of build `2026.11.02.1`. Anything not listed here is untested.
+What has actually been run, as of build `2026.11.02.2`. Anything not listed here is untested.
 
-**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (409, less those
+**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (420, less those
 that cannot apply: Linux skips the two Windows process tests; Windows skips the two that need a
-case-sensitive filesystem; Windows PowerShell 5.1 also skips the flag-width test: 407, 407 and 406 run).
+case-sensitive filesystem; Windows PowerShell 5.1 also skips the flag-width test: 418, 418 and 417 run).
 They include the worker run as a real process, the display against a worker that misbehaves, `-Snapshot`
 and the command line run as processes, on Windows PowerShell 5.1 too.
 *End to end*: the integration tests (41), which drive the real ctop in tmux against a fake `claude`
@@ -338,8 +340,9 @@ The cache and the DLL are rebuilt as needed and can be deleted at any time. Dele
 ctop uses calendar versioning: `YYYY.MM.DD.N`, the build date followed by that day's build number.
 The version is shown on the instrument strip, the help screen and any crash message.
 
-Release notes are kept in the script's `.NOTES` help section. When cutting a build, update both
-`$script:CtopVersion` and the `VERSION` line in `.NOTES`. CI checks that they match.
+Release notes are in [CHANGELOG.md](CHANGELOG.md). When cutting a build, update `$script:CtopVersion`,
+the `VERSION` line in `.NOTES`, and add the build's entry at the top of `CHANGELOG.md`. CI checks that
+all three name the same build.
 
 ## Development
 

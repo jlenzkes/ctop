@@ -9,6 +9,10 @@
 - Never state a negative ("there is no X") as fact without having looked.
 - Don't turn one data point into a requirement. Write "tested on X", and say what is untested.
 
+## Builds
+
+- Release notes go in `CHANGELOG.md` (newest first). A build bumps `$script:CtopVersion`, the `VERSION` line in `.NOTES`, and adds its `CHANGELOG.md` entry; a test checks all three agree.
+
 ## Pending work: sessions from other agents
 
 **Decision (user, 2026-11-01): ctop supports exactly three agents:**
@@ -36,6 +40,7 @@ Details in `docs/research/other-agents.md`.
 **Research is done. Code:**
 - **Step 1, done (PR #3, merged):** ctop starts without `claude` and reads `~/.claude/sessions/*.json` itself; the VIA column.
 - **Step 2, done (build 2026.11.02.1, branch `claude/dazzling-cerf-yiwl4o`):** Cline sessions from `<sessions>/<id>/<id>.json` and `<id>.messages.json`; VIA `cline`. The messages file's field names were checked on the user's machine on 2026-11-02 (sixth probe run). Still open: whether the manifest's `metadata.totalCost` matches the summed `metrics.cost`, and the cost's unit.
+- **Review fixes (build 2026.11.02.2, same branch and PR as step 2):** from Cline's review of 2026.11.01.3, the user chose three: release notes moved to `CHANGELOG.md`; `CTOP_TRACE` also records swallowed errors; peek's PRICES line says where prices come from. Not done: narrowing the global `$ErrorActionPreference = 'SilentlyContinue'`.
 - **Step 3, next:** Copilot chats, from VS Code's chat files.
 
 Each step gets its own PR. Step 1 shared one with the probe and these notes.

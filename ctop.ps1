@@ -100,230 +100,10 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.02.1 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.02.2 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
-  2026.11.02.1
-    - Cline sessions, read from Cline's own files: ~/.cline/data/sessions/<id>/<id>.json (the manifest:
-      status, pid, model, cwd, times) and <id>.messages.json (tokens, cost, the last action). No SQLite
-      and no cline command needed. An open session counts while its pid (in VS Code, the window's
-      extension host) runs and started no later than the session; ended ones stay for the keep window.
-      VIA reads cline; peek, n and d work for them; y has no resume command to copy
-  2026.11.01.4
-    - runs without the claude command: VS Code alone (its built-in Claude agent) leaves none. ctop then
-      reads Claude Code's live-session registry, ~/.claude/sessions/<pid>.json, itself, keeping an
-      entry only while its process runs and started no later than the session (a leftover file whose
-      pid went to another process is dropped). With claude installed, `claude agents --json` stays the
-      roster. Verified: VS Code's Claude agent writes that registry and a transcript, on a Windows
-      machine with nothing from Anthropic installed
-    - VIA column: what a session runs in, from its registry entrypoint: cli, vscode (the Claude Code
-      extension), sdk (the Claude Agent SDK: VS Code's own Claude agent, or another program on it)
-  2026.11.01.3 — the audit's second round
-    - a process-table read still running when ctop exits (a snapshot that gave up on a slow ps) is
-      ended by ending its ps; ctop no longer ends the whole PowerShell process to stop it, which ended
-      the PowerShell that ran it (& ./ctop.ps1 -Snapshot; the next command never ran)
-    - a question for you stays "asks:" when the reply's other calls are separate transcript lines (as
-      Claude Code writes them) and one of them gets its result first; an answered question no longer
-      outranks a newer call in the same reply
-    - CTOP_TRACE: one more phase, when the worker's process has started
-  2026.11.01.2 — the audit of the worker build (2026.11.01.1)
-    - t / y / n / d copy the session selected when the key was pressed, even if the selection moves
-      before the worker's next frame comes in; a session gone by then is not copied, and the footer says so
-    - relative -PricingFile / -ClosedLog / -ConfigDir paths are made absolute, and the worker starts in
-      PowerShell's current directory: a relative pricing path made the worker fail and ctop fall back
-    - -Snapshot waits (up to 10 s) for the process table, so a running job shows; if it is not in by
-      then, the snapshot says so. A slow process read no longer holds the exit
-    - in one process (-InProcess), a tick counts from the start of the last frame, not its end
-    - n: no @address for a session without a name (it has none to message until you /rename it)
-    - "updating…" shows only when a key's own frame is late (it could show for an earlier key)
-    - a frame the display asked for and has not had for 5 s says so on the footer, counting up; a worker
-      that sends something other than a frame is dropped, and ctop carries on in one process
-    - the worker starts before the rest of the script loads, and the first frame shows live sessions
-      before it lists history: here ~0.3 s sooner. The worker still costs ~0.5 s here at startup; the
-      ~2 s the audit measured on WSL is not reproduced here (CTOP_TRACE times each phase)
-    - a question for you stays "asks:" when another call made in the same reply gets its result first
-      (the answer is matched to the question's call id)
-    - -PricingFile refuses an infinite rate (1e400)
-    - an unknown flag or a stray value is an error that names it: 500 was taken as -Tick
-    - CTOP_TRACE=<file>: append startup timings (process start to first frame) to that file
-  2026.11.01.1
-    - two processes: this one reads keys and draws; a hidden worker (the same script, -Worker) reads
-      transcripts, the roster and the process table and builds frames. A slow frame no longer holds up
-      keys: q quits at once while the first read of a ~70 MB transcript takes seconds (it waited for the
-      whole frame before), and a key pressed meanwhile shows "updating…". If the worker cannot start or
-      stops, ctop carries on in one process and says why. -InProcess runs as one process. From cxtop
-    - frame on the strip is now the time to build a frame; drawing is the display process's
-  2026.10.31.12
-    - -PricingFile: your own price table in place of the built-in one (JSON; every rate required; a bad
-      file stops ctop with exit 2 and the reason). Cached costs are versioned by the file's content, so
-      editing it recomputes them. From cxtop
-    - a scan cache priced by anything but the built-in table could not be read at all (the price version
-      was cast to a number): it was silently dropped and every transcript rescanned
-  2026.10.31.11
-    - a session waiting on a question for you (AskUserQuestion) shows it: LAST ACTION reads asks: <the
-      question> (+N more), and peek lists each question with its header and numbered choices. Once a
-      newer entry answers it, asked:. From cxtop's pending-question view; answer in that session
-  2026.10.31.10
-    - -Snapshot prints one frame as plain text and exits: every session listed, not a screenful; no
-      colors or keys; nothing written (scan cache, closed log). For pipes, files and sharing. From cxtop.
-      Without a console (a pipe) ctop had no window size to draw with: everything now asks one place
-    - the strip's "hidden N cols" ran into the next divider at two digits
-  2026.10.31.9
-    - n copies the selected session's contact (name and @address, session ID, kind, state, directory,
-      machine, transcript, attach or resume command) to paste into another Claude session, which can
-      message it by name with Claude Code's own messaging. ctop sends nothing. d copies the session ID
-      (a subagent's agent ID). From cxtop's contact and ID keys
-  2026.10.31.8 — the validation's second round
-    - Windows PowerShell 5.1: stopping a poll could stop an unrelated process after a pid was reused
-      (a parent id names whichever process had that pid). A child is followed only if it was created
-      after its parent, and stopped only if its pid still names it
-    - a gone row is keyed on its transcript's path as well (a row could keep showing another file),
-      and the key is taken before the row is built: a subagent write during the build was folded into
-      the key but not into the cost, so the cost never caught up
-    - paths compare case-sensitively in every cache: on Linux a.jsonl and A.jsonl are two files
-    - a combining mark outside the BMP (a surrogate pair) is kept with its letter when text is cut
-    - a first prompt in Hebrew, Chinese, Russian and other scripts becomes the title: it needed three
-      ASCII letters (such sessions read "(untitled)"), now three letters in a row of any script. Not
-      every script has those: Hindi or Tamil, which write vowels as marks between letters, can still
-      read "(untitled)". Cached scans are redone once (ScanVer 4)
-    - titles in Hebrew, Arabic, Armenian, Georgian, Chinese, Japanese, Korean and other scripts without
-      combining marks are measured at the speed of ASCII: a screen of Hebrew titles took a frame from
-      ~55 ms to ~175 ms
-    - tests: each view's clipboard check stands alone; a key counts as answered only when the strip
-      and footer both show its effect; Build-Rows is tested directly
-  2026.10.31.7 — fixes from the audit's validation round
-    - LAST ACTION could show another transcript's last action: its cache checked size and time, not
-      which file it was
-    - a transcript replaced by one whose start differed only in letter case once encoded (@ vs Z) read
-      as the same file: the start is compared case-sensitively. A longer rewrite that keeps the first
-      256 bytes still reads as an append (Claude Code only appends)
-    - a STATE with a +N subagent badge and wide text pushed the next columns out of line
-    - a wrapped path with wide characters could take more lines than -WrapLines
-    - LAST ACTION and a failed poll's reason are shortened without cutting a character in half (an
-      emoji at the cut left half a surrogate pair)
-    - widths: the fast path covers only characters that are one cell on their own and never join the
-      one before (a soft hyphen, Arabic number signs and bidi isolates were counted as one cell); a
-      flag is two cells (four on Windows PowerShell 5.1, whose .NET splits the pair)
-    - a gone session's tree cost follows its subagent transcripts as they grow; a new subagent file
-      of a gone session is found when its own transcript changes, or at the next start
-    - Windows PowerShell 5.1: a poll that hangs is stopped with everything it started (claude.cmd's
-      node outlived its cmd.exe). Linux: a process that outlives claude and holds its output is not
-      stopped (it is no longer claude's child); ctop still drops the poll and polls again
-    - tests: the integration tests run on a private tmux server and never touch yours; the clipboard
-      test proves the terminal accepts OSC 52 before it trusts a clean result
-  2026.10.31.6 — fixes from an outside audit of the branch
-    - nothing live but history in the keep window: the history was not drawn (the table was skipped
-      whenever no session was live), and peek / t / y could act on a row no longer shown
-    - ages of a day or more (1d4h) colored as fresh: the age parser ignored days
-    - background sessions from the closed log were listed without -All; they follow -All like live ones
-    - a session with an impossible startedAt stopped ctop; ages it can't read show as -
-    - a lone session whose row fits on one line was drawn as nothing (a one-line body)
-    - a roster poll that hangs is stopped after max(5 s, 5 × -RosterInterval) and counted as failed;
-      the last roster stays on screen and the next poll starts. It used to block every later poll
-    - session text (titles, paths, tool arguments) can no longer send terminal commands: control
-      characters and escape sequences other than colors are removed before drawing (an OSC 52 in a
-      title could set your clipboard from peek or the closed log)
-    - a transcript that is replaced, cut short or moved is rescanned from the start; one that only
-      grew is still read from where the last scan stopped
-    - a prompt that mentions tool_result counts as a turn again (it was taken for a tool result).
-      Cached scan state is redone once (ScanVer 3)
-    - a gone session's TREE COST still counts its subagents (their part dropped to $0 once it left)
-    - columns line up with CJK and other wide characters, emoji and combining accents: widths,
-      padding and cuts are measured in terminal cells, not string length, and a cut never splits
-      a character
-    - frame in the help is the time of the whole last pass (roster, process harvest, cache save,
-      build, draw); the cache save was left out
-    - a fatal error exits with code 1 and prints its message on stderr
-    - tests: the quit test fails a crash exit; the frame and key timing tests refuse a frozen or
-      exited ctop; CI fails a job that claims to run the integration tests and skips them
-  2026.10.31.5
-    - Linux without the clear program (minimal Fedora / RHEL images): ctop stopped at once with "The
-      expression after '&' …": PowerShell's Clear-Host runs clear. The screen is cleared with the same
-      escape sequences instead
-    - Windows PowerShell 5.1 runs it again (unit tests pass there in CI): the file is UTF-8 with a BOM
-      (5.1 read it as ANSI and could not parse it); no [Array]::Sort[T](…) generic-call syntax (7.3+);
-      a session with exactly one subagent listed it again on 5.1; the scan cache loads on 5.1 too
-      (it needed ConvertFrom-Json -AsHashtable, so every start rescanned every transcript); the mouse
-      helper's file name no longer needs SHA256.HashData (.NET 5+), which turned the mouse off on 5.1
-  2026.10.31.4
-    - only rows on screen are refreshed and styled each frame: a gone row off screen costs next to nothing
-      (300 gone rows now cost about what the visible screenful does: ~25–35 ms a frame, was ~140 ms).
-      A row that scrolls into view is refreshed before that frame is drawn, so a visible age is never
-      stale; whether a gone transcript changed is checked every 30 s for rows off screen
-    - gone rows sort with a .NET sort (newest gone first; ties by session id, so rows that left in the
-      same poll never swap); in roster sort they follow that order too instead of their stale position.
-      Title-bar counts are one pass over the rows
-  2026.10.31.3
-    - titles with quotes, newlines or non-ASCII read right: \" was shown literally (escapes were only
-      undone when the text held a double backslash). Cached scan state is redone once (ScanVer 2)
-    - t / y on Linux: sent to the terminal as OSC 52 (and to xclip when there is a display). Set-Clipboard
-      without xclip keeps the text inside pwsh and reports success, so "copied" was shown for nothing
-  2026.10.31.2
-    - keep window: one setting, -Keep (alias -Linger), for how long gone sessions and stopped subagents
-      stay listed; + / - step 0 · 15m · 30m · 45m · 1h · 2h · 4h · 8h · 12h · 1d · 2d · 3d · 7d · 14d ·
-      30d · ∞ at runtime, shown as keep on the strip and in the footer. 0 = drop at once and ∞ = forever,
-      for both (-SubagentWindow still works; its 0 still means forever). Tick moved to [ / ]
-    - gone sessions from earlier runs are read back from the closed log (which now also records kind and
-      the /clear successor), so a long window shows yesterday's sessions, newest gone first, with their
-      logged title; peek says when Claude Code has deleted a transcript (cleanupPeriodDays) instead of
-      offering a resume that cannot work
-    - keys are read every frame however long it took: a frame slower than the tick stopped ctop reading
-      the keyboard at all, q included (seen with ~150 gone rows)
-    - faster with many rows (300 gone rows: ~1.6 s a frame → ~0.15 s): gone rows are built once and
-      reused, sorting no longer scans every row per session, a history row's sparkline no longer changes
-      (which re-rendered every row every 2 s), and history loads ~120 ms of rows per frame, newest first,
-      so live sessions show at once (cold start with 300: 7.9 s → 1.4 s)
-    - ages past a day read 1d1h / 40d instead of 25h / 960h
-    - tests: Pester unit tests and an end-to-end test that drives ctop in tmux (tests/)
-  2026.10.31.1
-    - a failed `claude agents --json` poll (non-zero exit, no output, not a JSON array) keeps the last
-      roster: it was read as an empty one, so every session flashed "gone" and was written to the
-      closed log as closed. The strip shows poll FAILED×N; roster age counts from the last good poll
-  2026.10.27.1
-    - a new subagent reads thinking from its first second: its prompt can sit behind ~10 large setup
-      attachments, past the 256 KB tail ctop read, which left STATE blank until the first reply
-  2026.10.21.5
-    - mouse (Windows): click selects, click again / double-click peeks, wheel moves, footer items
-      click, a click closes peek. -NoMouse to keep the terminal's own mouse. Console mode restored on exit
-  2026.10.21.4
-    - a subagent whose .meta.json says "finished": true (and whose transcript hasn't grown since) is
-      stopped, whatever its transcript's last lines suggest; sidecars are re-read when they change
-  2026.10.21.3
-    - Σ tree cost under a session's COST (session + all its subagents, listed or aged out, + sessions
-      it launched); peek has the breakdown
-    - scrolling: a wrapped row cut by the window edge is left out instead of shown half
-  2026.10.21.2
-    - also while thinking: parallel Agent calls return one by one, so a parent waiting on the rest
-      read "thinking"; with a live foreground agent it started, it now reads awaiting agent
-  2026.10.21.1
-    - a session or subagent whose open Agent / Task / Skill call is waiting on a live agent it
-      started reads "awaiting agent" (cyan), not a red "working" that suggested waiting on you
-  2026.10.20.2
-    - sessions launched from another session's job (e.g. a script running claude -p) are drawn
-      under that session, after its subagents, with their own subagents below them; peek shows
-      LAUNCHED BY (launcher, job pid, command) and, on the launcher, LAUNCHED
-    - Linux: ps -ww, so long command lines aren't cut to the terminal width
-  2026.10.20.1
-    - prices re-read 2026-10-20: Opus 5.5 ($4 / $20, cache read $0.20; was priced as Opus 5 at
-      $5 / $25 / $0.50, overstating it), Sonnet 5.5, Haiku 5.5 (tiered at 100k-token prompts).
-      Cached cost totals from the old table are recomputed once.
-  2026.10.19.1
-    - a subagent that handed back and was then sent a new message (resumed) shows its live state,
-      LAST ACTION "resumed · after handback: …"; it stayed "stopped"
-  2026.10.18.2
-    - startup no longer opens every cached transcript (27 s for 1,049 files on Windows): cache
-      entries are checked on first use and forgotten after 2 days unused; the 60 s save no longer
-      tests every path either
-  2026.10.18.1
-    - an agent stopped by Esc / TaskStop ("[Request interrupted by user]" as its last line) reads
-      stopped (subagent) or idle (session), LAST ACTION "interrupted · was …"; it showed thinking
-  2026.10.06.2
-    - version moved from beside the clock (where it read as the current date) to "build" on line 2
-  2026.10.06.1
-    - subagent .meta.json is retried while missing or half-written (was cached as "none" forever,
-      leaving a bare id and no title)
-    - job → agent attribution compares times in UTC (after a restart, cached call times came back
-      as UTC and every job fell to the session)
+  Release notes: CHANGELOG.md, beside this script.
 
   Documented fields of `claude agents --json` (code.claude.com/docs/en/agent-view, read 2026-09-07):
     cwd, kind, startedAt (Unix ms), pid, status, waitingFor, sessionId, name, id, state
@@ -356,7 +136,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.02.1'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.11.02.2'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -369,6 +149,31 @@ function Write-Trace([string]$phase) {
   } catch {}
 }
 Write-Trace 'script running (parsed, parameters bound)'
+# CTOP_TRACE also gets the errors ctop swallows. $ErrorActionPreference is SilentlyContinue below, and many
+# reads sit in an empty catch (a file caught half-written, a process gone by the time it is asked), so a
+# real bug would only show as '-'. Each distinct error (its script line, and its message with the numbers
+# taken out) is written once per process, 200 at most, when a frame is built (Write-SwallowedErrors).
+# $Error is only read, never cleared: run with & ./ctop.ps1, it is your PowerShell's own list, and what
+# was in it before ctop started is left out.
+$script:ErrMark = if ($Error.Count) { $Error[0] } else { $null }
+$script:ErrSeen = @{}
+function Write-SwallowedErrors {
+  if (-not $env:CTOP_TRACE) { return }
+  $new = [Collections.Generic.List[object]]::new()
+  foreach ($e in @($Error)) { if ([object]::ReferenceEquals($e, $script:ErrMark)) { break }; $new.Add($e) }
+  if ($Error.Count) { $script:ErrMark = $Error[0] }
+  for ($i = $new.Count - 1; $i -ge 0; $i--) {   # oldest first
+    $e = $new[$i]
+    $line = if ($e.InvocationInfo) { $e.InvocationInfo.ScriptLineNumber } else { 0 }
+    $msg = (("$e") -replace '[\x00-\x1F\x7F]+', ' ' -replace '\s{2,}', ' ').Trim()
+    if ($msg.Length -gt 300) { $msg = $msg.Substring(0, 300) + '…' }
+    $key = "$line|" + ($msg -replace '\d+', '#')   # a pid or a path's number does not make it a new error
+    if ($script:ErrSeen.ContainsKey($key)) { $script:ErrSeen[$key]++; continue }
+    if ($script:ErrSeen.Count -ge 200) { continue }
+    $script:ErrSeen[$key] = 1
+    Write-Trace "swallowed error, line ${line}: $msg"
+  }
+}
 # A worker (see "worker process" near the end) is started with no parameters but -Worker: the display
 # process sends the ones it was given as the first line on the worker's input.
 if ($Worker) {
@@ -853,6 +658,7 @@ function Find-Subagents([System.IO.FileInfo]$parent, [string]$sessionId) {
 # (input + cache reads + cache writes) is at most that many tokens (Haiku 5.5 is tiered at 100k).
 # Bump PriceVer whenever this table changes: cached cost totals from an older table are recomputed.
 $script:PriceVer = 2
+$script:PriceFrom = 'the built-in table, read 2026-10-20 (-PricingFile for your own)'   # the date in the Source line above; peek and help show it
 # Bump ScanVer when what a scan extracts changes: cached state from an older scan is redone once.
 # 2: titles are unescaped (\" was kept literally)
 # 3: a prompt that mentions tool_result counts as a turn (it was taken for a tool result)
@@ -3238,6 +3044,7 @@ function Build-Peek([object]$r) {
     "  CTX          $($r.CTX) tokens in context      MODEL $(Paint $r.MODEL (Cell-Color 'MODEL' $r))      BRANCH $($r.BRANCH)",
     "  COMPACTIONS  $(if ($r._Act.Compacts) { "$($r._Act.Compacts)   last $(Get-Since $r._Act.LastCompactAt) ago ($($r._Act.LastCompactTrigger), $([math]::Round($r._Act.LastCompactPreTokens / 1000))K tokens before it) — context now holds a summary, not the full history" } else { 'none' })",
     "  COST         $($r.COST) at list price$(if ($r.RATE -and $r.RATE -ne '-') { "   ($($r.RATE)/h)" })     tokens: in $($r._Act.InTok)  out $($r._Act.OutTok)  cache read $($r._Act.CacheR)  cache write $($r._Act.CacheW)",
+    "  PRICES       $($script:PriceFrom)",
     "  ACTIVITY     $(Paint-Spark $r.ACTIVITY)   ($(Paint-Spark '█') working  $(Paint-Spark '▒') thinking  $(Paint-Spark '·') idle  $(Paint-Spark '▁') waiting on you  $(Paint-Spark '▼') compaction, 1 char = 2 s, newest right)",
     $(if ($r._Desc) { "  TASK         $($r._Desc)" } else { $null }),
     $(if ($r._Orphaned) { "  ORPHANED     it finished after its spawner had already stopped: its result reached no reader." } else { $null }),
@@ -3442,6 +3249,7 @@ function Show-Help {
     '                 (default fable|mythos): catches a session on a model you did not intend',
     '  COST        T  session spend at API LIST price from per-turn usage (same basis as /usage; not',
     '                 your plan''s billing). Yellow >= $100',
+    ('                 Prices: ' + $script:PriceFrom),   # (in parentheses: a bare + would take in the rest of the list)
     '  RATE        T  COST / session age, $ per hour',
     '',
     'READING IT',
@@ -3505,7 +3313,7 @@ function Show-Help {
 $script:Roster   = @()
 $script:ClosedLogPath = if ($ClosedLog) { $ClosedLog } else { Join-Path $ConfigDir 'ctop-closed.jsonl' }
 if ($PricingFile) {
-  try { $pf = Import-PricingFile $PricingFile; $script:Pricing = $pf.Table; $script:PriceVer = $pf.Ver }
+  try { $pf = Import-PricingFile $PricingFile; $script:Pricing = $pf.Table; $script:PriceVer = $pf.Ver; $script:PriceFrom = "-PricingFile $PricingFile" }
   catch { [Console]::Error.WriteLine("ctop: -PricingFile: $($_.Exception.Message)"); exit 2 }
 }
 try { $script:KeepMin = Resolve-Keep -Keep $Keep -SubagentWindowSeconds $(if ($PSBoundParameters.ContainsKey('SubagentWindow')) { $SubagentWindow } else { $null }) }
@@ -3798,6 +3606,7 @@ function Invoke-Frame($view) {
   }
   if ($script:Roster.Count -and @($sorted).Count) { $script:LiveShown = $true }
   $script:LastFrameMs = [int]$frameSw.ElapsedMilliseconds
+  Write-SwallowedErrors
   return @{ Lines = @($lines); Footer = $footer; Ids = @(foreach ($r in $sorted) { [string]$r._SessionId }); SelectedId = $selectedId
             PeekId = $script:PeekId; PageRows = [int]$script:PageRows; BodyMap = @($script:BodyMap); BodyY0 = [int]$script:BodyY0; Copy = $copy
             PollBusy = [bool]$script:Poll; Rev = $view.Rev }
@@ -4059,7 +3868,7 @@ function Invoke-FrontendLoop {
         }
       }
       $waitSec = if ($w.Reply) { [int][math]::Floor($askSw.ElapsedMilliseconds / 1000) } else { 0 }
-      if ($dirty) { Show-Packet $packet; $dirty = $false }
+      if ($dirty) { Show-Packet $packet; $dirty = $false; Write-SwallowedErrors }   # (the display's own: the worker writes its own)
       elseif ($waitSec -ge 5 -and $waitSec -ne $staleSec) {
         $why = if ([int]$packet.Rev -lt 0) { "  starting: no frame yet after $waitSec s   (q quits)" } else { "  not updated for $waitSec s: the worker is busy   (keys are taken, q quits)" }
         Show-Packet $packet $why; $staleSec = $waitSec; $noted = $true

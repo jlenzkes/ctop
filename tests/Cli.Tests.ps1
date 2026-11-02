@@ -29,6 +29,15 @@ Describe 'the command line' {
     $x.Text | Should -Match $Says
     $x.Text | Should -Not -Match "\x1b\[(2J|H|\?25l)" -Because 'it must not start drawing (clear screen, cursor home, hide cursor)'
   }
+  It 'names the same build in -Version, .NOTES and the newest CHANGELOG.md entry' {
+    $r = Invoke-Ctop @('-Version')
+    ($r.Text.Trim() -match '^ctop (\d{4}\.\d{2}\.\d{2}\.\d+)$') | Should -BeTrue -Because $r.Text
+    $v = $Matches[1]   # (plain -match: Should -Match leaves $Matches unset here)
+    ((Get-Content -Raw $ctop) -cmatch 'VERSION (\d{4}\.\d{2}\.\d{2}\.\d+)') | Should -BeTrue
+    $Matches[1] | Should -Be $v
+    $first = Get-Content (Join-Path (Split-Path -Parent $ctop) 'CHANGELOG.md') | Where-Object { $_ -match '^## ' } | Select-Object -First 1
+    $first | Should -Match ('^## ' + [regex]::Escape($v) + '(\s|$)')
+  }
   It 'still runs a correct command line (-Version)' {
     $x = Invoke-Ctop @('-Version')
     $x.Code | Should -Be 0
