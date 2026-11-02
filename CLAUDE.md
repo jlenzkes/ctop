@@ -51,6 +51,10 @@ Details in `docs/research/other-agents.md`.
 
 Each step gets its own PR. Step 1 shared one with the probe and these notes.
 
+## Deferred bugs
+
+Known problems left in place on purpose, each with where it came from, where it is, and what would fix it: `docs/deferred.md` (D1–D8, plus what is not yet checked). Add to it when a problem is found and not fixed.
+
 ## Flaky tests seen in CI (2026-11-01: PR #2, push run 41330600708 for c144eb6)
 
 Same code passed in the other run, so these are flakes, not a code problem; the failed jobs were re-run. **Addressed in PR #3:** the timing test now checks the median of 7 gaps (still 416 ms, red, with the bug put back); `Start-Ctop` now prints what tmux says when the pane size is not reported (the cause itself is still unknown).
