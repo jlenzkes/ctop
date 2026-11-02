@@ -54,7 +54,7 @@ Describe 'Write-SwallowedErrors' {
     $script:ErrSeen.Count | Should -Be 0
   }
   It 'keeps control characters out of the trace' {
-    Swallow "two`nlines`e[31m"
+    Swallow ("two`nlines" + [char]27 + '[31m')   # [char]27, not `e: Windows PowerShell 5.1 has no `e
     Write-SwallowedErrors
     @(Read-Trace)[0] | Should -Match 'two lines \[31m$'
   }
