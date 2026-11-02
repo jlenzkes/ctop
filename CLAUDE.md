@@ -35,7 +35,7 @@ Details in `docs/research/other-agents.md`.
 
 **Research is done. Code:**
 - **Step 1, done (PR #3, merged):** ctop starts without `claude` and reads `~/.claude/sessions/*.json` itself; the VIA column.
-- **Step 2, done (build 2026.11.02.1, branch `claude/dazzling-cerf-yiwl4o`):** Cline sessions from `<sessions>/<id>/<id>.json` and `<id>.messages.json`; VIA `cline`. Still to check on a real machine: the messages file's fields (tokens, cost) are from Cline's source only. The probe (2026.11.02.1) prints their names and counts; ask the user to run it during a Cline task.
+- **Step 2, done (build 2026.11.02.1, branch `claude/dazzling-cerf-yiwl4o`):** Cline sessions from `<sessions>/<id>/<id>.json` and `<id>.messages.json`; VIA `cline`. The messages file's field names were checked on the user's machine on 2026-11-02 (sixth probe run). Still open: whether the manifest's `metadata.totalCost` matches the summed `metrics.cost`, and the cost's unit.
 - **Step 3, next:** Copilot chats, from VS Code's chat files.
 
 Each step gets its own PR. Step 1 shared one with the probe and these notes.

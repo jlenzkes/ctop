@@ -368,6 +368,27 @@ So **a manifest's `status` is not live**; the live status is only in `sessions.d
 
 **Status values** (`SESSION_STATUS_VALUES`, `sdk/packages/shared/src/session/records.ts`): `idle`, `running` and `pending` are open (`NON_TERMINAL_SESSION_STATUSES`); `completed`, `failed` and `cancelled` are ended.
 
+## Sixth probe run: a Cline task on Claude Haiku 5.5 (user's main machine, 2026-11-02, probe 2026.11.02.1)
+
+Windows NT 10.0.26300, Windows PowerShell 5.1.26100.9711. Watch 02:53:42–02:56:46Z, during one Cline task.
+
+**Verified** (`probe-cline2.txt`):
+- **The messages file is shaped as Cline's source writes it:**
+  - Top-level fields: `agent`, `messages`, `origin`, `sessionId`, `system_prompt`, `updated_at`, `version`.
+  - Each reply's `metrics`: `cacheReadTokens`, `cacheWriteTokens`, `cost`, `inputTokens`, `outputTokens`.
+  - Each reply's `modelInfo`: `family`, `id`, `provider`.
+  - Every message had `ts`, the user's included (2 of 2, 4 of 4, 5 of 5), so TURN can be timed from the newest prompt.
+- **A session on an `openai-compatible` provider** (Gemini, 2026-10-07) had no `cost` in its metrics. ctop then shows COST `-`.
+- **The manifest's `metadata` holds running totals:** `totalCost`, `tokensIn`, `tokensOut`, `cacheReads`, `cacheWrites`, `usage`, `aggregateUsage` and `aggregatedAgentsCost`, besides `title` and `modelId`. Failed sessions also have `terminal_marker`, `terminal_marker_at`, `terminal_marker_pid` and `terminal_marker_source`.
+- **While running, the manifest was rewritten about every 4 s** with the status still `running` (8 rewrites, 02:53:54–02:54:48). It went `idle` at 02:54:52.
+  - **Inference:** what changes in those rewrites is the metadata totals. The probe prints field names, not those values.
+- **The previous session** (`1793581062813_qf27u`, same pid 26532) went `completed`, exit code 0, at 02:52:12. That was 1.5 min before the new task started (its id says 02:53:50.826Z). What ended it is not known from the report.
+- **Not verified:**
+  - that `metadata.totalCost` equals the sum of the replies' `metrics.cost`;
+  - the cost's unit (dollars is inference).
+  - **To settle both:** have the probe print those numeric totals beside its sum of `metrics.cost`.
+- **For ctop** (inference): `metadata.totalCost` and `tokensIn` / `tokensOut` would give COST and tokens from the small manifest, kept current every ~4 s, instead of re-reading the whole conversation. The conversation is still needed for LAST ACTION and STATE details.
+
 ## Step 2 in ctop (build 2026.11.02.1)
 
 - **How ctop reads Cline:**
