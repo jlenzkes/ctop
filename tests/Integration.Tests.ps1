@@ -66,7 +66,7 @@ BeforeAll {
     }
     $closedLog = Join-Path $root 'closed.jsonl'
     [IO.File]::WriteAllLines($closedLog, [string[]]@($log | Where-Object { $_ }))   # none: an empty log
-    return @{ Cfg = $cfg; Log = $closedLog; Env = "CLAUDE_CONFIG_DIR='$cfg' CLINE_SESSION_DATA_DIR='$cfg/no-cline' PATH='${bin}:$PathTail'"; Closed = $closed
+    return @{ Cfg = $cfg; Log = $closedLog; Env = "CLAUDE_CONFIG_DIR='$cfg' CLINE_SESSION_DATA_DIR='$cfg/no-cline' VSCODE_APPDATA='$cfg/no-vscode' VSCODE_PORTABLE= PATH='${bin}:$PathTail'"; Closed = $closed
               RosterFile = $rosterFile; LiveJson = $liveJson; Fake = $fake }
   }
 

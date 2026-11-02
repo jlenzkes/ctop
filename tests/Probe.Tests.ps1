@@ -104,6 +104,9 @@ Describe 'the agent probe' {
     $script:report | Should -Match 'request added later, modelState: 0 Pending'
     $script:report | Should -Match 'requests/\*/modelState \(1\)'
   }
+  It 'names a Copilot reply''s parts by kind and field names, not their text' {
+    $script:report | Should -Match 'reply parts: \(no kind\) 1 \(fields: value\)'
+  }
   It 'reports a Roo task: status, cost, and whether it is waiting on you' {
     $script:report | Should -Match 'rooveterinaryinc\.roo-cline'
     $script:report | Should -Match 'status="active".*totalCost=0\.12'

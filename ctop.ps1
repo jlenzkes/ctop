@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.02.3 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.02.4 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -136,7 +136,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.02.3'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.02.4'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -417,6 +417,20 @@ function Protect-TerminalText([string]$text) {
   if (-not $text) { return $text }
   [regex]::Replace([regex]::Replace($text, '\x1b(?!\[[0-9;]*m)', ''), '[\x00-\x1A\x1C-\x1F\x7F-\x9F]', ' ')
 }
+# Move the cursor, never past the console buffer's last row. The window can shrink between reading its
+# size and moving the cursor (a resize while a frame is drawn): SetCursorPosition then throws ("must be
+# less than the console's buffer size", seen on Windows with build 2026.11.01.3) and ctop stopped. The
+# next frame sees the new size and redraws.
+function Get-ConsoleBufferHeight { try { [Console]::BufferHeight } catch { 0 } }
+function Get-CursorTarget([int]$x, [int]$y) {
+  $bh = Get-ConsoleBufferHeight
+  if ($bh -gt 0 -and $y -ge $bh) { $y = $bh - 1 }
+  return @([math]::Max(0, $x), [math]::Max(0, $y))
+}
+function Set-ConsoleCursor([int]$x, [int]$y) {
+  $t = Get-CursorTarget $x $y
+  try { [Console]::SetCursorPosition($t[0], $t[1]) } catch { }
+}
 function Write-Frame([object[]]$lines, [string]$Footer = '') {
   $w = (Get-WindowWidth)
   $h = (Get-WindowHeight)
@@ -467,7 +481,7 @@ function Write-Frame([object[]]$lines, [string]$Footer = '') {
   # cursor is at the start of the line after the last written one: blank it, then move down
   while ($n -lt $h - 1) { [Console]::Write($blank); if ($n -lt $h - 2) { [Console]::Write("`n") }; $n++ }
   # footer on the last row; stop one column short so the terminal doesn't scroll
-  [Console]::SetCursorPosition(0, $h - 1)
+  Set-ConsoleCursor 0 ($h - 1)
   $f = Protect-TerminalText $Footer
   if (-not $script:Color) { $f = Strip-Ansi $f }
   $fv = Get-CellWidth (Strip-Ansi $f)
@@ -1285,6 +1299,17 @@ function Format-Contact($r, [string]$machine = [Environment]::MachineName) {
     $lines.Add('A subagent is reached through its parent session: message that session about it.')
     return ($lines -join "`n")
   }
+  if ($r._Agent -eq 'copilot') {
+    $lines.Add('GitHub Copilot chat (VS Code)')
+    & $row 'Session ID' (& $c $r._SessionId)
+    if ($r.TITLE) { & $row 'Title' (& $c $r.TITLE) }
+    & $row 'State' (& $c $r.STATE)
+    if ($r.CWD -and $r.CWD -ne '-') { & $row 'Directory' (& $c $r.CWD) }
+    & $row 'Machine' (& $c $machine)
+    & $row 'Chat file' (& $c $r._Transcript)
+    $lines.Add('ctop knows no way to message a Copilot chat from outside VS Code.')
+    return ($lines -join "`n")
+  }
   if ($r._Agent -eq 'cline') {
     $m = $r._Cline.M
     $lines.Add('Cline session' + $(if ([string]$m.source -eq 'vscode') { ' (VS Code)' } elseif ($m.source) { " ($(& $c $m.source))" } else { '' }))
@@ -1904,6 +1929,377 @@ function Build-ClinePeek([object]$r) {
   return ,$flat
 }
 
+# ---- GitHub Copilot chats (VS Code) ---------------------------------------------------
+# VS Code keeps each Copilot chat as a file in its user data folder (src/vs/workbench/contrib/chat/common/
+# model/chatSessionStore.ts at microsoft/vscode 1306698):
+#   User/workspaceStorage/<workspace id>/chatSessions/<session id>.jsonl   (a folder or workspace was open)
+#   User/globalStorage/emptyWindowChatSessions/<session id>.jsonl          (no folder open)
+# The .jsonl is a mutation log (objectMutationLog.ts): {"kind":0,"v":<whole session>} first, then
+# {"kind":1,"k":<path>,"v":…} sets, {"kind":2,"k":<path>,"v":[…],"i":n} pushes (cut at i first) and
+# {"kind":3,"k":<path>} deletes; after 512 entries VS Code rewrites the file as one new kind 0. Older chats
+# can be a plain .json of the whole session. Each request carries timestamp, modelId, modelState
+# ({value: 0 Pending, 1 Complete, 2 Cancelled, 3 Failed, 4 NeedsInput; completedAt}), promptTokens,
+# completionTokens, contextUsage {currentTokens, tokenLimit}, copilotCredits and sessionCopilotCredits.
+# The chat runs inside VS Code: there is no process of its own. VS Code saves it about once a minute
+# (its storage flush), so a finished reply can read Pending for up to a minute (seen 2026-11-01: 57-61 s).
+# ctop lists a chat as live while VS Code runs and the chat was written in the last hour or still has an
+# unfinished request; older ones, or all of them once VS Code has quit, are gone rows (keep window).
+
+# VS Code's user data folders, as VS Code finds its own (src/vs/platform/environment/node/userDataPath.ts):
+# VSCODE_PORTABLE, else VSCODE_APPDATA/<product>, else the platform's application data folder/<product>.
+function Get-VSCodeUserDirs {
+  $out = [Collections.Generic.List[object]]::new()
+  $portable = "$env:VSCODE_PORTABLE".Trim()
+  if ($portable) { $out.Add(@{ Product = 'Code'; Dir = [IO.Path]::Combine($portable, 'user-data', 'User') }); return $out.ToArray() }
+  $base = "$env:VSCODE_APPDATA".Trim()
+  if (-not $base) {
+    if ($IsWindows -or $env:OS -eq 'Windows_NT') { $base = "$env:APPDATA".Trim(); if (-not $base) { $base = Join-Path (Join-Path $HOME 'AppData') 'Roaming' } }
+    elseif ($IsMacOS) { $base = Join-Path (Join-Path $HOME 'Library') 'Application Support' }
+    else { $base = "$env:XDG_CONFIG_HOME".Trim(); if (-not $base) { $base = Join-Path $HOME '.config' } }
+  }
+  foreach ($p in 'Code', 'Code - Insiders') { $out.Add(@{ Product = $p; Dir = [IO.Path]::Combine($base, $p, 'User') }) }
+  return $out.ToArray()
+}
+# A file:// URI (workspace.json's "folder") as a local path: file:///c%3A/dev/x -> c:\dev\x on Windows.
+function ConvertFrom-FileUri([string]$uri) {
+  if ($uri -notmatch '^file://') { return '' }
+  $p = [Uri]::UnescapeDataString(($uri -replace '^file://[^/]*', ''))
+  if ($p -match '^/[A-Za-z]:') { $p = $p.Substring(1) -replace '/', '\' }
+  return $p
+}
+# Is VS Code (this product) running? Process names: Code / code (stable), Code - Insiders / code-insiders.
+# $script:CopilotRunning can be set by tests. On macOS the process is named Electron: not looked for there,
+# so VS Code counts as running (unverified: macOS is untested).
+function Test-VSCodeRunning([string]$product) {
+  if ($IsMacOS) { return $true }
+  $names = if ($product -eq 'Code - Insiders') { @('Code - Insiders', 'code-insiders') } else { @('Code', 'code') }
+  return [bool](Get-Process -Name $names -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+# Replaying the log on PowerShell objects (as ConvertFrom-Json gives them): a path is a list of keys and
+# array indexes; a set on the root is ignored, as VS Code does.
+function Set-ChatNode($node, $key, $value, [switch]$Delete) {
+  if ($node -is [Collections.IList]) { $i = [int]$key; if ($i -ge 0 -and $i -lt $node.Count) { $node[$i] = $value }; return }
+  if ($null -eq $node) { return }
+  $prop = $node.PSObject.Properties[[string]$key]
+  if ($Delete) { if ($prop) { $node.PSObject.Properties.Remove([string]$key) }; return }
+  if ($prop) { $prop.Value = $value } else { $node | Add-Member -NotePropertyName ([string]$key) -NotePropertyValue $value -Force }
+}
+# (return ,$x: an array is handed back whole; a one-element array would otherwise arrive as its element)
+function Get-ChatNode($node, $key) {
+  if ($null -eq $node) { return $null }
+  if ($node -is [Collections.IList]) { $i = [int]$key; if ($i -ge 0 -and $i -lt $node.Count) { return ,$node[$i] } else { return $null } }
+  $prop = $node.PSObject.Properties[[string]$key]
+  if ($prop) { return ,$prop.Value } else { return $null }
+}
+function Invoke-ChatEntry($state, $e) {
+  $k = @($e.k)
+  if ($k.Count -eq 0) { return }
+  $parent = $state
+  for ($j = 0; $j -lt $k.Count - 1; $j++) { $parent = Get-ChatNode $parent $k[$j]; if ($null -eq $parent) { return } }
+  $last = $k[$k.Count - 1]
+  switch ([int]$e.kind) {
+    1 { Set-ChatNode $parent $last $e.v }
+    3 { Set-ChatNode $parent $last $null -Delete }
+    2 {
+      $cur = Get-ChatNode $parent $last
+      $arr = @(if ($null -ne $cur) { $cur })
+      if ($null -ne $e.i) { $n = [int]$e.i; $arr = @(if ($n -gt 0) { $arr[0..([math]::Min($n, $arr.Count) - 1)] }) }
+      $new = [Collections.Generic.List[object]]::new(); foreach ($x in $arr) { $new.Add($x) }; foreach ($x in @($e.v)) { if ($null -ne $x) { $new.Add($x) } }
+      Set-ChatNode $parent $last $new.ToArray()
+    }
+  }
+}
+
+# What a chat says, in the same fields as Get-LastAction, plus the chat's own (title, credits, state).
+function Get-ChatSummary($session) {
+  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0
+                     ChatState = $null; Credits = 0.0; ModelId = ''; Title = ''; Created = $null; SessionId = ''; CtxLimit = 0 }
+  if ($null -eq $session) { return $out }
+  $out.SessionId = [string]$session.sessionId
+  if ($session.creationDate) { $out.Created = ConvertFrom-UnixMs $session.creationDate }
+  $reqs = @($session.requests | Where-Object { $null -ne $_ })
+  $out.Turns = $reqs.Count
+  $tools = 0; $counts = @{}; $sumCredits = 0.0; $sessCredits = $null
+  foreach ($r in $reqs) {
+    $out.InTok += [long]$r.promptTokens; $out.OutTok += [long]$r.completionTokens
+    $c = 0.0; if ([double]::TryParse("$($r.copilotCredits)", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$c) -and $c -gt 0 -and -not [double]::IsInfinity($c)) { $sumCredits += $c }
+    $s = 0.0; if ([double]::TryParse("$($r.sessionCopilotCredits)", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$s) -and $s -gt 0 -and -not [double]::IsInfinity($s)) { $sessCredits = $s }
+    foreach ($p in @($r.response)) { if ($p -and $p.kind -eq 'toolInvocationSerialized') { $tools++; $n = if ($p.toolId) { [string]$p.toolId } else { 'tool' }; $counts[$n] = 1 + [int]$counts[$n] } }
+  }
+  # sessionCopilotCredits is the session's total; the per-request credits summed are only a lower bound
+  # (chatService.ts, IChatUsage)
+  $out.Credits = if ($null -ne $sessCredits) { $sessCredits } else { $sumCredits }
+  $out.Tools = $tools
+  $out.ToolMix = ($counts.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ' · '
+  $first = $reqs | Select-Object -First 1
+  $title = if ("$($session.customTitle)".Trim()) { [string]$session.customTitle } elseif ($first -and $first.message) { ((([string]$first.message.text).Trim()) -split "`n")[0] } else { '' }
+  $out.Title = $title
+  $last = $reqs | Select-Object -Last 1
+  if ($last) {
+    $out.ModelId = [string]$last.modelId
+    if ($out.ModelId) { $out.Model = (($out.ModelId -split '/')[-1]) -replace '^claude-', '' }
+    $ms = $last.modelState
+    $out.ChatState = if ($null -ne $ms -and $null -ne $ms.value) { [int]$ms.value } elseif ($null -ne $last.result) { 1 } else { 0 }
+    if ($last.timestamp) { $out.TurnStart = ConvertFrom-UnixMs $last.timestamp }
+    if ($last.contextUsage -and $last.contextUsage.currentTokens) { $out.Ctx = [math]::Round([double]$last.contextUsage.currentTokens / 1000); $out.CtxLimit = [long]$last.contextUsage.tokenLimit }
+    elseif ($last.promptTokens) { $out.Ctx = [math]::Round([double]$last.promptTokens / 1000) }
+    # LAST ACTION: the prompt while it is unanswered, else the reply's last tool call or text
+    $text = ''
+    if ($out.ChatState -in 0, 4 -and $last.message) { $text = 'prompt: ' + [string]$last.message.text }
+    else {
+      $parts = @($last.response | Where-Object { $null -ne $_ })
+      for ($j = $parts.Count - 1; $j -ge 0 -and -not $text; $j--) {
+        $p = $parts[$j]
+        if ($p.kind -eq 'toolInvocationSerialized') { $text = 'tool: ' + $(if ($p.toolId) { [string]$p.toolId } else { '?' }) }
+        elseif ($p.value -is [string] -and $p.value.Trim()) { $text = [string]$p.value }
+        elseif ($p.content -and $p.content.value -is [string] -and $p.content.value.Trim()) { $text = [string]$p.content.value }
+      }
+      if ($out.ChatState -eq 2) { $text = 'cancelled' + $(if ($text) { ' · ' + $text }) }
+    }
+    if ($text) { $out.LastFull = $text; $out.Last = (Clean $text).Trim() }
+  } else { $out.ChatState = $null }
+  return $out
+}
+
+# One chat file, read again only when it changes: a .jsonl that only grew is replayed from where the last
+# read stopped (whole lines only: a line still being written waits for the next read); one that shrank or
+# starts differently (VS Code compacted it) is read from the start. A failed read is remembered for that
+# version of the file, like Cline's (Test-ClineFresh), and a file that could not be opened is retried.
+$script:CopilotFiles = @{}   # path -> @{ Length; Write; Offset; Head; Session; Result; Failed; RetryAt }
+$script:CopilotMaxBytes = 64MB
+function Read-CopilotChat([IO.FileInfo]$f, [switch]$CachedOnly) {
+  $c = $script:CopilotFiles[$f.FullName]
+  if (Test-ClineFresh $c $f) { return $c.Result }
+  if ($CachedOnly) { if ($c) { return $c.Result } else { return $null } }
+  $prev = if ($c) { $c.Result } else { $null }
+  # a failed read keeps the last result to show, and drops the replayed session: a replay that stopped
+  # part-way may have changed it, so the next read starts over from the beginning
+  $fail = { param($retry) $script:CopilotFiles[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Offset = 0; Head = ''; Session = $null; Result = $prev; Failed = $true; RetryAt = $retry }; $prev }
+  if ($f.Length -gt $(if ($script:CopilotMaxBytes) { $script:CopilotMaxBytes } else { 64MB })) { return (& $fail $null) }
+  try {
+    if ($f.Extension -eq '.json') {
+      $session = ConvertFrom-Json -InputObject (Read-SharedText $f.FullName) -ErrorAction Stop
+      $res = Get-ChatSummary $session
+      $script:CopilotFiles[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Offset = $f.Length; Head = ''; Session = $null; Result = $res }
+      return $res
+    }
+    $session = $null; $from = 0L
+    if ($c -and $c.Session -and $f.Length -ge $c.Offset -and $c.Head -and (Test-SameHead $f.FullName $c.Head)) { $session = $c.Session; $from = [long]$c.Offset }
+    $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
+    try {
+      $null = $fs.Seek($from, 'Begin')
+      $buf = New-Object byte[] ($fs.Length - $from); $n = 0
+      while ($n -lt $buf.Length) { $r = $fs.Read($buf, $n, $buf.Length - $n); if ($r -le 0) { break }; $n += $r }
+    } finally { $fs.Dispose() }
+    $end = $n - 1; while ($end -ge 0 -and $buf[$end] -ne 10) { $end-- }   # the last whole line ends here
+    if ($end -lt 0) {
+      if ($from -eq 0 -and $n -gt 0) {
+        # one line with no newline yet: a whole kind 0 the writer has not finished, or one that is complete
+        $text = [Text.Encoding]::UTF8.GetString($buf, 0, $n); $e = ConvertFrom-Json -InputObject $text -ErrorAction Stop
+        if ([int]$e.kind -eq 0) { $session = $e.v; $end = $n - 1 } else { return (& $fail $null) }
+      } elseif ($c) { return $c.Result } else { return (Get-ChatSummary $null) }
+    } else {
+      $text = [Text.Encoding]::UTF8.GetString($buf, 0, $end + 1)
+      foreach ($line in $text.Split([char]10)) {
+        if (-not $line.Trim()) { continue }
+        $e = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+        if ([int]$e.kind -eq 0) { $session = $e.v } elseif ($null -ne $session) { Invoke-ChatEntry $session $e }
+      }
+    }
+    $res = Get-ChatSummary $session
+    $script:CopilotFiles[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Offset = $from + $end + 1
+                                           Head = $(if ($from -eq 0) { Get-HeadPrint $f.FullName } else { $c.Head }); Session = $session; Result = $res }
+    return $res
+  } catch {
+    # could not be opened (locked): try again in a few seconds; anything else (not JSON): when it changes
+    $io = $false; $ex = $_.Exception
+    while ($ex) { if ($ex -is [IO.IOException] -or $ex -is [UnauthorizedAccessException]) { $io = $true }; $ex = $ex.InnerException }
+    return (& $fail $(if ($io) { (Get-Date).AddSeconds($(if ($script:ClineRetrySec) { $script:ClineRetrySec } else { 5 })) } else { $null }))
+  }
+}
+
+# The chats to list, read every -RosterInterval s, like Cline's (Update-ClineRoster): newest first, within
+# $budgetMs a call (at least one read), the rest pending. A chat's folder comes from its workspace's
+# workspace.json. $running: product -> is VS Code running (tests pass their own).
+$script:CopilotAt = [datetime]::MinValue
+$script:CopilotRows = @()
+$script:CopilotPending = 0
+$script:CopilotBuildMs = 120
+$script:CopilotActiveMin = 60
+$script:CopilotStallMin = 10
+$script:CopilotFolders = @{}   # workspace storage folder -> @{ Write; Cwd }
+function Get-CopilotChatFiles([string]$userDir) {
+  $files = [Collections.Generic.List[object]]::new()
+  $add = { param($dir, $ws) try { foreach ($fi in ([IO.DirectoryInfo]::new($dir)).GetFiles()) { if ($fi.Extension -eq '.jsonl' -or $fi.Extension -eq '.json') { $files.Add(@{ File = $fi; Ws = $ws }) } } } catch { } }
+  $wsRoot = [IO.Path]::Combine($userDir, 'workspaceStorage')
+  if ([IO.Directory]::Exists($wsRoot)) {
+    foreach ($ws in @(try { ([IO.DirectoryInfo]::new($wsRoot)).GetDirectories() } catch { @() })) {
+      $cs = [IO.Path]::Combine($ws.FullName, 'chatSessions')
+      if ([IO.Directory]::Exists($cs)) { & $add $cs $ws.FullName }
+    }
+  }
+  $empty = [IO.Path]::Combine($userDir, 'globalStorage', 'emptyWindowChatSessions')
+  if ([IO.Directory]::Exists($empty)) { & $add $empty '' }
+  # one session can have both a .json (older) and a .jsonl: the newer file stands
+  $byId = @{}
+  foreach ($x in $files) { $id = $x.File.BaseName; $o = $byId[$id]; if (-not $o -or $x.File.LastWriteTimeUtc -gt $o.File.LastWriteTimeUtc) { $byId[$id] = $x } }
+  return @($byId.Values)
+}
+function Get-CopilotFolder([string]$ws) {
+  if (-not $ws) { return '' }
+  $meta = [IO.FileInfo]::new([IO.Path]::Combine($ws, 'workspace.json'))
+  if (-not $meta.Exists) { return '' }
+  $c = $script:CopilotFolders[$ws]
+  if ($c -and $c.Write -eq $meta.LastWriteTimeUtc) { return $c.Cwd }
+  $cwd = ''
+  try { $j = ConvertFrom-Json -InputObject (Read-SharedText $meta.FullName) -ErrorAction Stop; $cwd = if ($j.folder) { ConvertFrom-FileUri ([string]$j.folder) } elseif ($j.workspace) { ConvertFrom-FileUri ([string]$j.workspace) } else { '' } } catch { }
+  $script:CopilotFolders[$ws] = @{ Write = $meta.LastWriteTimeUtc; Cwd = $cwd }
+  return $cwd
+}
+function Update-CopilotRoster([scriptblock]$running = ${function:Test-VSCodeRunning}, [int]$budgetMs = $(if ($null -ne $script:CopilotBuildMs) { $script:CopilotBuildMs } else { 120 })) {
+  $now = Get-Date
+  $script:CopilotAt = $now
+  $activeMin = if ($script:CopilotActiveMin) { $script:CopilotActiveMin } else { 60 }
+  # the keep window as one cut-off time: Test-KeepWindow per chat file cost ~0.25 ms a call (150 ms for 600)
+  $keepMin = [int]$script:KeepMin
+  $keepCut = if ($keepMin -gt 0) { $now.AddMinutes(-$keepMin) } else { $null }
+  $activeCut = $now.AddMinutes(-$activeMin)
+  $sw = [Diagnostics.Stopwatch]::StartNew(); $readOne = $false; $pending = 0
+  $list = [Collections.Generic.List[object]]::new()
+  $seen = @{}
+  foreach ($ud in @(Get-VSCodeUserDirs)) {
+    if (-not [IO.Directory]::Exists($ud.Dir)) { continue }
+    $up = [bool](& $running $ud.Product)
+    $chats = @(Get-CopilotChatFiles $ud.Dir)
+    $arr = [object[]]$chats; $keys = [long[]]::new($arr.Count)
+    for ($i = 0; $i -lt $arr.Count; $i++) { $keys[$i] = -$arr[$i].File.LastWriteTimeUtc.Ticks }
+    [Array]::Sort($keys, $arr)   # newest first
+    foreach ($x in $arr) {
+      $f = $x.File; $seen[$f.FullName] = $true
+      $written = $f.LastWriteTime
+      $recent = $written -ge $activeCut
+      $inKeep = $keepMin -lt 0 -or ($keepCut -and $written -ge $keepCut)
+      # what can be listed without reading: live candidates (VS Code up, written in the last hour) and gone
+      # rows inside the keep window; an older chat is read only if it was read before (it may be unfinished)
+      $cached = $script:CopilotFiles[$f.FullName]
+      if (-not ($up -and $recent) -and -not $inKeep -and -not ($up -and $cached -and $cached.Result -and $cached.Result.ChatState -in 0, 4)) { continue }
+      $fresh = Test-ClineFresh $cached $f
+      if ($fresh -or -not $readOne -or $sw.ElapsedMilliseconds -lt $budgetMs) {
+        $act = Read-CopilotChat $f
+        if (-not $fresh) { $readOne = $true }
+      } else {
+        $pending++
+        $act = Read-CopilotChat $f -CachedOnly
+      }
+      if ($null -eq $act) { $act = Get-ChatSummary $null }
+      if ($null -eq $act.ChatState -and -not $act.Turns) { continue }   # an empty chat: nothing asked yet
+      $unfinished = $act.ChatState -in 0, 4
+      $live = $up -and ($recent -or $unfinished)
+      $goneAt = if ($live) { $null } else { $written }
+      if ($goneAt -and -not $inKeep) { continue }
+      if (-not (Test-KindListed 'interactive' ([bool]$All))) { continue }
+      $list.Add(@{ File = $f; Product = $ud.Product; Act = $act; GoneAt = $goneAt; Written = $written; Cwd = (Get-CopilotFolder $x.Ws); Running = $up })
+    }
+  }
+  foreach ($k in @($script:CopilotFiles.Keys)) { if (-not $seen.ContainsKey($k)) { $script:CopilotFiles.Remove($k) } }
+  $script:CopilotRows = $list.ToArray()
+  $script:CopilotPending = $pending
+}
+# A Copilot chat as a ctop row: the same fields as a Claude Code row (Build-Rows), _Agent = 'copilot'.
+function New-CopilotRow($e, [bool]$sample) {
+  $act = $e.Act; $gone = $e.GoneAt
+  $id = if ($act.SessionId) { [string]$act.SessionId } else { $e.File.BaseName }
+  $stale = ((Get-Date) - $e.Written).TotalMinutes -gt $(if ($script:CopilotStallMin) { $script:CopilotStallMin } else { 10 })
+  $state = if ($gone) { 'gone ' + (Get-Since $gone) }
+           elseif ($act.ChatState -eq 0) { if ($stale) { 'stalled' } else { 'working' } }
+           elseif ($act.ChatState -eq 4) { 'waiting' }
+           elseif ($act.ChatState -eq 3) { 'error' }
+           else { 'idle' }   # complete, cancelled, or nothing asked yet
+  $cwd = Normalize-Path ([string]$e.Cwd)
+  $git = Get-GitInfo $cwd
+  $began = if ($act.Created) { $act.Created } else { $e.File.CreationTime }
+  $startMs = ([DateTimeOffset]$began).ToUnixTimeMilliseconds()
+  if ($sample -and (Test-SampleActivity ([bool]$gone) $script:History[$id])) { Add-Sample $id $state 0 }
+  if ($gone) { [void]$script:FreshIds.Add($id) }
+  [pscustomobject]@{
+    NAME     = 'copilot-' + $(if ($id.Length -gt 8) { $id.Substring(0, 8) } else { $id })
+    TITLE    = $act.Title
+    KIND     = 'interactive'
+    VIA      = 'copilot'
+    STATE    = $state
+    PID      = '-'   # it runs inside VS Code: no process of its own
+    'CPU(s)' = '-'
+    'MEM(MB)'= '-'
+    AGE      = Get-Age $startMs
+    IDLE     = Get-Since $e.Written
+    TURN     = if ($act.TurnStart -and $state -in 'working', 'waiting') { Get-Since $act.TurnStart } else { '' }
+    TURNS    = $act.Turns
+    TOOLS    = $act.Tools
+    CTX      = if ($act.Ctx -ne '-') { "$($act.Ctx)K" } else { '-' }
+    CMP      = ''
+    MODEL    = $act.Model
+    BRANCH   = $(if ($git.Worktree) { 'wt:' + $git.Branch } else { $git.Branch })
+    COST     = if ($act.Credits -gt 0) { ('{0:0.##}cr' -f $act.Credits) } else { '-' }   # Copilot credits, not dollars
+    RATE     = '-'
+    ACTIVITY = $script:History[$id]
+    'LAST ACTION' = $act.Last
+    CWD      = $(if ($cwd) { $cwd } else { '-' })
+    _Agent      = 'copilot'
+    _Copilot    = $e
+    _SessionId  = $id
+    _Parent     = $null
+    _Git        = $git
+    _Jobs       = @()
+    _KidJobs    = 0
+    _Helpers    = 0
+    _Hooks      = @()
+    _LaunchCwd  = $cwd
+    _Order      = 2000000
+    _Gone       = $gone
+    _Cleared    = $false
+    _Successor  = ''
+    _LaunchedBy = $null
+    _AgentCost  = 0.0
+    _AgentN     = 0
+    _Act        = $act
+    _Transcript = $e.File.FullName
+    _StartedAt  = $began
+    _Src        = [pscustomobject]@{ sessionId = $id; startedAt = $startMs; cwd = $cwd; pid = $null; kind = 'interactive'; title = $act.Title }
+    _LiveKids   = 0
+    _Group = $null; _TreeCost = $null; _LaunchCost = $null; _LaunchN = $null; _Launcher = $null; _LaunchedNames = $null; _TreeLast = $null
+    _Lines = $null; _LinesSig = $null; _Dirty = $true; _Widths = $null
+  }
+}
+function Build-CopilotPeek([object]$r) {
+  $pw = (Get-WindowWidth) - 2
+  $e = $r._Copilot; $act = $r._Act
+  $names = @('Pending', 'Complete', 'Cancelled', 'Failed', 'NeedsInput')
+  $said = if ($null -ne $act.ChatState -and $act.ChatState -ge 0 -and $act.ChatState -lt $names.Count) { $names[$act.ChatState] } else { 'no request yet' }
+  $lines = @(
+    @{ Text = "  ctop — $($r.NAME.Trim())   (live)"; Inverse = $true },
+    '',
+    "  NAME         $($r.NAME.Trim())      a GitHub Copilot chat in VS Code$(if ($e.Product -ne 'Code') { " ($($e.Product))" })",
+    $(if ($r.TITLE) { Peek-Block 'TITLE' $r.TITLE $pw } else { $null }),
+    $(if ($r._Gone) { "  GONE         $(Get-Since $r._Gone) ago   ($(if ($e.Running) { "not written for over $($script:CopilotActiveMin) min" } else { 'VS Code is not running' }))" } else { $null }),
+    "  STATE        $(Paint $r.STATE (Cell-Color 'STATE' $r))      the chat file says: $said$(if ($r.STATE -eq 'stalled') { " (no write for over $($script:CopilotStallMin) min)" })",
+    "  LAG          VS Code saves a chat about once a minute: a reply that has finished can still read Pending until then",
+    "  PID          none: the chat runs inside VS Code",
+    "  STARTED      $(if ($r._StartedAt) { ([datetime]$r._StartedAt).ToString('yyyy-MM-dd HH:mm:ss') } else { '-' })   (age $($r.AGE))",
+    "  IDLE         $($r.IDLE)      TURN $(Paint $(if ($r.TURN) { $r.TURN } else { '-' }) (Cell-Color 'TURN' $r))      TURNS $($r.TURNS)",
+    $(Peek-Block 'TOOLS' "$($r.TOOLS) calls$(if ($act.ToolMix) { ':  ' + $act.ToolMix })" $pw),
+    "  CTX          $($r.CTX) tokens in context$(if ($act.CtxLimit) { " of $([math]::Round($act.CtxLimit / 1000))K" })      MODEL $(Paint $r.MODEL (Cell-Color 'MODEL' $r))$(if ($act.ModelId) { " ($($act.ModelId))" })      BRANCH $($r.BRANCH)",
+    "  COST         $(if ($act.Credits -gt 0) { "$('{0:0.##}' -f $act.Credits) Copilot credits (not dollars)" } else { 'no Copilot credits recorded' })     tokens: prompt $($act.InTok)  completion $($act.OutTok)",
+    "  ACTIVITY     $(Paint-Spark $r.ACTIVITY)   ($(Paint-Spark '█') working  $(Paint-Spark '·') idle  $(Paint-Spark '▁') waiting on you, 1 char = 2 s, newest right)",
+    $(Peek-Block 'LAST ACTION' $(if ($act.LastFull) { $act.LastFull } else { $r.'LAST ACTION' }) $pw),
+    "  CWD          $($r.CWD)",
+    "  SESSION ID   $($r._SessionId)",
+    "  CHAT FILE    $($r._Transcript)"
+  )
+  $flat = @(); foreach ($l in $lines) { if ($null -eq $l) { continue }; $flat += $l }
+  return ,$flat
+}
+
 # ---- roster feed (asynchronous) ---------------------------------------------
 # Starts `claude agents --json` as a windowless child (no console => can't retitle this
 # tab or write escapes into it) and returns immediately. Read-Roster polls for completion.
@@ -2311,7 +2707,16 @@ $script:GonePending = 0
 $script:RefreshIds = [System.Collections.Generic.HashSet[string]]::new()   # refresh these this frame
 $script:GoneCheckedAt = [datetime]::MinValue   # when every gone row's transcript was last checked
 $script:FreshIds   = [System.Collections.Generic.HashSet[string]]::new()   # refreshed this frame
+$script:AgentRows = @{}   # a gone Cline session's or Copilot chat's id -> @{ Key; Row } (Build-Rows)
 function Update-GoneRow($r) {
+  if ($r._Agent) {   # a Cline session or Copilot chat: only its clock cells
+    if ($r._Gone) { $r.STATE = 'gone ' + (Get-Since $r._Gone) }
+    if ($r._Src.startedAt) { $r.AGE = Get-Age $r._Src.startedAt }
+    $w = if ($r._Agent -eq 'cline') { $r._Cline.LastWrite } else { $r._Copilot.Written }
+    if ($w) { $r.IDLE = Get-Since $w }
+    $r._Dirty = $true
+    return
+  }
   $s = $r._Src
   $file = Find-Transcript $r._SessionId
   $r.STATE    = Resolve-State $s $r._Act $r._Gone ([bool]$r._Cleared)
@@ -2545,7 +2950,30 @@ function Build-Rows {
     $prow
     if ($script:ShowSubagents) { $kids }
   }
-  foreach ($ce in $script:ClineRows) { if ($ce.GoneAt -and -not $script:ShowGone) { continue }; New-ClineRow $ce $sample }
+  # Cline sessions and Copilot chats. A live one is built every frame (there are few). A gone one is built
+  # once and reused while its files are unchanged, like a Claude gone row: 600 Copilot chats rebuilt every
+  # frame took ~750 ms. New ones are built within the same per-frame budget, the rest on later frames; a
+  # reused row's clock cells are refreshed when it is on screen (Update-GoneRow).
+  $seenAgent = @{}
+  foreach ($ce in @($script:ClineRows) + @($script:CopilotRows)) {
+    if (-not $ce) { continue }
+    $isCline = $ce.ContainsKey('M')
+    if ($ce.GoneAt -and -not $script:ShowGone) { continue }
+    if (-not $ce.GoneAt) { if ($isCline) { New-ClineRow $ce $sample } else { New-CopilotRow $ce $sample }; continue }
+    $id = if ($isCline) { [string]$ce.M.session_id } elseif ($ce.Act.SessionId) { [string]$ce.Act.SessionId } else { $ce.File.BaseName }
+    $seenAgent[$id] = $true
+    $key = if ($isCline) { "$($ce.LastWrite.Ticks)|$($ce.GoneAt.Ticks)|$($ce.Status)" } else { "$($ce.Written.Ticks)|$($ce.GoneAt.Ticks)|$($ce.Act.ChatState)|$($ce.Running)" }
+    $hit = $script:AgentRows[$id]
+    if ($hit -and $hit.Key -ceq $key) {
+      if ($script:RefreshIds.Contains($id)) { Update-GoneRow $hit.Row; [void]$script:FreshIds.Add($id) }
+      $hit.Row; continue
+    }
+    if ($budget.ElapsedMilliseconds -ge $script:GoneBuildMs) { continue }   # (not counted in GonePending: the strip's gone x/y is Claude's history)
+    $row = if ($isCline) { New-ClineRow $ce $sample } else { New-CopilotRow $ce $sample }
+    $script:AgentRows[$id] = @{ Key = $key; Row = $row }
+    $row
+  }
+  if ($script:AgentRows.Count -gt 2 * $seenAgent.Count + 50) { foreach ($k in @($script:AgentRows.Keys)) { if (-not $seenAgent.ContainsKey($k)) { $script:AgentRows.Remove($k) } } }
 }
 
 # Sort parents, keep each parent's subagent rows directly beneath it.
@@ -3066,6 +3494,7 @@ function Get-QuestionLines([object[]]$qs, [int]$width) {
 }
 function Build-Peek([object]$r) {
   if ($r._Agent -eq 'cline') { return ,(Build-ClinePeek $r) }
+  if ($r._Agent -eq 'copilot') { return ,(Build-CopilotPeek $r) }
   $pw = (Get-WindowWidth) - 2
   $lines = @(
     @{ Text = "  ctop — $($r.NAME.Trim())   (live)"; Inverse = $true },   # keeps the └: says "subagent" at a glance
@@ -3258,6 +3687,13 @@ function Show-Help {
     '  the rest from <id>.messages.json. COST is the cost Cline records, not ctop''s price table. PID is the',
     '  VS Code window''s extension host, so CPU and MEM are left blank. Ended sessions stay for the keep window.',
     '',
+    'COPILOT   a GitHub Copilot chat in VS Code is read from VS Code''s chat files (User/workspaceStorage/',
+    '  <id>/chatSessions, globalStorage/emptyWindowChatSessions; VSCODE_APPDATA / VSCODE_PORTABLE move them).',
+    '  It is live while VS Code runs and the chat was written in the last hour or is unanswered; else gone.',
+    '  STATE: working (the reply is pending), waiting (it needs your input), stalled (pending, but not written',
+    '  for 10 min), idle, error. VS Code saves a chat about once a minute, so a finished reply can read',
+    '  working for up to a minute. COST is in Copilot credits (cr), not dollars. No PID: it runs inside VS Code.',
+    '',
     'COLUMNS   (source: J = claude agents --json, R = Claude Code''s session registry (~/.claude/sessions),',
     '           O = OS, T = transcript file — heuristic. Without the claude command, J comes from R too.',
     '           A Cline session (VIA cline) is read from Cline''s own files instead: see CLINE below)',
@@ -3274,7 +3710,7 @@ function Show-Help {
     '  KIND        J  interactive (terminal / VS Code), background (agent view), subagent, subagent·bg',
     '  VIA         R  what the session runs in: cli, vscode (the Claude Code extension), sdk (the Claude',
     '                 Agent SDK: VS Code''s own Claude agent, or another program built on it), remote,',
-    '                 cline (a Cline session)',
+    '                 cline (a Cline session), copilot (a GitHub Copilot chat in VS Code)',
     '  TURN        T  time since your last prompt — how long Claude has been on this turn (blank when idle).',
     '                 Yellow >= 10 min, red >= 30 min',
     '  IDLE        T  time since the transcript was last written to',
@@ -3528,6 +3964,7 @@ function Invoke-Frame($view) {
   $fresh = Read-Roster
   Read-ProcPoll
   if ($script:ClinePending -or ((Get-Date) - $script:ClineAt).TotalSeconds -ge $RosterInterval -or @($view.Actions) -contains 'poll') { Update-ClineRoster }
+  if ($script:CopilotPending -or ((Get-Date) - $script:CopilotAt).TotalSeconds -ge $RosterInterval -or @($view.Actions) -contains 'poll') { Update-CopilotRoster }
   if (-not $script:Poll -and $script:PollAt -and
       ((Get-Date) - $script:PollAt).TotalSeconds -ge $RosterInterval) { Start-RosterPoll }
 
@@ -3962,6 +4399,7 @@ if ($Snapshot) {
   $script:ReadOnly = $true                 # writes nothing: no scan cache, no closed-log entries
   $script:GoneBuildMs = [int]::MaxValue    # every row in the one frame
   $script:ClineBuildMs = [int]::MaxValue   # every Cline session's files, too
+  $script:CopilotBuildMs = [int]::MaxValue # and every Copilot chat's
 }
 if ($script:Mode -ne 'Worker') { try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {} }
 try {
@@ -3986,6 +4424,7 @@ try {
     }
     if ($procNote) { [Console]::Out.WriteLine($procNote) }
     if ($script:ClinePending) { [Console]::Out.WriteLine("note: $($script:ClinePending) Cline file(s) not read yet: their rows show what was read before") }
+    if ($script:CopilotPending) { [Console]::Out.WriteLine("note: $($script:CopilotPending) Copilot chat file(s) not read yet: their rows show what was read before") }
   }
   else {
     [Console]::CursorVisible = $false
@@ -4009,7 +4448,7 @@ finally {
       Disable-Mouse   # give the console its QuickEdit / mouse mode back, crash or not
       [Console]::CursorVisible = $true
       $Host.UI.RawUI.WindowTitle = $origTitle
-      [Console]::SetCursorPosition(0, (Get-WindowHeight) - 1)
+      Set-ConsoleCursor 0 ((Get-WindowHeight) - 1)
       Write-Host ''
     }
     if ($script:Fatal) {

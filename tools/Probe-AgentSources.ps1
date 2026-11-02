@@ -48,7 +48,7 @@ param(
   [int]$WatchSeconds = 0
 )
 $ErrorActionPreference = 'Stop'
-$ProbeVersion = '2026.11.02.2'
+$ProbeVersion = '2026.11.02.3'
 $onWindows = $IsWindows -or $env:OS -eq 'Windows_NT'
 $onMac = (-not $onWindows) -and $IsMacOS
 $homeDir = [Environment]::GetFolderPath('UserProfile')
@@ -228,6 +228,12 @@ foreach ($u in $userDirs) {
       $lines = @($text -split "`n" | Where-Object { $_.Trim() })
       $first = try { ConvertFrom-Json -InputObject $lines[0] } catch { $null }
       $kinds = @{}; $paths = @{}; $states = @{}; $models = @{}; $pushed = [Collections.Generic.List[object]]::new()
+      # reply parts (each request's response): their kind and field names only, never their text
+      $partKinds = @{}; $partFields = @{}
+      $addParts = { param($parts) foreach ($pt in @($parts)) { if ($null -eq $pt -or $pt -is [string]) { continue }
+          $pk = if ($pt.kind -is [string] -and $pt.kind -match '^[A-Za-z0-9._-]{1,40}$') { $pt.kind } elseif ($pt.kind) { '(other)' } else { '(no kind)' }
+          $partKinds[$pk] = 1 + [int]$partKinds[$pk]
+          if (-not $partFields[$pk]) { $partFields[$pk] = @{} }; foreach ($n in $pt.PSObject.Properties.Name) { $partFields[$pk][$n] = 1 } } }
       foreach ($l in $lines) {
         $e = try { ConvertFrom-Json -InputObject $l } catch { $null }
         if (-not $e) { continue }
@@ -238,8 +244,9 @@ foreach ($u in $userDirs) {
           $leaf = @($e.k)[-1]
           if ($leaf -eq 'modelState' -and $e.v) { $sn = State-Name $e.v.value; $states[$sn] = 1 + [int]$states[$sn] }
           if ($leaf -eq 'modelId' -and $e.v -is [string]) { $models[$e.v] = 1 }
+          if ($leaf -eq 'response') { & $addParts $e.v }
           if ([string]$e.kind -eq '2') {   # a new request pushed
-            foreach ($item in @($e.v)) { if ($item -and $item.modelId -is [string]) { $models[$item.modelId] = 1 }; if ($item -and @($e.k)[-1] -eq 'requests') { $pushed.Add($item) } }
+            foreach ($item in @($e.v)) { if ($item -and $item.modelId -is [string]) { $models[$item.modelId] = 1 }; if ($item -and @($e.k)[-1] -eq 'requests') { $pushed.Add($item); & $addParts $item.response } }
           }
         }
       }
@@ -252,7 +259,7 @@ foreach ($u in $userDirs) {
           $last = $reqs[-1]
           Show-Fields $last $reqAllow '        last request: '
           if ($last.modelState) { Say "        last request modelState: $(State-Name $last.modelState.value)  completedAt=$(Safe $last.modelState.completedAt)" }
-          foreach ($r in $reqs) { if ($r.modelId -is [string]) { $models[$r.modelId] = 1 } }
+          foreach ($r in $reqs) { if ($r.modelId -is [string]) { $models[$r.modelId] = 1 }; & $addParts $r.response }
         }
       }
       if ($paths.Count) { Say "        later changes, by path: $((@($paths.Keys | Sort-Object | Select-Object -First 25 | ForEach-Object { "$_ ($($paths[$_]))" })) -join ', ')" }
@@ -262,6 +269,10 @@ foreach ($u in $userDirs) {
       }
       if ($states.Count) { Say "        modelState values set later: $((@($states.Keys | Sort-Object | ForEach-Object { "$_ ($($states[$_]))" })) -join ', ')" }
       if ($models.Count) { Say "        modelId values: $((@($models.Keys | Sort-Object | ForEach-Object { Safe $_ })) -join ', ')" }
+      if ($partKinds.Count) {
+        $pkk = [string[]]@($partKinds.Keys); [Array]::Sort($pkk, [StringComparer]::Ordinal)
+        Say "        reply parts: $((@($pkk | ForEach-Object { "$_ $($partKinds[$_]) (fields: $((@($partFields[$_].Keys) | Sort-Object) -join ', '))" })) -join '; ')"
+      }
     } else {
       $o = Read-Json $f.FullName
       if (-not $o) { Say '        (too big or unreadable)'; continue }

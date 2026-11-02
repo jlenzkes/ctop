@@ -1,13 +1,13 @@
 # ctop
 
 A `top`-style live view, in the terminal, of the Claude sessions running on your computer: GitHub
-Copilot's Claude agent in VS Code, [Claude Code](https://code.claude.com) (its VS Code extension and
-its CLI), and [Cline](https://github.com/cline/cline).
+Copilot in VS Code (its chats and its Claude agent), [Claude Code](https://code.claude.com) (its VS Code
+extension and its CLI), and [Cline](https://github.com/cline/cline).
 
 ctop takes the list of sessions from Claude Code: from `claude agents --json`, or, without a `claude`
 command, from the session registry Claude Code keeps under `~/.claude/sessions/`. Copilot's Claude
-agent runs Claude Code underneath, so its sessions are there too. Cline's come from Cline's own
-session files. Each row is filled in from local sources: the session's transcript under `~/.claude/projects/`, and the OS process table. It shows,
+agent runs Claude Code underneath, so its sessions are there too. Copilot's own chats come from VS
+Code's chat files, and Cline's from Cline's session files. Each row is filled in from local sources: the session's transcript under `~/.claude/projects/`, and the OS process table. It shows,
 for every session and each of its subagents:
 
 - **what it's doing now**: working, thinking, idle, awaiting an agent or a background job,
@@ -32,10 +32,16 @@ Everything is read locally. ctop makes no model calls and uses no tokens.
   in the Linux container this was measured in. If a frame is more than 5 s late, the footer says how old
   the screen is.
 - **Sessions to show**, from any of these:
-  - **GitHub Copilot in VS Code, with its Claude agent** (Claude, in the chat's list of harnesses). It runs
-    Claude Code through the Claude Agent SDK, which registers each session and writes its transcript
-    like the CLI does. VIA reads `sdk`. Tested on Windows with nothing from Anthropic installed.
-    Copilot's own chats, on Claude models or otherwise, are not listed yet.
+  - **GitHub Copilot in VS Code:**
+    - **Its chats** (any model, a Claude API key included). VIA reads `copilot`. ctop reads VS Code's chat
+      files, `User/workspaceStorage/<id>/chatSessions/` and `User/globalStorage/emptyWindowChatSessions/`.
+      A chat counts as live while VS Code runs and it was written in the last hour or is still unanswered.
+      VS Code saves a chat about once a minute, so a finished reply can show as working for up to a
+      minute. COST is in Copilot credits (`cr`), not dollars; there is no PID, as the chat runs inside VS
+      Code. The file format was read from VS Code's source; ctop has not yet run against a real chat file.
+    - **Its Claude agent** (Claude, in the chat's list of harnesses). It runs Claude Code through the
+      Claude Agent SDK, which registers each session and writes its transcript like the CLI does. VIA
+      reads `sdk`. Tested on Windows with nothing from Anthropic installed.
   - **Claude Code**, its VS Code extension or its CLI. VIA reads `vscode` for the extension. With `claude` on
     `PATH`, ctop runs `claude agents --json`; without it, ctop reads the registry itself.
   - **Cline** (its VS Code extension or its `cline` command). VIA reads `cline`. ctop reads Cline's own

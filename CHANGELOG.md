@@ -2,6 +2,21 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.02.4
+
+- GitHub Copilot chats in VS Code are listed, with VIA `copilot`, read from VS Code's own chat files:
+  `User/workspaceStorage/<id>/chatSessions/*.jsonl` and `globalStorage/emptyWindowChatSessions/` (a
+  mutation log, replayed from where the last read stopped). STATE from the newest request: working
+  (pending), waiting (needs your input), stalled (pending, no write for 10 min), idle, error. A chat is
+  live while VS Code runs and it was written in the last hour or is unanswered; otherwise it is gone, for
+  the keep window. COST is in Copilot credits, not dollars; CTX from the request's context usage; the
+  folder from the workspace's `workspace.json`. VS Code's folder follows `VSCODE_PORTABLE` /
+  `VSCODE_APPDATA` as VS Code does
+- a window made smaller while a frame was being drawn no longer stops ctop ("SetCursorPosition … must be
+  less than the console's buffer size", seen on Windows with 2026.11.01.3): the cursor stays inside the
+  buffer, and the next frame redraws at the new size
+- the agent probe (2026.11.02.3) names a Copilot reply's parts by kind and field names
+
 ## 2026.11.02.3 — Sol's audit of PRs #3 and #4 (2026.11.01.3 to 2026.11.02.2)
 
 - an ended Cline session shows its final cost, tokens and last action: a conversation that changed after

@@ -63,6 +63,17 @@ Flaky tests are listed separately in `CLAUDE.md` ("Flaky tests seen in CI").
 - **Why deferred:** of that review's points, you chose three to fix, and this wasn't one of them.
 - **Possible fix:** set `SilentlyContinue` only around the reads that expect to fail (files mid-write, processes gone), and keep the default elsewhere.
 
+### D9. Copilot chats: "live" is a heuristic
+- **Source:** step 3's design (build 2026.11.02.4).
+- **Where:** `Update-CopilotRoster` and `New-CopilotRow`.
+- **What happens:**
+  - VS Code doesn't say which chats are open. ctop counts a chat as live while VS Code runs and the chat was written in the last hour or is unfinished.
+  - A Pending request with no write for 10 min shows as `stalled`.
+  - VS Code saves about once a minute, so a finished reply can show as working for up to a minute.
+  - On macOS, VS Code's process is not looked for, so it always counts as running.
+- **Why deferred:** nothing more exact is on disk.
+- **Possible fix:** none planned. The macOS check needs a real Mac.
+
 ## Not yet checked (not bugs)
 
 - **Cline's `cost`:** that it is in dollars is inference. Whether it equals the manifest's `metadata.totalCost` is unverified. A probe run that prints both would settle it.

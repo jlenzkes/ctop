@@ -1,0 +1,222 @@
+﻿# GitHub Copilot chats, read from VS Code's chat files: User/workspaceStorage/<id>/chatSessions/<id>.jsonl
+# (and globalStorage/emptyWindowChatSessions), a mutation log replayed in order. The format follows VS Code's
+# source (microsoft/vscode 1306698: objectMutationLog.ts, chatSessionOperationLog.ts, chatService.ts) and
+# the chat files seen on Windows on 2026-11-01 (docs/research/other-agents.md).
+BeforeAll {
+  . (Join-Path $PSScriptRoot 'Import-Ctop.ps1')
+  function J($o) { ConvertTo-Json -InputObject $o -Depth 20 -Compress }
+  function Now-Ms([int]$minutesAgo = 0) { [DateTimeOffset]::UtcNow.AddMinutes(-$minutesAgo).ToUnixTimeMilliseconds() }
+  function New-Request([string]$id, [string]$text, [int]$state = 0, [hashtable]$more = @{}) {
+    $r = [ordered]@{ requestId = $id; timestamp = (Now-Ms); message = @{ text = $text; parts = @() }; modelId = 'anthropic/Anthropic/claude-haiku-4-5-20251001'
+                     response = @(); modelState = @{ value = $state } }
+    foreach ($k in $more.Keys) { $r[$k] = $more[$k] }
+    $r
+  }
+  function New-Session([string]$id, $requests = @(), [hashtable]$more = @{}) {
+    $s = [ordered]@{ version = 3; sessionId = $id; creationDate = (Now-Ms 30); requests = @($requests); responderUsername = 'GitHub Copilot'; initialLocation = 'panel' }
+    foreach ($k in $more.Keys) { $s[$k] = $more[$k] }
+    $s
+  }
+  # a chat file: lines of the log, each a hashtable entry
+  function Write-Chat([string]$path, [object[]]$entries, [switch]$Append) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+    $text = (@($entries | ForEach-Object { J $_ }) -join "`n") + "`n"
+    if ($Append) { [IO.File]::AppendAllText($path, $text) } else { [IO.File]::WriteAllText($path, $text) }
+  }
+  function Reset-Copilot { $script:CopilotFiles = @{}; $script:CopilotFolders = @{}; $script:History = @{}; $script:BranchCache = @{}; $script:FreshIds = [Collections.Generic.HashSet[string]]::new(); $script:KeepMin = 15 }
+  function Read-Chat([string]$path) { Read-CopilotChat ([IO.FileInfo]::new($path)) }
+}
+
+Describe 'Get-VSCodeUserDirs (where VS Code keeps its user data)' {
+  BeforeEach { $saved = @{}; foreach ($n in 'VSCODE_PORTABLE', 'VSCODE_APPDATA', 'XDG_CONFIG_HOME') { $saved[$n] = [Environment]::GetEnvironmentVariable($n); [Environment]::SetEnvironmentVariable($n, $null) } }
+  AfterEach { foreach ($n in $saved.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) } }
+  It 'follows VSCODE_PORTABLE first: <portable>/user-data/User' {
+    $env:VSCODE_PORTABLE = 'P'; $env:VSCODE_APPDATA = 'A'
+    $d = @(Get-VSCodeUserDirs); $d.Count | Should -Be 1
+    $d[0].Dir | Should -Be ([IO.Path]::Combine('P', 'user-data', 'User'))
+  }
+  It 'follows VSCODE_APPDATA: <appdata>/Code/User and <appdata>/Code - Insiders/User' {
+    $env:VSCODE_APPDATA = 'A'
+    @(Get-VSCodeUserDirs | ForEach-Object { $_.Dir }) | Should -Be @(([IO.Path]::Combine('A', 'Code', 'User')), ([IO.Path]::Combine('A', 'Code - Insiders', 'User')))
+  }
+  It 'uses XDG_CONFIG_HOME, else ~/.config, on Linux' -Skip:($IsWindows -or $env:OS -eq 'Windows_NT' -or $IsMacOS) {
+    $env:XDG_CONFIG_HOME = '/x'
+    (@(Get-VSCodeUserDirs))[0].Dir | Should -Be '/x/Code/User'
+    $env:XDG_CONFIG_HOME = $null
+    (@(Get-VSCodeUserDirs))[0].Dir | Should -Be (Join-Path $HOME '.config/Code/User')
+  }
+}
+
+Describe 'ConvertFrom-FileUri (workspace.json''s folder)' {
+  It 'reads a Windows drive path' { ConvertFrom-FileUri 'file:///c%3A/dev/src/ctop' | Should -Be 'c:\dev\src\ctop' }
+  It 'reads a Unix path with escapes' { ConvertFrom-FileUri 'file:///home/u/my%20work' | Should -Be '/home/u/my work' }
+  It 'gives nothing for a remote URI' { ConvertFrom-FileUri 'vscode-remote://ssh-remote+box/home/u' | Should -Be '' }
+}
+
+Describe 'Read-CopilotChat (replaying the mutation log)' {
+  BeforeEach { Reset-Copilot; $dir = Join-Path $TestDrive ([guid]::NewGuid()) }
+  It 'rebuilds the session: initial, pushes, sets, deletes' {
+    $p = Join-Path $dir 'c1.jsonl'
+    Write-Chat $p @(
+      @{ kind = 0; v = (New-Session 'c1' @() @{ customTitle = 'old title' }) },
+      @{ kind = 2; k = @('requests'); v = @((New-Request 'r1' 'first question' 0)) },
+      @{ kind = 1; k = @('requests', 0, 'modelState'); v = @{ value = 1; completedAt = (Now-Ms) } },
+      @{ kind = 1; k = @('requests', 0, 'promptTokens'); v = 1000 },
+      @{ kind = 1; k = @('requests', 0, 'completionTokens'); v = 50 },
+      @{ kind = 1; k = @('requests', 0, 'response'); v = @(@{ value = 'the first answer' }) },
+      @{ kind = 3; k = @('customTitle') },
+      @{ kind = 1; k = @('customTitle'); v = 'New title' }
+    )
+    $a = Read-Chat $p
+    $a.Title | Should -Be 'New title'
+    $a.Turns | Should -Be 1
+    $a.ChatState | Should -Be 1
+    $a.InTok | Should -Be 1000; $a.OutTok | Should -Be 50
+    $a.Last | Should -Be 'the first answer'
+    $a.Model | Should -Be 'haiku-4-5-20251001'
+    $a.SessionId | Should -Be 'c1'
+  }
+  It 'cuts the array at i before a push' {
+    $p = Join-Path $dir 'c2.jsonl'
+    Write-Chat $p @(
+      @{ kind = 0; v = (New-Session 'c2' @((New-Request 'a' 'one' 1), (New-Request 'b' 'two' 1), (New-Request 'c' 'three' 1))) },
+      @{ kind = 2; k = @('requests'); v = @((New-Request 'd' 'retry of two' 0)); i = 1 }
+    )
+    $a = Read-Chat $p
+    $a.Turns | Should -Be 2
+    $a.ChatState | Should -Be 0
+    $a.Last | Should -Be 'prompt: retry of two'
+  }
+  It 'reads only what was appended, and waits for a line still being written' {
+    $p = Join-Path $dir 'c3.jsonl'
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c3' @((New-Request 'a' 'q' 1))) })
+    $null = Read-Chat $p
+    $off = $script:CopilotFiles[(Get-Item $p).FullName].Offset
+    Write-Chat $p @(@{ kind = 2; k = @('requests'); v = @((New-Request 'b' 'second' 0)) }) -Append
+    [IO.File]::AppendAllText($p, (J @{ kind = 1; k = @('requests', 1, 'modelState'); v = @{ value = 1 } }).Substring(0, 20))   # half a line
+    $a = Read-Chat $p
+    $a.Turns | Should -Be 2
+    $a.ChatState | Should -Be 0 -Because 'the half-written line is not applied yet'
+    $script:CopilotFiles[(Get-Item $p).FullName].Offset | Should -BeGreaterThan $off
+    [IO.File]::AppendAllText($p, (J @{ kind = 1; k = @('requests', 1, 'modelState'); v = @{ value = 1 } }).Substring(20) + "`n")
+    (Read-Chat $p).ChatState | Should -Be 1
+  }
+  It 'reads a compacted file (VS Code rewrote it as one new initial entry) from the start' {
+    $p = Join-Path $dir 'c4.jsonl'
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c4' @((New-Request 'a' 'q' 0))) }, @{ kind = 1; k = @('customTitle'); v = ('x' * 500) })
+    $null = Read-Chat $p
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c4' @((New-Request 'a' 'q' 1), (New-Request 'b' 'q2' 1)) @{ customTitle = 'compacted' }) })
+    $a = Read-Chat $p
+    $a.Turns | Should -Be 2; $a.Title | Should -Be 'compacted'
+  }
+  It 'keeps the last good read of a broken file, and does not parse that version again' {
+    $p = Join-Path $dir 'c5.jsonl'
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c5' @((New-Request 'a' 'good' 1))) })
+    $null = Read-Chat $p
+    [IO.File]::AppendAllText($p, '{"kind":1,"k":["requests",0,"mo' + "`n")
+    $a = Read-Chat $p
+    $a.Turns | Should -Be 1
+    Test-ClineFresh $script:CopilotFiles[(Get-Item $p).FullName] (Get-Item $p) | Should -BeTrue
+  }
+  It 'reads an older whole-session .json file' {
+    $p = Join-Path $dir 'c6.json'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    [IO.File]::WriteAllText($p, (J (New-Session 'c6' @((New-Request 'a' 'from json' 1)))))
+    (Read-Chat $p).Title | Should -Be 'from json'
+  }
+  It 'prefers the session''s credits total to the sum of its requests'' credits' {
+    $p = Join-Path $dir 'c7.jsonl'
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c7' @((New-Request 'a' 'q' 1 @{ copilotCredits = 1 }), (New-Request 'b' 'q' 1 @{ copilotCredits = 1; sessionCopilotCredits = 2.5 }))) })
+    (Read-Chat $p).Credits | Should -Be 2.5
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c7' @((New-Request 'a' 'q' 1 @{ copilotCredits = 1 }), (New-Request 'b' 'q' 1 @{ copilotCredits = 0.5 }))) })
+    (Read-Chat $p).Credits | Should -Be 1.5
+  }
+  It 'takes CTX from contextUsage when the request has it' {
+    $p = Join-Path $dir 'c8.jsonl'
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c8' @((New-Request 'a' 'q' 1 @{ promptTokens = 9000; contextUsage = @{ currentTokens = 42000; tokenLimit = 200000 } }))) })
+    $a = Read-Chat $p
+    $a.Ctx | Should -Be 42; $a.CtxLimit | Should -Be 200000
+  }
+  It 'shows a tool call as the last action, and counts tools' {
+    $p = Join-Path $dir 'c9.jsonl'
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c9' @((New-Request 'a' 'q' 1 @{ response = @(@{ value = 'let me look' }, @{ kind = 'toolInvocationSerialized'; toolId = 'copilot_readFile' }) }))) })
+    $a = Read-Chat $p
+    $a.Last | Should -Be 'tool: copilot_readFile'; $a.Tools | Should -Be 1
+  }
+  It 'reads a 3 MB session entry (Windows PowerShell 5.1''s JSON reader has limits)' {
+    $p = Join-Path $dir 'big.jsonl'
+    $big = 'y' * 3MB
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'big' @((New-Request 'a' 'big one' 1 @{ response = @(@{ value = $big }) }))) })
+    $a = Read-Chat $p
+    $a.Turns | Should -Be 1
+    $a.Title | Should -Be 'big one'
+  }
+}
+
+Describe 'Update-CopilotRoster and New-CopilotRow' {
+  BeforeAll {
+    Mock Get-GitInfo { @{ Branch = '-'; Worktree = $false; Main = '' } }
+    $root = Join-Path $TestDrive 'appdata'
+    $user = Join-Path $root 'Code/User'
+    $ws = Join-Path $user 'workspaceStorage/ws1'
+    New-Item -ItemType Directory -Force -Path $ws | Out-Null
+    [IO.File]::WriteAllText((Join-Path $ws 'workspace.json'), '{"folder":"file:///home/u/proj%20a"}')
+    function Put([string]$rel, [object[]]$entries, [int]$minutesAgo = 0) {
+      $p = Join-Path $user $rel; Write-Chat $p $entries
+      [IO.File]::SetLastWriteTime($p, (Get-Date).AddMinutes(-$minutesAgo))
+    }
+    Put 'workspaceStorage/ws1/chatSessions/aaaaaaaa-working.jsonl' @(@{ kind = 0; v = (New-Session 'aaaaaaaa-working' @((New-Request 'a' 'fix the build' 0))) })
+    Put 'workspaceStorage/ws1/chatSessions/bbbbbbbb-asks.jsonl' @(@{ kind = 0; v = (New-Session 'bbbbbbbb-asks' @((New-Request 'a' 'may I?' 4))) })
+    Put 'globalStorage/emptyWindowChatSessions/cccccccc-done.jsonl' @(@{ kind = 0; v = (New-Session 'cccccccc-done' @((New-Request 'a' 'hello' 1 @{ sessionCopilotCredits = 1.5; response = @(@{ value = 'hi there' }) }))) }) 5
+    Put 'globalStorage/emptyWindowChatSessions/dddddddd-old.jsonl' @(@{ kind = 0; v = (New-Session 'dddddddd-old' @((New-Request 'a' 'long ago' 1))) }) 180
+    Put 'globalStorage/emptyWindowChatSessions/eeeeeeee-stuck.jsonl' @(@{ kind = 0; v = (New-Session 'eeeeeeee-stuck' @((New-Request 'a' 'stuck' 0))) }) 20
+    Put 'globalStorage/emptyWindowChatSessions/ffffffff-empty.jsonl' @(@{ kind = 0; v = (New-Session 'ffffffff-empty' @()) })
+    $up = { param($p) $p -eq 'Code' }
+    $down = { param($p) $false }
+  }
+  BeforeEach { Reset-Copilot; $env:VSCODE_APPDATA = $root; $savedPortable = $env:VSCODE_PORTABLE; $env:VSCODE_PORTABLE = $null }
+  AfterEach { $env:VSCODE_APPDATA = $null; $env:VSCODE_PORTABLE = $savedPortable }
+  It 'lists the chats VS Code has open lately as live, with their state' {
+    Update-CopilotRoster $up
+    $rows = @($script:CopilotRows | ForEach-Object { New-CopilotRow $_ $false })
+    $by = @{}; foreach ($r in $rows) { $by[$r._SessionId] = $r }
+    $by['aaaaaaaa-working'].STATE | Should -Be 'working'
+    $by['aaaaaaaa-working'].VIA | Should -Be 'copilot'
+    $by['aaaaaaaa-working'].CWD | Should -Be '/home/u/proj a'
+    $by['aaaaaaaa-working'].NAME | Should -Be 'copilot-aaaaaaaa'
+    $by['bbbbbbbb-asks'].STATE | Should -Be 'waiting'
+    $by['cccccccc-done'].STATE | Should -Be 'idle'
+    $by['cccccccc-done'].COST | Should -Be '1.5cr'
+    $by['cccccccc-done'].'LAST ACTION' | Should -Be 'hi there'
+    $by['eeeeeeee-stuck'].STATE | Should -Be 'stalled' -Because 'Pending, and not written for 20 min'
+    $by.ContainsKey('dddddddd-old') | Should -BeFalse -Because 'finished, three hours ago, outside the keep window'
+    $by.ContainsKey('ffffffff-empty') | Should -BeFalse -Because 'nothing asked yet'
+  }
+  It 'lists them as gone, from when they were last written, once VS Code is not running' {
+    Update-CopilotRoster $down
+    $rows = @($script:CopilotRows | ForEach-Object { New-CopilotRow $_ $false })
+    $done = $rows | Where-Object { $_._SessionId -eq 'cccccccc-done' }
+    $done.STATE | Should -Match '^gone 5m'
+    @($rows | Where-Object { -not $_._Gone }).Count | Should -Be 0
+    @($rows | Where-Object { $_._SessionId -eq 'eeeeeeee-stuck' }).Count | Should -Be 0 -Because 'written 20 min ago: outside the 15 min keep window'
+  }
+  It 'reads a little at a time when there is no time to spare, and catches up' {
+    Update-CopilotRoster $up 0
+    $script:CopilotPending | Should -BeGreaterThan 0
+    for ($n = 0; $n -lt 10 -and $script:CopilotPending; $n++) { Update-CopilotRoster $up 0 }
+    $script:CopilotPending | Should -Be 0
+    @($script:CopilotRows).Count | Should -Be 4
+  }
+  It 'peeks and gives a contact block, with credits not dollars and no resume command' {
+    Mock Get-WindowWidth { 140 }
+    Update-CopilotRoster $up
+    $r = New-CopilotRow (@($script:CopilotRows | Where-Object { $_.Act.SessionId -eq 'cccccccc-done' })[0]) $false
+    $text = (@(Build-Peek $r) | ForEach-Object { if ($_ -is [hashtable]) { $_.Text } else { $_ } }) -join "`n"
+    $text | Should -Match '1\.5 Copilot credits \(not dollars\)'
+    $text | Should -Match 'the chat file says: Complete'
+    $text | Should -Not -Match 'claude --resume'
+    $c = Format-Contact $r 'box'
+    $c | Should -Match '^GitHub Copilot chat \(VS Code\)'
+    $c | Should -Not -Match 'claude --resume'
+  }
+}
