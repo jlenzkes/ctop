@@ -66,6 +66,7 @@ BeforeAll {
     $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
     $psi.EnvironmentVariables['CLAUDE_CONFIG_DIR'] = $fx.Cfg
+    $psi.EnvironmentVariables['CLINE_SESSION_DATA_DIR'] = if ($fx.Cline) { $fx.Cline } else { Join-Path $fx.Cfg 'no-cline' }   # not this machine's Cline
     $psi.EnvironmentVariables['PATH'] = if ($fx.NoClaude) { $script:pathWithoutClaude } else { $fx.Bin + [IO.Path]::PathSeparator + $env:PATH }
     $p = [Diagnostics.Process]::Start($psi)
     $p.StandardInput.Close()
@@ -149,6 +150,34 @@ Describe 'a snapshot (-Snapshot)' {
     $x.Code | Should -Be 0 -Because $x.Err
     $x.Text | Should -Match 'no Claude Code sessions running'
     $x.Text | Should -Not -Match "claude agents --json' failed"
+  }
+  It 'lists a Cline session, read from its manifest and messages file, with no claude command' {
+    # VS Code with only Cline: <sessions>/<id>/<id>.json, its pid the window's extension host (here: this
+    # process, which started before the session did: a later start would mean the pid was reused)
+    $fx = New-Fixture (Join-Path $TestDrive 'snap-cline') @() -NoLive
+    $fx.NoClaude = $true
+    $fx.Cline = Join-Path $fx.Cfg 'cline-sessions'
+    $id = '1793562129035_phf3k'; $dir = Join-Path $fx.Cline $id; New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $began = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    $manifest = [ordered]@{ version = 1; session_id = $id; source = 'vscode'; pid = $PID; started_at = $began; status = 'running'; interactive = $true
+                            provider = 'anthropic'; model = 'claude-sonnet-5'; cwd = '/w'; workspace_root = '/w'; enable_tools = $true; enable_spawn = $false
+                            enable_teams = $false; prompt = 'tidy the logs'; messages_path = (Join-Path $dir "$id.messages.json") }
+    [IO.File]::WriteAllText((Join-Path $dir "$id.json"), ($manifest | ConvertTo-Json))
+    $msgs = [ordered]@{ version = 1; updated_at = $began; agent = 'lead'; sessionId = $id; messages = @(
+        [ordered]@{ role = 'user'; content = @(@{ type = 'text'; text = 'tidy the logs' }) },
+        [ordered]@{ role = 'assistant'; content = @(@{ type = 'tool_use'; id = 't1'; name = 'execute_command'; input = @{ command = 'ls logs' } })
+                    modelInfo = @{ id = 'claude-sonnet-5'; provider = 'anthropic' }; metrics = @{ inputTokens = 900; outputTokens = 50; cacheReadTokens = 41000; cacheWriteTokens = 100; cost = 1.23 } }) }
+    [IO.File]::WriteAllText((Join-Path $dir "$id.messages.json"), ($msgs | ConvertTo-Json -Depth 10))
+    $x = Invoke-Snapshot $fx @('-MaxWidth', '400')
+    $x.Code | Should -Be 0 -Because $x.Err
+    $x.Err.Trim() | Should -BeNullOrEmpty
+    $row = @($x.Text -split "`r?`n" | Where-Object { $_ -match '^cline-phf3k ' })[0]
+    $row | Should -Not -BeNullOrEmpty -Because $x.Text
+    $row | Should -Match '\bworking\b' -Because 'Cline says running, and the newest message is a tool call'
+    $row | Should -Match '\bcline\b' -Because 'VIA'
+    $row | Should -Match '\$1\.23' -Because 'the cost Cline recorded'
+    $row | Should -Match '\b42K\b' -Because 'CTX: 900 + 41000 + 100'
+    $row | Should -Match 'execute_command: ls logs'
   }
   It 'says why when the roster cannot be read, and still exits' {
     $fx = New-Fixture (Join-Path $TestDrive 'snap-bad') @() -NoLive

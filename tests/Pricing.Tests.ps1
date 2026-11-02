@@ -74,3 +74,25 @@ Describe 'Load-ScanCache and the price version' {
     $script:ScanCache.Count | Should -Be 0
   }
 }
+
+Describe 'where prices come from, in peek' {
+  BeforeAll {
+    Mock Get-WindowWidth { 160 }
+    $script:ctopText = [IO.File]::ReadAllText((Join-Path (Split-Path -Parent $PSScriptRoot) 'ctop.ps1'))
+    $row = [pscustomobject]@{ NAME = 'p-one'; TITLE = ''; KIND = 'interactive'; VIA = 'cli'; STATE = 'idle'; PID = 1; 'CPU(s)' = 0; 'MEM(MB)' = 0
+      AGE = '1m'; IDLE = '1m'; TURN = ''; TURNS = 1; TOOLS = 0; CTX = '-'; MODEL = 'opus-5-5'; BRANCH = '-'; COST = '$1.00'; RATE = '-'; ACTIVITY = ''
+      'LAST ACTION' = '-'; CWD = '/w'; _SessionId = 's'; _Act = [pscustomobject]@{ Cost = 1.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; Compacts = 0 }
+      _Transcript = '/w/s.jsonl'; _StartedAt = (Get-Date) }
+  }
+  It 'says which price table a session''s COST comes from' {
+    $script:PriceFrom = '-PricingFile /etc/prices.json'
+    $text = (@(Build-Peek $row) | ForEach-Object { if ($_ -is [hashtable]) { $_.Text } else { $_ } }) -join "`n"
+    $text | Should -Match '(?m)^  PRICES       -PricingFile /etc/prices\.json$'
+  }
+  It 'dates the built-in table as its source line does, so the two cannot drift apart' {
+    $source = [regex]::Match($script:ctopText, '# Source: platform\.claude\.com\S* read (\d{4}-\d{2}-\d{2})').Groups[1].Value
+    $shown  = [regex]::Match($script:ctopText, "PriceFrom = 'the built-in table, read (\d{4}-\d{2}-\d{2})").Groups[1].Value
+    $source | Should -Match '^\d{4}-\d{2}-\d{2}$'
+    $shown | Should -Be $source
+  }
+}

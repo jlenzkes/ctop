@@ -9,6 +9,10 @@
 - Never state a negative ("there is no X") as fact without having looked.
 - Don't turn one data point into a requirement. Write "tested on X", and say what is untested.
 
+## Builds
+
+- Release notes go in `CHANGELOG.md` (newest first). A build bumps `$script:CtopVersion`, the `VERSION` line in `.NOTES`, and adds its `CHANGELOG.md` entry; a test checks all three agree.
+
 ## Pending work: sessions from other agents
 
 **Decision (user, 2026-11-01): ctop supports exactly three agents:**
@@ -34,15 +38,16 @@ Details in `docs/research/other-agents.md`.
 - VS Code's Claude agent: it creates `~/.claude/sessions/<pid>.json` (`entrypoint` `sdk-ts`, live status including `waiting`) and a transcript in `~/.claude/projects/`. Signed out of GitHub, it needed `"chat.agentHost.allowSignedOutWhenUsable": true`.
 
 **Research is done. Code:**
-- **Step 1, done:** ctop starts without `claude` and reads `~/.claude/sessions/*.json` itself; the VIA column.
-- **Step 2, next:** Cline, from its session manifests in `~/.cline/data/sessions/`.
-- **Step 3:** Copilot chats, from VS Code's chat files.
+- **Step 1, done (PR #3, merged):** ctop starts without `claude` and reads `~/.claude/sessions/*.json` itself; the VIA column.
+- **Step 2, done (build 2026.11.02.1, branch `claude/dazzling-cerf-yiwl4o`):** Cline sessions from `<sessions>/<id>/<id>.json` and `<id>.messages.json`; VIA `cline`. The messages file's field names were checked on the user's machine on 2026-11-02 (sixth probe run). Still open: whether the manifest's `metadata.totalCost` matches the summed `metrics.cost`, and the cost's unit.
+- **Review fixes (build 2026.11.02.2, same branch and PR as step 2):** from Cline's review of 2026.11.01.3, the user chose three: release notes moved to `CHANGELOG.md`; `CTOP_TRACE` also records swallowed errors; peek's PRICES line says where prices come from. Not done: narrowing the global `$ErrorActionPreference = 'SilentlyContinue'`.
+- **Step 3, next:** Copilot chats, from VS Code's chat files.
 
-Each step gets its own PR. Step 1 shares one with the probe and these notes.
+Each step gets its own PR. Step 1 shared one with the probe and these notes.
 
-## Next PR: flaky tests seen in CI (2026-11-01: PR #2, push run 41330600708 for c144eb6)
+## Flaky tests seen in CI (2026-11-01: PR #2, push run 41330600708 for c144eb6)
 
-Same code passed in the other run, so these are flakes, not a code problem; the failed jobs were re-run. **Addressed on this branch:** the timing test now checks the median of 7 gaps (still 416 ms, red, with the bug put back); `Start-Ctop` now prints what tmux says when the pane size is not reported (the cause itself is still unknown).
+Same code passed in the other run, so these are flakes, not a code problem; the failed jobs were re-run. **Addressed in PR #3:** the timing test now checks the median of 7 gaps (still 416 ms, red, with the bug put back); `Start-Ctop` now prints what tmux says when the pane size is not reported (the cause itself is still unknown).
 - **`tests/Worker.Tests.ps1`, 'starts a frame every tick…' (Windows PowerShell 5.1):** asserts the *maximum* gap between frame starts is under 330 ms; one gap was 354 ms. The bug it guards gives ~416 ms. Fix: assert the median gap (and print the max).
 - **`tests/Integration.Tests.ps1`, `Start-Ctop` (ubuntu:22.04), in the '300 gone rows' test:** `tmux display -p '#{pane_width}x#{pane_height}'` returned nothing for 5 s, so the test never started. Cause unknown; the log does not capture tmux's own output. First step: capture tmux's stderr and server state when this happens.
 - **CI cost:** don't run CI on a push whose code is already known to build (e.g. notes only): put `[skip ci]` in the commit message, check that no run started, cancel one that did.

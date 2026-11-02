@@ -39,7 +39,7 @@ function New-Fx([string]$name) {
   $reply = @{ type = 'assistant'; sessionId = $sid; timestamp = [DateTime]::UtcNow.ToString('o'); message = @{ role = 'assistant'; model = 'claude-sonnet-5-5'; usage = @{ input_tokens = 1000; output_tokens = 1000 }; content = @(@{ type = 'text'; text = 'done' }) } }
   [IO.File]::WriteAllText($t, ($reply | ConvertTo-Json -Compress -Depth 8) + "`n")
   [IO.File]::WriteAllText((Join-Path $root 'closed.jsonl'), '')
-  @{ Root = $root; Cfg = $cfg; Transcript = $t; Env = "CLAUDE_CONFIG_DIR='$cfg' PATH='${bin}:$env:PATH'"; Log = (Join-Path $root 'closed.jsonl') }
+  @{ Root = $root; Cfg = $cfg; Transcript = $t; Env = "CLAUDE_CONFIG_DIR='$cfg' CLINE_SESSION_DATA_DIR='$cfg/no-cline' PATH='${bin}:$env:PATH'"; Log = (Join-Path $root 'closed.jsonl') }
 }
 $n = 0
 function Start-In([string]$script, $fx) {

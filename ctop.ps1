@@ -100,224 +100,10 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.01.4 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.02.2 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
-  2026.11.01.4
-    - runs without the claude command: VS Code alone (its built-in Claude agent) leaves none. ctop then
-      reads Claude Code's live-session registry, ~/.claude/sessions/<pid>.json, itself, keeping an
-      entry only while its process runs and started no later than the session (a leftover file whose
-      pid went to another process is dropped). With claude installed, `claude agents --json` stays the
-      roster. Verified: VS Code's Claude agent writes that registry and a transcript, on a Windows
-      machine with nothing from Anthropic installed
-    - VIA column: what a session runs in, from its registry entrypoint: cli, vscode (the Claude Code
-      extension), sdk (the Claude Agent SDK: VS Code's own Claude agent, or another program on it)
-  2026.11.01.3 — the audit's second round
-    - a process-table read still running when ctop exits (a snapshot that gave up on a slow ps) is
-      ended by ending its ps; ctop no longer ends the whole PowerShell process to stop it, which ended
-      the PowerShell that ran it (& ./ctop.ps1 -Snapshot; the next command never ran)
-    - a question for you stays "asks:" when the reply's other calls are separate transcript lines (as
-      Claude Code writes them) and one of them gets its result first; an answered question no longer
-      outranks a newer call in the same reply
-    - CTOP_TRACE: one more phase, when the worker's process has started
-  2026.11.01.2 — the audit of the worker build (2026.11.01.1)
-    - t / y / n / d copy the session selected when the key was pressed, even if the selection moves
-      before the worker's next frame comes in; a session gone by then is not copied, and the footer says so
-    - relative -PricingFile / -ClosedLog / -ConfigDir paths are made absolute, and the worker starts in
-      PowerShell's current directory: a relative pricing path made the worker fail and ctop fall back
-    - -Snapshot waits (up to 10 s) for the process table, so a running job shows; if it is not in by
-      then, the snapshot says so. A slow process read no longer holds the exit
-    - in one process (-InProcess), a tick counts from the start of the last frame, not its end
-    - n: no @address for a session without a name (it has none to message until you /rename it)
-    - "updating…" shows only when a key's own frame is late (it could show for an earlier key)
-    - a frame the display asked for and has not had for 5 s says so on the footer, counting up; a worker
-      that sends something other than a frame is dropped, and ctop carries on in one process
-    - the worker starts before the rest of the script loads, and the first frame shows live sessions
-      before it lists history: here ~0.3 s sooner. The worker still costs ~0.5 s here at startup; the
-      ~2 s the audit measured on WSL is not reproduced here (CTOP_TRACE times each phase)
-    - a question for you stays "asks:" when another call made in the same reply gets its result first
-      (the answer is matched to the question's call id)
-    - -PricingFile refuses an infinite rate (1e400)
-    - an unknown flag or a stray value is an error that names it: 500 was taken as -Tick
-    - CTOP_TRACE=<file>: append startup timings (process start to first frame) to that file
-  2026.11.01.1
-    - two processes: this one reads keys and draws; a hidden worker (the same script, -Worker) reads
-      transcripts, the roster and the process table and builds frames. A slow frame no longer holds up
-      keys: q quits at once while the first read of a ~70 MB transcript takes seconds (it waited for the
-      whole frame before), and a key pressed meanwhile shows "updating…". If the worker cannot start or
-      stops, ctop carries on in one process and says why. -InProcess runs as one process. From cxtop
-    - frame on the strip is now the time to build a frame; drawing is the display process's
-  2026.10.31.12
-    - -PricingFile: your own price table in place of the built-in one (JSON; every rate required; a bad
-      file stops ctop with exit 2 and the reason). Cached costs are versioned by the file's content, so
-      editing it recomputes them. From cxtop
-    - a scan cache priced by anything but the built-in table could not be read at all (the price version
-      was cast to a number): it was silently dropped and every transcript rescanned
-  2026.10.31.11
-    - a session waiting on a question for you (AskUserQuestion) shows it: LAST ACTION reads asks: <the
-      question> (+N more), and peek lists each question with its header and numbered choices. Once a
-      newer entry answers it, asked:. From cxtop's pending-question view; answer in that session
-  2026.10.31.10
-    - -Snapshot prints one frame as plain text and exits: every session listed, not a screenful; no
-      colors or keys; nothing written (scan cache, closed log). For pipes, files and sharing. From cxtop.
-      Without a console (a pipe) ctop had no window size to draw with: everything now asks one place
-    - the strip's "hidden N cols" ran into the next divider at two digits
-  2026.10.31.9
-    - n copies the selected session's contact (name and @address, session ID, kind, state, directory,
-      machine, transcript, attach or resume command) to paste into another Claude session, which can
-      message it by name with Claude Code's own messaging. ctop sends nothing. d copies the session ID
-      (a subagent's agent ID). From cxtop's contact and ID keys
-  2026.10.31.8 — the validation's second round
-    - Windows PowerShell 5.1: stopping a poll could stop an unrelated process after a pid was reused
-      (a parent id names whichever process had that pid). A child is followed only if it was created
-      after its parent, and stopped only if its pid still names it
-    - a gone row is keyed on its transcript's path as well (a row could keep showing another file),
-      and the key is taken before the row is built: a subagent write during the build was folded into
-      the key but not into the cost, so the cost never caught up
-    - paths compare case-sensitively in every cache: on Linux a.jsonl and A.jsonl are two files
-    - a combining mark outside the BMP (a surrogate pair) is kept with its letter when text is cut
-    - a first prompt in Hebrew, Chinese, Russian and other scripts becomes the title: it needed three
-      ASCII letters (such sessions read "(untitled)"), now three letters in a row of any script. Not
-      every script has those: Hindi or Tamil, which write vowels as marks between letters, can still
-      read "(untitled)". Cached scans are redone once (ScanVer 4)
-    - titles in Hebrew, Arabic, Armenian, Georgian, Chinese, Japanese, Korean and other scripts without
-      combining marks are measured at the speed of ASCII: a screen of Hebrew titles took a frame from
-      ~55 ms to ~175 ms
-    - tests: each view's clipboard check stands alone; a key counts as answered only when the strip
-      and footer both show its effect; Build-Rows is tested directly
-  2026.10.31.7 — fixes from the audit's validation round
-    - LAST ACTION could show another transcript's last action: its cache checked size and time, not
-      which file it was
-    - a transcript replaced by one whose start differed only in letter case once encoded (@ vs Z) read
-      as the same file: the start is compared case-sensitively. A longer rewrite that keeps the first
-      256 bytes still reads as an append (Claude Code only appends)
-    - a STATE with a +N subagent badge and wide text pushed the next columns out of line
-    - a wrapped path with wide characters could take more lines than -WrapLines
-    - LAST ACTION and a failed poll's reason are shortened without cutting a character in half (an
-      emoji at the cut left half a surrogate pair)
-    - widths: the fast path covers only characters that are one cell on their own and never join the
-      one before (a soft hyphen, Arabic number signs and bidi isolates were counted as one cell); a
-      flag is two cells (four on Windows PowerShell 5.1, whose .NET splits the pair)
-    - a gone session's tree cost follows its subagent transcripts as they grow; a new subagent file
-      of a gone session is found when its own transcript changes, or at the next start
-    - Windows PowerShell 5.1: a poll that hangs is stopped with everything it started (claude.cmd's
-      node outlived its cmd.exe). Linux: a process that outlives claude and holds its output is not
-      stopped (it is no longer claude's child); ctop still drops the poll and polls again
-    - tests: the integration tests run on a private tmux server and never touch yours; the clipboard
-      test proves the terminal accepts OSC 52 before it trusts a clean result
-  2026.10.31.6 — fixes from an outside audit of the branch
-    - nothing live but history in the keep window: the history was not drawn (the table was skipped
-      whenever no session was live), and peek / t / y could act on a row no longer shown
-    - ages of a day or more (1d4h) colored as fresh: the age parser ignored days
-    - background sessions from the closed log were listed without -All; they follow -All like live ones
-    - a session with an impossible startedAt stopped ctop; ages it can't read show as -
-    - a lone session whose row fits on one line was drawn as nothing (a one-line body)
-    - a roster poll that hangs is stopped after max(5 s, 5 × -RosterInterval) and counted as failed;
-      the last roster stays on screen and the next poll starts. It used to block every later poll
-    - session text (titles, paths, tool arguments) can no longer send terminal commands: control
-      characters and escape sequences other than colors are removed before drawing (an OSC 52 in a
-      title could set your clipboard from peek or the closed log)
-    - a transcript that is replaced, cut short or moved is rescanned from the start; one that only
-      grew is still read from where the last scan stopped
-    - a prompt that mentions tool_result counts as a turn again (it was taken for a tool result).
-      Cached scan state is redone once (ScanVer 3)
-    - a gone session's TREE COST still counts its subagents (their part dropped to $0 once it left)
-    - columns line up with CJK and other wide characters, emoji and combining accents: widths,
-      padding and cuts are measured in terminal cells, not string length, and a cut never splits
-      a character
-    - frame in the help is the time of the whole last pass (roster, process harvest, cache save,
-      build, draw); the cache save was left out
-    - a fatal error exits with code 1 and prints its message on stderr
-    - tests: the quit test fails a crash exit; the frame and key timing tests refuse a frozen or
-      exited ctop; CI fails a job that claims to run the integration tests and skips them
-  2026.10.31.5
-    - Linux without the clear program (minimal Fedora / RHEL images): ctop stopped at once with "The
-      expression after '&' …": PowerShell's Clear-Host runs clear. The screen is cleared with the same
-      escape sequences instead
-    - Windows PowerShell 5.1 runs it again (unit tests pass there in CI): the file is UTF-8 with a BOM
-      (5.1 read it as ANSI and could not parse it); no [Array]::Sort[T](…) generic-call syntax (7.3+);
-      a session with exactly one subagent listed it again on 5.1; the scan cache loads on 5.1 too
-      (it needed ConvertFrom-Json -AsHashtable, so every start rescanned every transcript); the mouse
-      helper's file name no longer needs SHA256.HashData (.NET 5+), which turned the mouse off on 5.1
-  2026.10.31.4
-    - only rows on screen are refreshed and styled each frame: a gone row off screen costs next to nothing
-      (300 gone rows now cost about what the visible screenful does: ~25–35 ms a frame, was ~140 ms).
-      A row that scrolls into view is refreshed before that frame is drawn, so a visible age is never
-      stale; whether a gone transcript changed is checked every 30 s for rows off screen
-    - gone rows sort with a .NET sort (newest gone first; ties by session id, so rows that left in the
-      same poll never swap); in roster sort they follow that order too instead of their stale position.
-      Title-bar counts are one pass over the rows
-  2026.10.31.3
-    - titles with quotes, newlines or non-ASCII read right: \" was shown literally (escapes were only
-      undone when the text held a double backslash). Cached scan state is redone once (ScanVer 2)
-    - t / y on Linux: sent to the terminal as OSC 52 (and to xclip when there is a display). Set-Clipboard
-      without xclip keeps the text inside pwsh and reports success, so "copied" was shown for nothing
-  2026.10.31.2
-    - keep window: one setting, -Keep (alias -Linger), for how long gone sessions and stopped subagents
-      stay listed; + / - step 0 · 15m · 30m · 45m · 1h · 2h · 4h · 8h · 12h · 1d · 2d · 3d · 7d · 14d ·
-      30d · ∞ at runtime, shown as keep on the strip and in the footer. 0 = drop at once and ∞ = forever,
-      for both (-SubagentWindow still works; its 0 still means forever). Tick moved to [ / ]
-    - gone sessions from earlier runs are read back from the closed log (which now also records kind and
-      the /clear successor), so a long window shows yesterday's sessions, newest gone first, with their
-      logged title; peek says when Claude Code has deleted a transcript (cleanupPeriodDays) instead of
-      offering a resume that cannot work
-    - keys are read every frame however long it took: a frame slower than the tick stopped ctop reading
-      the keyboard at all, q included (seen with ~150 gone rows)
-    - faster with many rows (300 gone rows: ~1.6 s a frame → ~0.15 s): gone rows are built once and
-      reused, sorting no longer scans every row per session, a history row's sparkline no longer changes
-      (which re-rendered every row every 2 s), and history loads ~120 ms of rows per frame, newest first,
-      so live sessions show at once (cold start with 300: 7.9 s → 1.4 s)
-    - ages past a day read 1d1h / 40d instead of 25h / 960h
-    - tests: Pester unit tests and an end-to-end test that drives ctop in tmux (tests/)
-  2026.10.31.1
-    - a failed `claude agents --json` poll (non-zero exit, no output, not a JSON array) keeps the last
-      roster: it was read as an empty one, so every session flashed "gone" and was written to the
-      closed log as closed. The strip shows poll FAILED×N; roster age counts from the last good poll
-  2026.10.27.1
-    - a new subagent reads thinking from its first second: its prompt can sit behind ~10 large setup
-      attachments, past the 256 KB tail ctop read, which left STATE blank until the first reply
-  2026.10.21.5
-    - mouse (Windows): click selects, click again / double-click peeks, wheel moves, footer items
-      click, a click closes peek. -NoMouse to keep the terminal's own mouse. Console mode restored on exit
-  2026.10.21.4
-    - a subagent whose .meta.json says "finished": true (and whose transcript hasn't grown since) is
-      stopped, whatever its transcript's last lines suggest; sidecars are re-read when they change
-  2026.10.21.3
-    - Σ tree cost under a session's COST (session + all its subagents, listed or aged out, + sessions
-      it launched); peek has the breakdown
-    - scrolling: a wrapped row cut by the window edge is left out instead of shown half
-  2026.10.21.2
-    - also while thinking: parallel Agent calls return one by one, so a parent waiting on the rest
-      read "thinking"; with a live foreground agent it started, it now reads awaiting agent
-  2026.10.21.1
-    - a session or subagent whose open Agent / Task / Skill call is waiting on a live agent it
-      started reads "awaiting agent" (cyan), not a red "working" that suggested waiting on you
-  2026.10.20.2
-    - sessions launched from another session's job (e.g. a script running claude -p) are drawn
-      under that session, after its subagents, with their own subagents below them; peek shows
-      LAUNCHED BY (launcher, job pid, command) and, on the launcher, LAUNCHED
-    - Linux: ps -ww, so long command lines aren't cut to the terminal width
-  2026.10.20.1
-    - prices re-read 2026-10-20: Opus 5.5 ($4 / $20, cache read $0.20; was priced as Opus 5 at
-      $5 / $25 / $0.50, overstating it), Sonnet 5.5, Haiku 5.5 (tiered at 100k-token prompts).
-      Cached cost totals from the old table are recomputed once.
-  2026.10.19.1
-    - a subagent that handed back and was then sent a new message (resumed) shows its live state,
-      LAST ACTION "resumed · after handback: …"; it stayed "stopped"
-  2026.10.18.2
-    - startup no longer opens every cached transcript (27 s for 1,049 files on Windows): cache
-      entries are checked on first use and forgotten after 2 days unused; the 60 s save no longer
-      tests every path either
-  2026.10.18.1
-    - an agent stopped by Esc / TaskStop ("[Request interrupted by user]" as its last line) reads
-      stopped (subagent) or idle (session), LAST ACTION "interrupted · was …"; it showed thinking
-  2026.10.06.2
-    - version moved from beside the clock (where it read as the current date) to "build" on line 2
-  2026.10.06.1
-    - subagent .meta.json is retried while missing or half-written (was cached as "none" forever,
-      leaving a bare id and no title)
-    - job → agent attribution compares times in UTC (after a restart, cached call times came back
-      as UTC and every job fell to the session)
+  Release notes: CHANGELOG.md, beside this script.
 
   Documented fields of `claude agents --json` (code.claude.com/docs/en/agent-view, read 2026-09-07):
     cwd, kind, startedAt (Unix ms), pid, status, waitingFor, sessionId, name, id, state
@@ -350,7 +136,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.01.4'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES
+$script:CtopVersion = '2026.11.02.2'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -363,6 +149,31 @@ function Write-Trace([string]$phase) {
   } catch {}
 }
 Write-Trace 'script running (parsed, parameters bound)'
+# CTOP_TRACE also gets the errors ctop swallows. $ErrorActionPreference is SilentlyContinue below, and many
+# reads sit in an empty catch (a file caught half-written, a process gone by the time it is asked), so a
+# real bug would only show as '-'. Each distinct error (its script line, and its message with the numbers
+# taken out) is written once per process, 200 at most, when a frame is built (Write-SwallowedErrors).
+# $Error is only read, never cleared: run with & ./ctop.ps1, it is your PowerShell's own list, and what
+# was in it before ctop started is left out.
+$script:ErrMark = if ($Error.Count) { $Error[0] } else { $null }
+$script:ErrSeen = @{}
+function Write-SwallowedErrors {
+  if (-not $env:CTOP_TRACE) { return }
+  $new = [Collections.Generic.List[object]]::new()
+  foreach ($e in @($Error)) { if ([object]::ReferenceEquals($e, $script:ErrMark)) { break }; $new.Add($e) }
+  if ($Error.Count) { $script:ErrMark = $Error[0] }
+  for ($i = $new.Count - 1; $i -ge 0; $i--) {   # oldest first
+    $e = $new[$i]
+    $line = if ($e.InvocationInfo) { $e.InvocationInfo.ScriptLineNumber } else { 0 }
+    $msg = (("$e") -replace '[\x00-\x1F\x7F]+', ' ' -replace '\s{2,}', ' ').Trim()
+    if ($msg.Length -gt 300) { $msg = $msg.Substring(0, 300) + '…' }
+    $key = "$line|" + ($msg -replace '\d+', '#')   # a pid or a path's number does not make it a new error
+    if ($script:ErrSeen.ContainsKey($key)) { $script:ErrSeen[$key]++; continue }
+    if ($script:ErrSeen.Count -ge 200) { continue }
+    $script:ErrSeen[$key] = 1
+    Write-Trace "swallowed error, line ${line}: $msg"
+  }
+}
 # A worker (see "worker process" near the end) is started with no parameters but -Worker: the display
 # process sends the ones it was given as the first line on the worker's input.
 if ($Worker) {
@@ -847,6 +658,7 @@ function Find-Subagents([System.IO.FileInfo]$parent, [string]$sessionId) {
 # (input + cache reads + cache writes) is at most that many tokens (Haiku 5.5 is tiered at 100k).
 # Bump PriceVer whenever this table changes: cached cost totals from an older table are recomputed.
 $script:PriceVer = 2
+$script:PriceFrom = 'the built-in table, read 2026-10-20 (-PricingFile for your own)'   # the date in the Source line above; peek and help show it
 # Bump ScanVer when what a scan extracts changes: cached state from an older scan is redone once.
 # 2: titles are unescaped (\" was kept literally)
 # 3: a prompt that mentions tool_result counts as a turn (it was taken for a tool result)
@@ -1473,6 +1285,18 @@ function Format-Contact($r, [string]$machine = [Environment]::MachineName) {
     $lines.Add('A subagent is reached through its parent session: message that session about it.')
     return ($lines -join "`n")
   }
+  if ($r._Agent -eq 'cline') {
+    $m = $r._Cline.M
+    $lines.Add('Cline session' + $(if ([string]$m.source -eq 'vscode') { ' (VS Code)' } elseif ($m.source) { " ($(& $c $m.source))" } else { '' }))
+    & $row 'Session ID' (& $c $r._SessionId)
+    if ($r.TITLE) { & $row 'Title' (& $c $r.TITLE) }
+    & $row 'State' (& $c $r.STATE)
+    if ($r.CWD -and $r.CWD -ne '-') { & $row 'Directory' (& $c $r.CWD) }
+    & $row 'Machine' (& $c $machine)
+    if ($r._Transcript -and $r._Transcript -ne '-') { & $row 'Messages' (& $c $r._Transcript) }
+    $lines.Add('ctop knows no way to message a Cline session from outside Cline.')
+    return ($lines -join "`n")
+  }
   $src = $r._Src
   # the address is the session's own name (claude agents --json: name); the row's NAME can be a stand-in
   # (an unnamed background session is shown by its job id), which no one can message
@@ -1720,13 +1544,15 @@ function Read-SessionRegistry([string]$dir) {
 # another process. An entry counts as live only while its pid names a process that started no later than
 # the session did: a process that got the pid afterwards started after it. $getStart: pid -> the process's
 # start time, $null when no process has that pid, or 'unknown' when the start time cannot be read.
-function Test-RegistryLive($entry, [scriptblock]$getStart) {
-  $start = & $getStart ([int]$entry.pid)
+function Test-RegistryLive($entry, [scriptblock]$getStart) { Test-ProcessSince ([int]$entry.pid) (ConvertFrom-UnixMs $entry.startedAt) $getStart }
+# $id names a process that started no later than $began (+5 s): the one that wrote the entry, not a later
+# process given the same pid. $began $null, or a start time that cannot be read: the process is enough.
+function Test-ProcessSince([int]$id, $began, [scriptblock]$getStart) {
+  $start = & $getStart $id
   if ($null -eq $start) { return $false }
   if ($start -is [string]) { return $true }   # cannot tell: the process is there
-  $began = ConvertFrom-UnixMs $entry.startedAt
   if (-not $began) { return $true }
-  return ([datetime]$start -le $began.AddSeconds(5))
+  return ([datetime]$start -le ([datetime]$began).AddSeconds(5))
 }
 function Get-ProcessStart([int]$id) {
   $p = Get-Process -Id $id -ErrorAction SilentlyContinue
@@ -1745,6 +1571,286 @@ function Get-EntrypointLabel([string]$entrypoint) {
     '^sdk-'           { return 'sdk' }
     default           { if ($e.Length -gt 12) { return $e.Substring(0, 12) } else { return $e } }
   }
+}
+
+# ---- Cline ----------------------------------------------------------------------
+# Cline (its VS Code extension and its CLI) keeps a folder per session in its sessions folder:
+#   <id>/<id>.json           the manifest: session_id, source (vscode, cli, …), pid, status, started_at,
+#                            ended_at, exit_code, interactive, provider, model, cwd, prompt, metadata.title,
+#                            messages_path
+#   <id>/<id>.messages.json  the conversation; each model reply carries metrics: inputTokens, outputTokens,
+#                            cacheReadTokens, cacheWriteTokens, cost
+# (read in Cline's source, cline/cline a6507a6: sdk/packages/core/src/session/models/session-manifest.ts,
+# sdk/packages/core/src/services/session-data.ts, sdk/packages/shared/src/llms/messages.ts). Status:
+# idle, running, pending while the session is open; completed, failed, cancelled once it has ended.
+# Seen on Windows 2026-11-01: the manifest's status follows the session (running -> idle within 8 s), and
+# its pid is the extension host of the VS Code window it runs in, so a live pid means "the window is open",
+# not "working": the status says which. A window closed under it ends as failed, exit code 1.
+# No SQLite and no cline command are needed: Cline's sessions.db holds the same rows.
+function Get-ClineSessionsDir {
+  # as Cline resolves it (sdk/packages/shared/src/storage/paths.ts)
+  $v = "$env:CLINE_SESSION_DATA_DIR".Trim(); if ($v) { return $v }
+  $data = "$env:CLINE_DATA_DIR".Trim()
+  if (-not $data) {
+    $root = "$env:CLINE_DIR".Trim(); if (-not $root) { $root = Join-Path $HOME '.cline' }
+    $data = Join-Path $root 'data'
+  }
+  return (Join-Path $data 'sessions')
+}
+# An ISO 8601 time as a local DateTime, or $null. PowerShell 7's ConvertFrom-Json has already made it a
+# DateTime; Windows PowerShell 5.1 leaves it a string.
+function ConvertFrom-IsoTime($v) {
+  if ($null -eq $v) { return $null }
+  if ($v -is [datetime]) { return $v.ToLocalTime() }
+  $d = [DateTimeOffset]::MinValue
+  if ([DateTimeOffset]::TryParse([string]$v, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$d)) { return $d.LocalDateTime }
+  return $null
+}
+function Read-SharedText([string]$path) {
+  $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+  try { return [IO.StreamReader]::new($fs).ReadToEnd() } finally { $fs.Dispose() }
+}
+# Every session folder's manifest, parsed once per change (one stat per session per poll otherwise). Cline
+# rewrites a manifest in place, so a read can catch it half-written: then the last good copy stands.
+# Parsing is capped at $budgetMs per call, newest first: a long history must not hold a frame for seconds
+# (300 manifests take ~0.5 s); what is left is counted in ClineManifestPending and parsed on the next calls.
+$script:ClineManifests = @{}   # manifest path -> @{ Length; Write; M; Began; Ended }
+$script:ClineManifestPending = 0
+function Read-ClineManifests([string]$dir, [int]$budgetMs = [int]::MaxValue) {
+  $list = [Collections.Generic.List[object]]::new()
+  $script:ClineManifestPending = 0
+  $di = [IO.DirectoryInfo]::new($dir)
+  if (-not $di.Exists) { $script:ClineManifests = @{}; return $list.ToArray() }
+  $dirs = @(); try { $dirs = $di.GetDirectories() } catch { }
+  $files = [Collections.Generic.List[IO.FileInfo]]::new()
+  foreach ($d in $dirs) { $f = [IO.FileInfo]::new([IO.Path]::Combine($d.FullName, $d.Name + '.json')); if ($f.Exists) { $files.Add($f) } }
+  $arr = $files.ToArray(); $keys = [long[]]::new($arr.Count)
+  for ($i = 0; $i -lt $arr.Count; $i++) { $keys[$i] = -$arr[$i].LastWriteTimeUtc.Ticks }
+  [Array]::Sort($keys, $arr)   # newest first
+  $seen = @{}; $parsed = 0
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  foreach ($f in $arr) {
+    $seen[$f.FullName] = $true
+    $c = $script:ClineManifests[$f.FullName]
+    if (-not ($c -and $c.Length -eq $f.Length -and $c.Write -eq $f.LastWriteTimeUtc)) {
+      if ($parsed -and $sw.ElapsedMilliseconds -ge $budgetMs) { $script:ClineManifestPending++ }   # at least one a call: always progress
+      else {
+        $parsed++
+        $m = $null
+        try { $m = ConvertFrom-Json -InputObject (Read-SharedText $f.FullName) -ErrorAction Stop } catch { }
+        if ($null -ne $m -and $m.session_id -and $null -ne $m.pid -and $m.status) {
+          $c = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; M = $m; Began = (ConvertFrom-IsoTime $m.started_at); Ended = (ConvertFrom-IsoTime $m.ended_at) }
+          $script:ClineManifests[$f.FullName] = $c
+        }
+      }
+    }
+    if ($c) { $list.Add(@{ M = $c.M; File = $f; Began = $c.Began; Ended = $c.Ended }) }
+  }
+  foreach ($k in @($script:ClineManifests.Keys)) { if (-not $seen.ContainsKey($k)) { $script:ClineManifests.Remove($k) } }
+  return $list.ToArray()   # callers wrap in @()
+}
+# What a session's conversation says: the same fields as Get-LastAction, from <id>.messages.json, read
+# again only when the file changes. Tokens and cost are Cline's own figures, summed over its replies;
+# CTX is the newest reply's input (fresh + cache read + cache write), as for Claude Code.
+$script:ClineMsgCache = @{}   # path -> @{ Length; Write; Result }
+# -CachedOnly: no read; the last result (even of an older version of the file), or $null if there is none.
+function Read-ClineMessages([string]$path, [switch]$CachedOnly) {
+  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0 }
+  if (-not $path) { return $out }
+  $f = $null; try { $f = [IO.FileInfo]::new($path) } catch { return $out }
+  if (-not $f.Exists) { return $out }
+  $c = $script:ClineMsgCache[$f.FullName]
+  if ($c -and $c.Length -eq $f.Length -and $c.Write -eq $f.LastWriteTimeUtc) { return $c.Result }
+  if ($CachedOnly) { if ($c) { return $c.Result } else { return $null } }
+  if ($f.Length -gt 64MB) { $out.Last = '(conversation file over 64 MB: not read)'; $script:ClineMsgCache[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Result = $out }; return $out }
+  $o = $null
+  try { $o = ConvertFrom-Json -InputObject (Read-SharedText $f.FullName) -ErrorAction Stop } catch { }
+  if ($null -eq $o) { if ($c) { return $c.Result } else { return $out } }   # caught mid-write: the last good read stands
+  $turns = 0; $tools = 0; $counts = @{}; $last = $null
+  foreach ($msg in @($o.messages)) {
+    if ($null -eq $msg) { continue }
+    $last = $msg
+    $blocks = @(if ($msg.content -is [string]) { [pscustomobject]@{ type = 'text'; text = [string]$msg.content } } else { $msg.content })
+    if ($msg.role -eq 'user') {
+      if (@($blocks | Where-Object { $_ -and $_.type -eq 'text' -and "$($_.text)".Trim() }).Count) {
+        $turns++
+        if ($msg.ts) { $out.TurnStart = ConvertFrom-UnixMs $msg.ts }
+      }
+    } elseif ($msg.role -eq 'assistant') {
+      foreach ($b in $blocks) {
+        if ($b -and $b.type -eq 'tool_use') { $tools++; $n = [string]$b.name; if ($n) { $counts[$n] = 1 + [int]$counts[$n] } }
+      }
+      $mt = $msg.metrics
+      if ($mt) {
+        $in = [long]$mt.inputTokens; $cr = [long]$mt.cacheReadTokens; $cw = [long]$mt.cacheWriteTokens
+        $out.InTok += $in; $out.OutTok += [long]$mt.outputTokens; $out.CacheR += $cr; $out.CacheW += $cw
+        $cost = 0.0; if ([double]::TryParse("$($mt.cost)", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$cost) -and -not [double]::IsNaN($cost) -and -not [double]::IsInfinity($cost) -and $cost -gt 0) { $out.Cost += $cost }
+        if ($in + $cr + $cw -gt 0) { $out.Ctx = [math]::Round(($in + $cr + $cw) / 1000) }
+      }
+      if ($msg.modelInfo -and $msg.modelInfo.id) { $out.Model = ([string]$msg.modelInfo.id -replace '^claude-', '') }
+    }
+  }
+  $out.Turns = $turns; $out.Tools = $tools
+  $out.ToolMix = ($counts.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ' · '
+  # STATE and LAST ACTION from the newest message, as for Claude Code: a tool call = working, a prompt or a
+  # tool result = thinking (the model's turn), a reply = idle
+  if ($last) {
+    $blocks = @(if ($last.content -is [string]) { [pscustomobject]@{ type = 'text'; text = [string]$last.content } } else { $last.content })
+    $b = @($blocks | Where-Object { $_ -and $_.type -in 'text', 'tool_use', 'tool_result' }) | Select-Object -Last 1
+    $text = ''
+    if ($b -and $b.type -eq 'tool_use') {
+      $out.State = 'working'
+      $arg = ''; if ($b.input) { foreach ($p in $b.input.PSObject.Properties) { if ($p.Value -is [string] -and $p.Value.Trim()) { $arg = $p.Value; break } } }
+      $text = [string]$b.name + $(if ($arg) { ': ' + $arg })
+    } elseif ($b -and $b.type -eq 'tool_result') {
+      $out.State = 'thinking'; $text = "result of $($b.name)"
+    } elseif ($b) {
+      $out.State = if ($last.role -eq 'user') { 'thinking' } else { 'idle' }
+      $text = $(if ($last.role -eq 'user') { 'prompt: ' } else { '' }) + [string]$b.text
+    }
+    if ($text) { $out.LastFull = $text; $out.Last = (Clean $text).Trim() }
+  }
+  $script:ClineMsgCache[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Result = $out }
+  return $out
+}
+# The Cline sessions to list, read every -RosterInterval s: open ones (status idle / running / pending,
+# pid alive since the session started) and, inside the keep window, ended ones: gone when Cline recorded
+# the end, else when its files were last written (an open status with no process: its window closed, and
+# Cline will mark it failed the next time it runs). Reading is capped at $budgetMs per call, as for Claude
+# Code's gone rows: an open session's conversation is always read, an ended one's only within the budget
+# (else its last read, or empty fields), and ClinePending makes the next frames carry on.
+$script:ClineAt = [datetime]::MinValue
+$script:ClineRows = @()
+$script:ClinePending = 0
+$script:ClineBuildMs = 120
+function Update-ClineRoster([scriptblock]$getStart = ${function:Get-ProcessStart}, [int]$budgetMs = $(if ($null -ne $script:ClineBuildMs) { $script:ClineBuildMs } else { 120 })) {
+  $now = Get-Date
+  $script:ClineAt = $now
+  $sw = [Diagnostics.Stopwatch]::StartNew(); $readOne = $false
+  $list = [Collections.Generic.List[object]]::new()
+  $entries = @(Read-ClineManifests (Get-ClineSessionsDir) $budgetMs)
+  $pending = $script:ClineManifestPending
+  foreach ($x in $entries) {
+    $m = $x.M
+    $kind = if ($m.interactive -eq $false) { 'headless' } else { 'interactive' }
+    if (-not (Test-KindListed $kind ([bool]$All))) { continue }
+    $status = ([string]$m.status).Trim().ToLowerInvariant()
+    $open = $status -in 'idle', 'running', 'pending'
+    if (-not $open -and $x.Ended -and -not (Test-KeepWindow $x.Ended $now $script:KeepMin)) { continue }   # ended before the window
+    $live = $open -and (Test-ProcessSince ([int]$m.pid) $x.Began $getStart)
+    $msgPath = if ("$($m.messages_path)".Trim()) { [string]$m.messages_path } else { [IO.Path]::Combine($x.File.DirectoryName, [string]$m.session_id + '.messages.json') }
+    $lastWrite = $x.File.LastWriteTime
+    try { $mf = [IO.FileInfo]::new($msgPath); if ($mf.Exists -and $mf.LastWriteTime -gt $lastWrite) { $lastWrite = $mf.LastWriteTime } } catch { }
+    $goneAt = $null
+    if (-not $live) {
+      if (-not $open) { $goneAt = $x.Ended }
+      if (-not $goneAt) { $goneAt = $lastWrite }
+      if (-not (Test-KeepWindow $goneAt $now $script:KeepMin)) { continue }
+    }
+    $act = Read-ClineMessages $msgPath -CachedOnly
+    if ($null -eq $act -or -not $goneAt) {   # an open session is always read; an ended one within the budget, and at least one a call
+      if (-not $goneAt -or -not $readOne -or $sw.ElapsedMilliseconds -lt $budgetMs) { $act = Read-ClineMessages $msgPath; if ($goneAt) { $readOne = $true } }
+    }
+    if ($null -eq $act) { $pending++; $act = Read-ClineMessages '' }
+    $list.Add(@{ M = $m; Status = $status; Kind = $kind; Began = $x.Began; GoneAt = $goneAt; Open = $open; LastWrite = $lastWrite
+                 MsgPath = $msgPath; Act = $act })
+  }
+  $script:ClineRows = $list.ToArray()
+  $script:ClinePending = $pending
+}
+# A Cline session as a ctop row: the same fields as a Claude Code row (Build-Rows), _Agent = 'cline'.
+function New-ClineRow($e, [bool]$sample) {
+  $m = $e.M; $act = $e.Act; $id = [string]$m.session_id; $gone = $e.GoneAt
+  $state = if ($gone) { 'gone ' + (Get-Since $gone) }
+           elseif ($e.Status -eq 'running') { if ($act.State -in 'working', 'thinking') { $act.State } else { 'working' } }
+           else { $e.Status }   # idle, pending
+  $cwd = Normalize-Path ([string]$m.cwd)
+  $git = Get-GitInfo $cwd
+  $startMs = if ($e.Began) { ([DateTimeOffset]$e.Began).ToUnixTimeMilliseconds() } else { $null }
+  $title = if ($m.metadata -and "$($m.metadata.title)".Trim()) { [string]$m.metadata.title } elseif ("$($m.prompt)".Trim()) { (([string]$m.prompt).Trim() -split "`n")[0] } else { '' }
+  $model = if ($act.Model -and $act.Model -ne '-') { $act.Model } elseif ($m.model) { ([string]$m.model -replace '^claude-', '') } else { '-' }
+  $active = $state -in 'working', 'thinking'
+  if ($sample -and (Test-SampleActivity ([bool]$gone) $script:History[$id])) { Add-Sample $id $state 0 }
+  if ($gone) { [void]$script:FreshIds.Add($id) }   # built every frame: never stale on screen
+  [pscustomobject]@{
+    NAME     = 'cline-' + $(if ($id -match '_([^_]+)$') { $Matches[1] } else { $id })
+    TITLE    = $title
+    KIND     = $e.Kind
+    VIA      = 'cline'
+    STATE    = $state
+    PID      = if ($null -ne $m.pid) { $m.pid } else { '-' }
+    'CPU(s)' = '-'   # the pid is VS Code's extension host, shared with every other extension: its CPU is not Cline's
+    'MEM(MB)'= '-'
+    AGE      = if ($startMs) { Get-Age $startMs } else { '-' }
+    IDLE     = Get-Since $e.LastWrite
+    TURN     = if ($act.TurnStart -and $active) { Get-Since $act.TurnStart } else { '' }
+    TURNS    = $act.Turns
+    TOOLS    = $act.Tools
+    CTX      = if ($act.Ctx -ne '-') { "$($act.Ctx)K" } else { '-' }
+    CMP      = ''
+    MODEL    = $model
+    BRANCH   = $(if ($git.Worktree) { 'wt:' + $git.Branch } else { $git.Branch })
+    COST     = if ($act.Cost -gt 0) { '${0:N2}' -f $act.Cost } else { '-' }
+    RATE     = Format-Rate ([double]$act.Cost) $e.Began (Get-Date)
+    ACTIVITY = $script:History[$id]
+    'LAST ACTION' = $act.Last
+    CWD      = $cwd
+    _Agent      = 'cline'
+    _Cline      = $e
+    _SessionId  = $id
+    _Parent     = $null
+    _Git        = $git
+    _Jobs       = @()
+    _KidJobs    = 0
+    _Helpers    = 0
+    _Hooks      = @()
+    _LaunchCwd  = $cwd
+    _Order      = 1000000
+    _Gone       = $gone
+    _Cleared    = $false
+    _Successor  = ''
+    _LaunchedBy = $null
+    _AgentCost  = 0.0
+    _AgentN     = 0
+    _Act        = $act
+    _Transcript = $e.MsgPath
+    _StartedAt  = $e.Began
+    _Src        = [pscustomobject]@{ sessionId = $id; startedAt = $startMs; cwd = [string]$m.cwd; pid = $m.pid; kind = $e.Kind; title = $title }
+    _LiveKids   = 0
+    _Group = $null; _TreeCost = $null; _LaunchCost = $null; _LaunchN = $null; _Launcher = $null; _LaunchedNames = $null; _TreeLast = $null
+    _Lines = $null; _LinesSig = $null; _Dirty = $true; _Widths = $null
+  }
+}
+function Build-ClinePeek([object]$r) {
+  $pw = (Get-WindowWidth) - 2
+  $m = $r._Cline.M; $e = $r._Cline
+  $source = [string]$m.source
+  $where = switch -Regex ($source) { '^vscode$' { 'in VS Code' } '^cli$' { 'in the cline command' } default { if ($source) { "from $source" } else { '' } } }
+  $ended = if ($e.Open) { $null } else { "  ENDED        Cline recorded it as $($e.Status)$(if ($null -ne $m.exit_code) { ", exit code $($m.exit_code)" })" + $(if ($e.Status -eq 'failed') { '   (also how a session ends when its VS Code window closes)' } else { '' }) }
+  $lines = @(
+    @{ Text = "  ctop — $($r.NAME.Trim())   (live)"; Inverse = $true },
+    '',
+    "  NAME         $($r.NAME.Trim())      a Cline session $where",
+    $(if ($r.TITLE) { Peek-Block 'TITLE' $r.TITLE $pw } else { $null }),
+    $(if ($r._Gone) { "  GONE         $(Get-Since $r._Gone) ago" } else { $null }),
+    $ended,
+    $(if ($r._Gone -and $e.Open) { "  NOTE         Cline still lists it as $($e.Status), but its process (pid $($m.pid)) has gone: its window or command was closed" } else { $null }),
+    "  KIND         $($r.KIND)",
+    "  STATE        $(Paint $r.STATE (Cell-Color 'STATE' $r))      Cline says: $($e.Status)",
+    "  PID          $($r.PID)      $(if ($source -eq 'vscode') { "the VS Code window's extension host: it lives as long as the window, and runs every other extension too" } else { '' })",
+    "  STARTED      $(if ($r._StartedAt) { $r._StartedAt.ToString('yyyy-MM-dd HH:mm:ss') } else { '-' })   (age $($r.AGE))",
+    "  IDLE         $($r.IDLE)      TURN $(Paint $(if ($r.TURN) { $r.TURN } else { '-' }) (Cell-Color 'TURN' $r))      TURNS $($r.TURNS)",
+    $(Peek-Block 'TOOLS' "$($r.TOOLS) calls$(if ($r._Act.ToolMix) { ':  ' + $r._Act.ToolMix })" $pw),
+    "  CTX          $($r.CTX) tokens in context      MODEL $(Paint $r.MODEL (Cell-Color 'MODEL' $r))$(if ($m.provider) { " ($($m.provider))" })      BRANCH $($r.BRANCH)",
+    "  COST         $($r.COST) as Cline reports it$(if ($r.RATE -and $r.RATE -ne '-') { "   ($($r.RATE)/h)" })     tokens: in $($r._Act.InTok)  out $($r._Act.OutTok)  cache read $($r._Act.CacheR)  cache write $($r._Act.CacheW)",
+    "  ACTIVITY     $(Paint-Spark $r.ACTIVITY)   ($(Paint-Spark '█') working  $(Paint-Spark '▒') thinking  $(Paint-Spark '·') idle, 1 char = 2 s, newest right)",
+    $(Peek-Block 'LAST ACTION' $(if ($r._Act.LastFull) { $r._Act.LastFull } else { $r.'LAST ACTION' }) $pw),
+    "  CWD          $($r.CWD)",
+    "  SESSION ID   $($r._SessionId)",
+    "  MESSAGES     $($r._Transcript)"
+  )
+  $flat = @(); foreach ($l in $lines) { if ($null -eq $l) { continue }; $flat += $l }
+  return ,$flat
 }
 
 # ---- roster feed (asynchronous) ---------------------------------------------
@@ -2388,6 +2494,7 @@ function Build-Rows {
     $prow
     if ($script:ShowSubagents) { $kids }
   }
+  foreach ($ce in $script:ClineRows) { if ($ce.GoneAt -and -not $script:ShowGone) { continue }; New-ClineRow $ce $sample }
 }
 
 # Sort parents, keep each parent's subagent rows directly beneath it.
@@ -2907,6 +3014,7 @@ function Get-QuestionLines([object[]]$qs, [int]$width) {
   return ,$out
 }
 function Build-Peek([object]$r) {
+  if ($r._Agent -eq 'cline') { return ,(Build-ClinePeek $r) }
   $pw = (Get-WindowWidth) - 2
   $lines = @(
     @{ Text = "  ctop — $($r.NAME.Trim())   (live)"; Inverse = $true },   # keeps the └: says "subagent" at a glance
@@ -2936,6 +3044,7 @@ function Build-Peek([object]$r) {
     "  CTX          $($r.CTX) tokens in context      MODEL $(Paint $r.MODEL (Cell-Color 'MODEL' $r))      BRANCH $($r.BRANCH)",
     "  COMPACTIONS  $(if ($r._Act.Compacts) { "$($r._Act.Compacts)   last $(Get-Since $r._Act.LastCompactAt) ago ($($r._Act.LastCompactTrigger), $([math]::Round($r._Act.LastCompactPreTokens / 1000))K tokens before it) — context now holds a summary, not the full history" } else { 'none' })",
     "  COST         $($r.COST) at list price$(if ($r.RATE -and $r.RATE -ne '-') { "   ($($r.RATE)/h)" })     tokens: in $($r._Act.InTok)  out $($r._Act.OutTok)  cache read $($r._Act.CacheR)  cache write $($r._Act.CacheW)",
+    "  PRICES       $($script:PriceFrom)",
     "  ACTIVITY     $(Paint-Spark $r.ACTIVITY)   ($(Paint-Spark '█') working  $(Paint-Spark '▒') thinking  $(Paint-Spark '·') idle  $(Paint-Spark '▁') waiting on you  $(Paint-Spark '▼') compaction, 1 char = 2 s, newest right)",
     $(if ($r._Desc) { "  TASK         $($r._Desc)" } else { $null }),
     $(if ($r._Orphaned) { "  ORPHANED     it finished after its spawner had already stopped: its result reached no reader." } else { $null }),
@@ -3092,8 +3201,15 @@ function Show-Help {
     '  TITLE      the task description the spawner gave it. KIND reads subagent, or subagent·bg for one',
     '             spawned in the background (the spawner kept working instead of waiting for it)',
     '',
+    'CLINE   a Cline session (its VS Code extension or its cline command) is read from its folder in',
+    '  ~/.cline/data/sessions (or CLINE_SESSION_DATA_DIR / CLINE_DATA_DIR / CLINE_DIR): STATE from the status',
+    '  Cline records (running: working, or thinking when its newest message is a prompt or a tool result),',
+    '  the rest from <id>.messages.json. COST is the cost Cline records, not ctop''s price table. PID is the',
+    '  VS Code window''s extension host, so CPU and MEM are left blank. Ended sessions stay for the keep window.',
+    '',
     'COLUMNS   (source: J = claude agents --json, R = Claude Code''s session registry (~/.claude/sessions),',
-    '           O = OS, T = transcript file — heuristic. Without the claude command, J comes from R too)',
+    '           O = OS, T = transcript file — heuristic. Without the claude command, J comes from R too.',
+    '           A Cline session (VIA cline) is read from Cline''s own files instead: see CLINE below)',
     'MOUSE   (Windows; -NoMouse turns it off)  click a row to select it, click it again or double-click',
     '  to peek, wheel to move, click a footer item for its key, click in peek to close it. To select',
     '  text in the terminal while ctop runs, hold Shift while dragging.',
@@ -3106,7 +3222,8 @@ function Show-Help {
     '                 (untitled) = the picker shows Untitled too. Subagents: their task description',
     '  KIND        J  interactive (terminal / VS Code), background (agent view), subagent, subagent·bg',
     '  VIA         R  what the session runs in: cli, vscode (the Claude Code extension), sdk (the Claude',
-    '                 Agent SDK: VS Code''s own Claude agent, or another program built on it), remote',
+    '                 Agent SDK: VS Code''s own Claude agent, or another program built on it), remote,',
+    '                 cline (a Cline session)',
     '  TURN        T  time since your last prompt — how long Claude has been on this turn (blank when idle).',
     '                 Yellow >= 10 min, red >= 30 min',
     '  IDLE        T  time since the transcript was last written to',
@@ -3132,6 +3249,7 @@ function Show-Help {
     '                 (default fable|mythos): catches a session on a model you did not intend',
     '  COST        T  session spend at API LIST price from per-turn usage (same basis as /usage; not',
     '                 your plan''s billing). Yellow >= $100',
+    ('                 Prices: ' + $script:PriceFrom),   # (in parentheses: a bare + would take in the rest of the list)
     '  RATE        T  COST / session age, $ per hour',
     '',
     'READING IT',
@@ -3195,7 +3313,7 @@ function Show-Help {
 $script:Roster   = @()
 $script:ClosedLogPath = if ($ClosedLog) { $ClosedLog } else { Join-Path $ConfigDir 'ctop-closed.jsonl' }
 if ($PricingFile) {
-  try { $pf = Import-PricingFile $PricingFile; $script:Pricing = $pf.Table; $script:PriceVer = $pf.Ver }
+  try { $pf = Import-PricingFile $PricingFile; $script:Pricing = $pf.Table; $script:PriceVer = $pf.Ver; $script:PriceFrom = "-PricingFile $PricingFile" }
   catch { [Console]::Error.WriteLine("ctop: -PricingFile: $($_.Exception.Message)"); exit 2 }
 }
 try { $script:KeepMin = Resolve-Keep -Keep $Keep -SubagentWindowSeconds $(if ($PSBoundParameters.ContainsKey('SubagentWindow')) { $SubagentWindow } else { $null }) }
@@ -3358,6 +3476,7 @@ function Invoke-Frame($view) {
   # feed: harvest a finished poll, and (re)start one if it's time
   $fresh = Read-Roster
   Read-ProcPoll
+  if ($script:ClinePending -or ((Get-Date) - $script:ClineAt).TotalSeconds -ge $RosterInterval -or @($view.Actions) -contains 'poll') { Update-ClineRoster }
   if (-not $script:Poll -and $script:PollAt -and
       ((Get-Date) - $script:PollAt).TotalSeconds -ge $RosterInterval) { Start-RosterPoll }
 
@@ -3483,10 +3602,11 @@ function Invoke-Frame($view) {
   if ($sel) {
     $cid = Get-CopyId $sel
     $copy = @{ Id = [string]$sel._SessionId; Transcript = $(if ($sel._Transcript -and $sel._Transcript -ne '-') { [string]$sel._Transcript } else { '' })
-               Resume = "claude --resume $(if ($sel._Parent) { $sel._Parent } else { $sel._SessionId })"; Contact = (Format-Contact $sel); IdText = $cid.Text; IdWhat = $cid.What }
+               Resume = $(if ($sel._Agent) { '' } else { "claude --resume $(if ($sel._Parent) { $sel._Parent } else { $sel._SessionId })" }); Contact = (Format-Contact $sel); IdText = $cid.Text; IdWhat = $cid.What }
   }
   if ($script:Roster.Count -and @($sorted).Count) { $script:LiveShown = $true }
   $script:LastFrameMs = [int]$frameSw.ElapsedMilliseconds
+  Write-SwallowedErrors
   return @{ Lines = @($lines); Footer = $footer; Ids = @(foreach ($r in $sorted) { [string]$r._SessionId }); SelectedId = $selectedId
             PeekId = $script:PeekId; PageRows = [int]$script:PageRows; BodyMap = @($script:BodyMap); BodyY0 = [int]$script:BodyY0; Copy = $copy
             PollBusy = [bool]$script:Poll; Rev = $view.Rev }
@@ -3566,7 +3686,7 @@ function Complete-PendingCopies($packet, $view) {
 function Copy-From([string]$what, $c) {
   switch ($what) {
     't' { if ($c.Transcript) { Copy-Text $c.Transcript 'transcript path' } }
-    'y' { Copy-Text $c.Resume 'resume command' }
+    'y' { if ($c.Resume) { Copy-Text $c.Resume 'resume command' } }   # none for a Cline session
     'n' { Copy-Text $c.Contact 'contact' }
     'd' { Copy-Text $c.IdText $c.IdWhat }
   }
@@ -3748,7 +3868,7 @@ function Invoke-FrontendLoop {
         }
       }
       $waitSec = if ($w.Reply) { [int][math]::Floor($askSw.ElapsedMilliseconds / 1000) } else { 0 }
-      if ($dirty) { Show-Packet $packet; $dirty = $false }
+      if ($dirty) { Show-Packet $packet; $dirty = $false; Write-SwallowedErrors }   # (the display's own: the worker writes its own)
       elseif ($waitSec -ge 5 -and $waitSec -ne $staleSec) {
         $why = if ([int]$packet.Rev -lt 0) { "  starting: no frame yet after $waitSec s   (q quits)" } else { "  not updated for $waitSec s: the worker is busy   (keys are taken, q quits)" }
         Show-Packet $packet $why; $staleSec = $waitSec; $noted = $true

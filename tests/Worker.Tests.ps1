@@ -206,6 +206,7 @@ Describe 'the worker process (ctop.ps1 -Worker)' {
       $psi.UseShellExecute = $false; $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
       $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
       $psi.EnvironmentVariables['CLAUDE_CONFIG_DIR'] = $cfg
+      $psi.EnvironmentVariables['CLINE_SESSION_DATA_DIR'] = Join-Path $cfg 'no-cline'   # not this machine's Cline
       $psi.EnvironmentVariables['PATH'] = $bin + [IO.Path]::PathSeparator + $env:PATH
       $p = [Diagnostics.Process]::Start($psi)
       @{ P = $p; Err = $p.StandardError.ReadToEndAsync() }   # stderr drained from the start: reading it later can block
