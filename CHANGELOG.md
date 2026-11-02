@@ -2,6 +2,17 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.02.5 — Sol's audit of step 3 (2026.11.02.4)
+
+- a gone Cline session's or Copilot chat's row shows what its files say once they are read: a read left
+  for a later frame, or one that failed (a locked file), showed the old cost and last action under the
+  files' new times, and the row kept them after the read caught up
+- a Copilot chat file that VS Code rewrote into one bigger entry with the same start is read from the
+  start: it was taken for an append, failed, and its old summary stayed until the next write
+- while VS Code runs, an unanswered Copilot chat older than an hour is listed from ctop's first poll (it
+  was listed only if this ctop had read it before). Older chats are each read once, a few per poll, and
+  a finished one is not read again until it changes
+
 ## 2026.11.02.4
 
 - GitHub Copilot chats in VS Code are listed, with VIA `copilot`, read from VS Code's own chat files:

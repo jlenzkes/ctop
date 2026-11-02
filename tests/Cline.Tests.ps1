@@ -263,3 +263,36 @@ Describe 'Update-ClineRoster: what changed is read again, and a bad file does no
     @($script:ClineRows).Count | Should -Be 1
   }
 }
+
+Describe 'Build-Rows: an ended session''s row follows its conversation once it is read (Sol, step 3 F1)' {
+  BeforeAll {
+    Mock Get-GitInfo { @{ Branch = '-'; Worktree = $false; Main = '' } }
+    $alive = { param($id) (Get-Date).AddHours(-5) }
+    function Reset-BuildRows {
+      $script:Departed = @{}; $script:KeptGone = @(); $script:Roster = @(); $script:CopilotRows = @()
+      $script:ShowGone = $true; $script:ShowSubagents = $false
+      $script:GoneRows = @{}; $script:AgentRows = @{}; $script:HistoryAt = Get-Date; $script:GoneCheckedAt = Get-Date; $script:GoneBuildMs = 60000
+      $script:FreshIds = [Collections.Generic.HashSet[string]]::new(); $script:RefreshIds = [Collections.Generic.HashSet[string]]::new()
+    }
+  }
+  BeforeEach { Reset-Cline; Reset-BuildRows; $script:KeepMin = -1 }
+  AfterEach { $env:CLINE_SESSION_DATA_DIR = $null }
+  It 'shows the final cost and reply after a read that had to wait for the budget' {
+    $root = Join-Path $TestDrive ("f1-" + [guid]::NewGuid()); $env:CLINE_SESSION_DATA_DIR = $root
+    $ended = Iso (Get-Date).AddMinutes(-1)   # the same end time in both versions: only the conversation changes
+    foreach ($n in 1, 2) { New-ClineSession $root "7_end$n" @{ status = 'completed'; pid = 1; ended_at = $ended } @((Prompt 'p'), (Reply @(@{ type = 'text'; text = 'old reply' }) @{ cost = 0.25 })) | Out-Null }
+    Update-ClineRoster $alive
+    $rows = @(Build-Rows); $rows.Count | Should -Be 2
+    @($rows | Where-Object { $_.COST -eq '$0.25' }).Count | Should -Be 2
+    Start-Sleep -Milliseconds 20
+    foreach ($n in 1, 2) { New-ClineSession $root "7_end$n" @{ status = 'completed'; pid = 1; ended_at = $ended } @((Prompt 'p'), (Reply @(@{ type = 'text'; text = 'final reply' }) @{ cost = 1.25 })) | Out-Null }
+    Update-ClineRoster $alive 0   # no time: one file a call, the rest pending, shown as last read
+    $script:ClinePending | Should -BeGreaterThan 0
+    $null = @(Build-Rows)
+    for ($n = 0; $n -lt 6 -and $script:ClinePending; $n++) { Update-ClineRoster $alive 0; $null = @(Build-Rows) }
+    $script:ClinePending | Should -Be 0
+    $rows = @(Build-Rows)
+    @($rows | ForEach-Object { $_.'LAST ACTION' }) | Should -Be @('final reply', 'final reply')
+    @($rows | ForEach-Object { $_.COST }) | Should -Be @('$1.25', '$1.25')
+  }
+}

@@ -522,7 +522,7 @@ The existing Claude Code reader stays as it is.
 - Check VS Code's user data paths from the source.
 - Capture one real file from each agent as a test fixture; until then, every reader is written against source reading only.
 
-## Step 3 in ctop: Copilot chats (build 2026.11.02.4)
+## Step 3 in ctop: Copilot chats (builds 2026.11.02.4 and .5)
 
 **Verified from VS Code's source at `1306698`** (read 2026-11-02):
 - **The user data folder** (`src/vs/platform/environment/node/userDataPath.ts`):
@@ -535,7 +535,7 @@ The existing Claude Code reader stays as it is.
   - kind 1 sets at a path; an empty path is ignored.
   - kind 2 pushes, after cutting the array to length `i` when `i` is given.
   - kind 3 sets the path to undefined.
-  - After 512 entries the writer replaces the whole file with a single kind 0 (`_compactAfterEntries`).
+  - After 1024 entries the chat log's writer replaces the whole file with a single kind 0 plus a newline (`ChatSessionOperationLog` passes 1024 to `ObjectMutationLog`, whose default `_compactAfterEntries` is 512). The new file can start like the old one and be longer than it.
 - **The request schema** (`chatSessionOperationLog.ts`): `message.text`, `modelId`, `modelState` (from `response.stateT`), `promptTokens`, `completionTokens`, `contextUsage`, `copilotCredits`, `sessionCopilotCredits`, and `response` (parts). The session has `creationDate`, `customTitle` and `sessionId`.
 - **`ResponseModelState`** (`chatService.ts`): Pending 0, Complete 1, Cancelled 2, Failed 3, NeedsInput 4.
 - **`workspace.json`** (`storageMain.ts`): `{ folder: <URI> }`, or `workspace` for a multi-root workspace.
@@ -555,3 +555,9 @@ The existing Claude Code reader stays as it is.
 - **First poll:** about 540 ms; later polls about 40 ms.
 - **Keep set to inf:** 45 calls of at most 342 ms to read all 600, then 131 ms a poll.
 - **Rows:** 600 gone chat rows took ~750 ms to build per frame, so gone Cline and Copilot rows are now built once and cached, like Claude's.
+
+**Sol's audit of 2026.11.02.4 (2026-11-02), fixed in 2026.11.02.5:**
+- **F1:** a cached gone row kept old content after a deferred or failed read caught up. The row is now reused only while the summary read from the files is the same object, or has the same content.
+- **F2:** a larger rewritten file with the same first 256 bytes was read as an append. A tail that doesn't parse, or doesn't start a line, is now read again from the start, once.
+- **F3:** an old unfinished chat was missed on a fresh start. While VS Code runs, every chat outside the hour and the keep window is read once, within the budget. A finished one keeps only its summary.
+- **Measured after F3** (same container; 600 old finished chats of 6 KB, VS Code taken as running): the first start reads them in 18 calls of 120–170 ms (the first, 365 ms, includes warm-up), 2.6 s in all; later polls about 40 ms.

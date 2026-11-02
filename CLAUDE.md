@@ -48,12 +48,13 @@ Details in `docs/research/other-agents.md`.
 - **Review fixes (build 2026.11.02.2, same branch and PR as step 2):** from Cline's review of 2026.11.01.3, the user chose three: release notes moved to `CHANGELOG.md`; `CTOP_TRACE` also records swallowed errors; peek's PRICES line says where prices come from. Not done: narrowing the global `$ErrorActionPreference = 'SilentlyContinue'`.
 - **Sol's audit of PRs #3/#4 (2026-11-02, range `5690a9f..ebd3c7a`):** six findings (five P2, one P3), all fixed in build 2026.11.02.3: probe nested-field leak, stale ended Cline accounting, malformed-manifest starvation, incomplete snapshots, false registry closures, VIA lost after restart. Sol's files: `FINDINGS.md`, `REVIEW.md` (uploads). **Round 2 (Sol, PR #5 at `80d5fe7`): all six fixes accepted, no repairs requested** (`SOL_PR5_ROUND2_FINDINGS.md`): focused tests 77/77 on Windows PowerShell 5.1 and PowerShell 7; Windows lock retry and same-length write races checked. One wording note, taken: the changelog overstated what the snapshot note covers. Not done: the probe's skipped long lines (over 262,144 characters) are not counted.
 - **Step 3, built (build 2026.11.02.4, branch `claude/copilot-chats`, not yet a PR):** Copilot chats from VS Code's chat files; VIA `copilot`; credits in COST. Format from VS Code's source at `1306698`; not yet run against a real chat file. Decisions for the user to confirm: "live" = VS Code running and written in the last hour or unanswered; COST shows credits (`cr`); `stalled` after 10 min pending. Also on this branch: the resize crash fix (SetCursorPosition), and `docs/deferred.md`.
+- **Sol's audit of step 3 (2026-11-02, at `fd55f00`):** three P2 findings, fixed in build 2026.11.02.5 on the same branch: F1 gone Cline/Copilot rows stayed stale after a deferred or failed read caught up; F2 a larger rewritten chat file with the same start was read as an append; F3 an old unanswered chat was missed on a fresh start. Sol's file: `SOL_STEP3_BACKBRIEF.md` (upload). Sol's other notes (no repair asked) are in `docs/deferred.md` D10–D11.
 
 Each step gets its own PR. Step 1 shared one with the probe and these notes.
 
 ## Deferred bugs
 
-Known problems left in place on purpose, each with where it came from, where it is, and what would fix it: `docs/deferred.md` (D1–D8, plus what is not yet checked). Add to it when a problem is found and not fixed.
+Known problems left in place on purpose, each with where it came from, where it is, and what would fix it: `docs/deferred.md` (D1–D11, plus what is not yet checked). Add to it when a problem is found and not fixed.
 
 ## Flaky tests seen in CI (2026-11-01: PR #2, push run 41330600708 for c144eb6)
 

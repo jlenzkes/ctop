@@ -74,6 +74,20 @@ Flaky tests are listed separately in `CLAUDE.md` ("Flaky tests seen in CI").
 - **Why deferred:** nothing more exact is on disk.
 - **Possible fix:** none planned. The macOS check needs a real Mac.
 
+### D10. A cached gone Cline or Copilot row stops recording activity
+- **Source:** Sol, step 3 audit, "Other conclusions" (`SOL_STEP3_BACKBRIEF.md`).
+- **Where:** `Build-Rows`, the loop over `ClineRows` and `CopilotRows`.
+- **What happens:** a gone row reused from the cache doesn't add activity samples, so its activity column stops moving, and a Cline row's RATE isn't refreshed.
+- **Why deferred:** Sol judged these lower-impact display details. The session is gone, so there is little activity to show.
+- **Possible fix:** add a sample for reused rows, as Claude's gone rows do (`Add-Sample`).
+
+### D11. New gone agent rows have no minimum build per frame
+- **Source:** Sol, step 3 audit, "Other conclusions".
+- **Where:** `Build-Rows`, `GoneBuildMs`.
+- **What happens:** rows not yet built wait while the frame's build budget is spent. A row whose content changed shows its old version until a frame has time (build 2026.11.02.5); a new one isn't shown until then. Under budget pressure that never eases, a row could wait indefinitely. Sol's checks with up to 4,000 cached rows made progress; no permanent drop was reproduced.
+- **Why deferred:** not seen in practice.
+- **Possible fix:** build at least one row per frame, as the roster readers read at least one file per call.
+
 ## Not yet checked (not bugs)
 
 - **Cline's `cost`:** that it is in dollars is inference. Whether it equals the manifest's `metadata.totalCost` is unverified. A probe run that prints both would settle it.

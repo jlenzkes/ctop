@@ -25,6 +25,13 @@ BeforeAll {
   }
   function Reset-Copilot { $script:CopilotFiles = @{}; $script:CopilotFolders = @{}; $script:History = @{}; $script:BranchCache = @{}; $script:FreshIds = [Collections.Generic.HashSet[string]]::new(); $script:KeepMin = 15 }
   function Read-Chat([string]$path) { Read-CopilotChat ([IO.FileInfo]::new($path)) }
+  # Build-Rows with no Claude Code sessions: only the Cline and Copilot rows
+  function Reset-BuildRows {
+    $script:Departed = @{}; $script:KeptGone = @(); $script:Roster = @(); $script:ClineRows = @()
+    $script:ShowGone = $true; $script:ShowSubagents = $false
+    $script:GoneRows = @{}; $script:AgentRows = @{}; $script:HistoryAt = Get-Date; $script:GoneCheckedAt = Get-Date; $script:GoneBuildMs = 60000
+    $script:FreshIds = [Collections.Generic.HashSet[string]]::new(); $script:RefreshIds = [Collections.Generic.HashSet[string]]::new()
+  }
 }
 
 Describe 'Get-VSCodeUserDirs (where VS Code keeps its user data)' {
@@ -108,6 +115,35 @@ Describe 'Read-CopilotChat (replaying the mutation log)' {
     Write-Chat $p @(@{ kind = 0; v = (New-Session 'c4' @((New-Request 'a' 'q' 1), (New-Request 'b' 'q2' 1)) @{ customTitle = 'compacted' }) })
     $a = Read-Chat $p
     $a.Turns | Should -Be 2; $a.Title | Should -Be 'compacted'
+  }
+  It 'reads a larger compacted file whose start did not change from the start, not as an append (Sol, step 3 F2)' {
+    # VS Code rewrote the log as one bigger initial entry: the first 256 bytes are the same, and the old
+    # offset now points into the middle of that entry
+    $p = Join-Path $dir 'c4b.jsonl'
+    $t = Now-Ms 30
+    $sess = { param($state, $reply) [ordered]@{ version = 3; sessionId = 'c4b'; creationDate = $t; customTitle = ('t' * 300)
+                                                requests = @((New-Request 'a' 'question' $state @{ response = @($reply) })) } }
+    Write-Chat $p @([ordered]@{ kind = 0; v = (& $sess 0 @()) })
+    (Read-Chat $p).ChatState | Should -Be 0
+    $old = $script:CopilotFiles[(Get-Item $p).FullName].Offset
+    Write-Chat $p @([ordered]@{ kind = 0; v = (& $sess 1 @{ value = ('final answer ' * 200) }) })
+    (Get-Item $p).Length | Should -BeGreaterThan $old
+    $a = Read-Chat $p
+    $a.ChatState | Should -Be 1
+    $a.Last | Should -Match '^final answer'
+    $script:CopilotFiles[(Get-Item $p).FullName].Failed | Should -BeNullOrEmpty
+  }
+  It 'reads such a file from the start when its one line has no newline at the end' {
+    $p = Join-Path $dir 'c4c.jsonl'
+    $t = Now-Ms 30
+    $sess = { param($state, $reply) [ordered]@{ version = 3; sessionId = 'c4c'; creationDate = $t; customTitle = ('t' * 300)
+                                                requests = @((New-Request 'a' 'question' $state @{ response = @($reply) })) } }
+    Write-Chat $p @([ordered]@{ kind = 0; v = (& $sess 0 @()) })
+    $null = Read-Chat $p
+    [IO.File]::WriteAllText($p, (J ([ordered]@{ kind = 0; v = (& $sess 1 @{ value = 'done now' }) })))
+    $a = Read-Chat $p
+    $a.ChatState | Should -Be 1
+    $a.Last | Should -Be 'done now'
   }
   It 'keeps the last good read of a broken file, and does not parse that version again' {
     $p = Join-Path $dir 'c5.jsonl'
@@ -218,5 +254,93 @@ Describe 'Update-CopilotRoster and New-CopilotRow' {
     $c = Format-Contact $r 'box'
     $c | Should -Match '^GitHub Copilot chat \(VS Code\)'
     $c | Should -Not -Match 'claude --resume'
+  }
+}
+
+Describe 'Update-CopilotRoster: an unanswered chat older than an hour, on a fresh start (Sol, step 3 F3)' {
+  BeforeAll {
+    Mock Get-GitInfo { @{ Branch = '-'; Worktree = $false; Main = '' } }
+    $root = Join-Path $TestDrive 'cold'
+    $user = Join-Path $root 'Code/User'
+    function Put([string]$name, [object[]]$entries, [int]$minutesAgo) {
+      $p = Join-Path $user "globalStorage/emptyWindowChatSessions/$name.jsonl"; Write-Chat $p $entries
+      [IO.File]::SetLastWriteTime($p, (Get-Date).AddMinutes(-$minutesAgo))
+    }
+    Put 'aaaaaaaa-asks' @(@{ kind = 0; v = (New-Session 'aaaaaaaa-asks' @((New-Request 'a' 'may I run it?' 4))) }) 90
+    Put 'bbbbbbbb-done' @(@{ kind = 0; v = (New-Session 'bbbbbbbb-done' @((New-Request 'a' 'long ago' 1))) }) 90
+    Put 'cccccccc-done' @(@{ kind = 0; v = (New-Session 'cccccccc-done' @((New-Request 'a' 'longer ago' 1))) }) 300
+    $up = { param($p) $p -eq 'Code' }
+    $down = { param($p) $false }
+  }
+  BeforeEach { Reset-Copilot; $env:VSCODE_APPDATA = $root; $savedPortable = $env:VSCODE_PORTABLE; $env:VSCODE_PORTABLE = $null }
+  AfterEach { $env:VSCODE_APPDATA = $null; $env:VSCODE_PORTABLE = $savedPortable }
+  It 'lists it as waiting from the first roster update, and leaves the finished ones out' {
+    Update-CopilotRoster $up
+    $script:CopilotPending | Should -Be 0
+    $rows = @($script:CopilotRows | ForEach-Object { New-CopilotRow $_ $false })
+    @($rows | ForEach-Object { $_._SessionId }) | Should -Be @('aaaaaaaa-asks')
+    $rows[0].STATE | Should -Be 'waiting'
+  }
+  It 'finds it within a few calls when there is no time to spare, counting what is left as pending' {
+    Update-CopilotRoster $up 0
+    $script:CopilotPending | Should -BeGreaterThan 0
+    for ($n = 0; $n -lt 5 -and $script:CopilotPending; $n++) { Update-CopilotRoster $up 0 }
+    $script:CopilotPending | Should -Be 0
+    @($script:CopilotRows | ForEach-Object { $_.Act.SessionId }) | Should -Be @('aaaaaaaa-asks')
+  }
+  It 'does not read the finished ones again, and keeps only their summary' {
+    Update-CopilotRoster $up
+    $f = Get-Item (Join-Path $user 'globalStorage/emptyWindowChatSessions/bbbbbbbb-done.jsonl')
+    $c = $script:CopilotFiles[$f.FullName]
+    $c.Result.ChatState | Should -Be 1
+    $c.Session | Should -BeNullOrEmpty -Because 'an old finished chat is not listed: its replayed session is not kept'
+    Mock Read-CopilotChat -ParameterFilter { $f.Name -notlike 'aaaaaaaa*' } { throw 'read again' }
+    Update-CopilotRoster $up
+    Should -Invoke Read-CopilotChat -Times 0 -ParameterFilter { $f.Name -notlike 'aaaaaaaa*' }
+    @($script:CopilotRows).Count | Should -Be 1
+  }
+  It 'does not read old chats while VS Code is not running' {
+    Update-CopilotRoster $down
+    @($script:CopilotRows).Count | Should -Be 0
+    $script:CopilotFiles.Count | Should -Be 0
+  }
+}
+
+Describe 'Build-Rows: a gone chat''s row follows its chat file once it is read (Sol, step 3 F1)' {
+  BeforeAll {
+    Mock Get-GitInfo { @{ Branch = '-'; Worktree = $false; Main = '' } }
+    $root = Join-Path $TestDrive 'f1'
+    $user = Join-Path $root 'Code/User'
+    function Put([string]$name, [double]$credits, [string]$reply) {
+      $p = Join-Path $user "globalStorage/emptyWindowChatSessions/$name.jsonl"
+      Write-Chat $p @(@{ kind = 0; v = (New-Session $name @((New-Request 'a' 'q' 1 @{ sessionCopilotCredits = $credits; response = @(@{ value = $reply }) }))) })
+    }
+    $down = { param($p) $false }
+  }
+  BeforeEach { Reset-Copilot; Reset-BuildRows; $env:VSCODE_APPDATA = $root; $savedPortable = $env:VSCODE_PORTABLE; $env:VSCODE_PORTABLE = $null }
+  AfterEach { $env:VSCODE_APPDATA = $null; $env:VSCODE_PORTABLE = $savedPortable }
+  It 'shows the final reply and credits after a read that had to wait for the budget' {
+    foreach ($n in 'aaaaaaaa-one', 'bbbbbbbb-two') { Put $n 0.25 'old reply' }
+    Update-CopilotRoster $down
+    $rows = @(Build-Rows); $rows.Count | Should -Be 2
+    @($rows | Where-Object { $_.COST -eq '0.25cr' }).Count | Should -Be 2
+    Start-Sleep -Milliseconds 20
+    foreach ($n in 'aaaaaaaa-one', 'bbbbbbbb-two') { Put $n 1.25 'final reply' }
+    Update-CopilotRoster $down 0        # one chat is read; the other shows its last read, and is pending
+    $script:CopilotPending | Should -Be 1
+    $null = @(Build-Rows)
+    for ($n = 0; $n -lt 5 -and $script:CopilotPending; $n++) { Update-CopilotRoster $down 0 }
+    $script:CopilotPending | Should -Be 0
+    $rows = @(Build-Rows)
+    @($rows | ForEach-Object { $_.'LAST ACTION' }) | Should -Be @('final reply', 'final reply')
+    @($rows | ForEach-Object { $_.COST }) | Should -Be @('1.25cr', '1.25cr')
+  }
+  It 'builds an unchanged gone row once, and reuses it' {
+    Put 'cccccccc-same' 0.5 'same reply'
+    Update-CopilotRoster $down
+    $a = @(Build-Rows) | Where-Object { $_._SessionId -eq 'cccccccc-same' }
+    Update-CopilotRoster $down
+    $b = @(Build-Rows) | Where-Object { $_._SessionId -eq 'cccccccc-same' }
+    [object]::ReferenceEquals($a, $b) | Should -BeTrue
   }
 }

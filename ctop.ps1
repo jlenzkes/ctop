@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.02.4 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.02.5 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -136,7 +136,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.02.4'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.02.5'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -1936,7 +1936,7 @@ function Build-ClinePeek([object]$r) {
 #   User/globalStorage/emptyWindowChatSessions/<session id>.jsonl          (no folder open)
 # The .jsonl is a mutation log (objectMutationLog.ts): {"kind":0,"v":<whole session>} first, then
 # {"kind":1,"k":<path>,"v":…} sets, {"kind":2,"k":<path>,"v":[…],"i":n} pushes (cut at i first) and
-# {"kind":3,"k":<path>} deletes; after 512 entries VS Code rewrites the file as one new kind 0. Older chats
+# {"kind":3,"k":<path>} deletes; after 1024 entries VS Code rewrites the file as one new kind 0. Older chats
 # can be a plain .json of the whole session. Each request carries timestamp, modelId, modelState
 # ({value: 0 Pending, 1 Complete, 2 Cancelled, 3 Failed, 4 NeedsInput; completedAt}), promptTokens,
 # completionTokens, contextUsage {currentTokens, tokenLimit}, copilotCredits and sessionCopilotCredits.
@@ -2086,25 +2086,40 @@ function Read-CopilotChat([IO.FileInfo]$f, [switch]$CachedOnly) {
     }
     $session = $null; $from = 0L
     if ($c -and $c.Session -and $f.Length -ge $c.Offset -and $c.Head -and (Test-SameHead $f.FullName $c.Head)) { $session = $c.Session; $from = [long]$c.Offset }
-    $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
-    try {
-      $null = $fs.Seek($from, 'Begin')
-      $buf = New-Object byte[] ($fs.Length - $from); $n = 0
-      while ($n -lt $buf.Length) { $r = $fs.Read($buf, $n, $buf.Length - $n); if ($r -le 0) { break }; $n += $r }
-    } finally { $fs.Dispose() }
-    $end = $n - 1; while ($end -ge 0 -and $buf[$end] -ne 10) { $end-- }   # the last whole line ends here
-    if ($end -lt 0) {
-      if ($from -eq 0 -and $n -gt 0) {
-        # one line with no newline yet: a whole kind 0 the writer has not finished, or one that is complete
-        $text = [Text.Encoding]::UTF8.GetString($buf, 0, $n); $e = ConvertFrom-Json -InputObject $text -ErrorAction Stop
-        if ([int]$e.kind -eq 0) { $session = $e.v; $end = $n - 1 } else { return (& $fail $null) }
-      } elseif ($c) { return $c.Result } else { return (Get-ChatSummary $null) }
-    } else {
-      $text = [Text.Encoding]::UTF8.GetString($buf, 0, $end + 1)
-      foreach ($line in $text.Split([char]10)) {
-        if (-not $line.Trim()) { continue }
-        $e = ConvertFrom-Json -InputObject $line -ErrorAction Stop
-        if ([int]$e.kind -eq 0) { $session = $e.v } elseif ($null -ne $session) { Invoke-ChatEntry $session $e }
+    while ($true) {
+      $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
+      try {
+        $null = $fs.Seek($from, 'Begin')
+        $buf = New-Object byte[] ($fs.Length - $from); $n = 0
+        while ($n -lt $buf.Length) { $r = $fs.Read($buf, $n, $buf.Length - $n); if ($r -le 0) { break }; $n += $r }
+      } finally { $fs.Dispose() }
+      $end = $n - 1; while ($end -ge 0 -and $buf[$end] -ne 10) { $end-- }   # the last whole line ends here
+      try {
+        if ($end -lt 0) {
+          if ($from -eq 0 -and $n -gt 0) {
+            # one line with no newline yet: a whole kind 0 the writer has not finished, or one that is complete
+            $text = [Text.Encoding]::UTF8.GetString($buf, 0, $n); $e = ConvertFrom-Json -InputObject $text -ErrorAction Stop
+            if ([int]$e.kind -eq 0) { $session = $e.v; $end = $n - 1 } else { return (& $fail $null) }
+          } elseif ($from -gt 0 -and $n -gt 0 -and $buf[0] -ne 123) {
+            # no whole line after the offset, and what is there does not start one ('{'): not an append still
+            # being written, but a replaced file whose first line runs past the offset
+            throw 'not an append'
+          } elseif ($c) { return $c.Result } else { return (Get-ChatSummary $null) }
+        } else {
+          $text = [Text.Encoding]::UTF8.GetString($buf, 0, $end + 1)
+          foreach ($line in $text.Split([char]10)) {
+            if (-not $line.Trim()) { continue }
+            $e = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+            if ([int]$e.kind -eq 0) { $session = $e.v } elseif ($null -ne $session) { Invoke-ChatEntry $session $e }
+          }
+        }
+        break
+      } catch {
+        # what follows the offset is not whole lines: VS Code replaced the file (compacted it into one new
+        # initial entry) with one that starts the same and is longer than what was read. Read it whole, once;
+        # only a file that fails that too is remembered as broken (Sol, step 3 F2).
+        if ($from -gt 0) { $session = $null; $from = 0L; continue }
+        throw
       }
     }
     $res = Get-ChatSummary $session
@@ -2180,21 +2195,35 @@ function Update-CopilotRoster([scriptblock]$running = ${function:Test-VSCodeRunn
       $written = $f.LastWriteTime
       $recent = $written -ge $activeCut
       $inKeep = $keepMin -lt 0 -or ($keepCut -and $written -ge $keepCut)
-      # what can be listed without reading: live candidates (VS Code up, written in the last hour) and gone
-      # rows inside the keep window; an older chat is read only if it was read before (it may be unfinished)
+      # what is listed: live candidates (VS Code up, written in the last hour) and gone rows inside the keep
+      # window. While VS Code runs, an older chat is live too if it is unfinished, and only reading it tells:
+      # each is read once (within the budget, so a first start catches up over a few calls), and one that is
+      # finished is not read again until it changes. Only its summary is kept (Sol, step 3 F3).
       $cached = $script:CopilotFiles[$f.FullName]
-      if (-not ($up -and $recent) -and -not $inKeep -and -not ($up -and $cached -and $cached.Result -and $cached.Result.ChatState -in 0, 4)) { continue }
       $fresh = Test-ClineFresh $cached $f
+      $old = -not ($up -and $recent) -and -not $inKeep
+      if ($old) {
+        if (-not $up) { continue }
+        if ($fresh -and -not ($cached.Result -and $cached.Result.ChatState -in 0, 4)) { continue }
+      }
       if ($fresh -or -not $readOne -or $sw.ElapsedMilliseconds -lt $budgetMs) {
         $act = Read-CopilotChat $f
         if (-not $fresh) { $readOne = $true }
       } else {
         $pending++
-        $act = Read-CopilotChat $f -CachedOnly
+        $act = if ($cached) { $cached.Result } else { $null }   # what Read-CopilotChat -CachedOnly gives, without a call per file
       }
-      if ($null -eq $act) { $act = Get-ChatSummary $null }
-      if ($null -eq $act.ChatState -and -not $act.Turns) { continue }   # an empty chat: nothing asked yet
+      if ($null -eq $act) {
+        if ($old) { continue }   # not read yet: nothing to show (an empty summary for each cost ~0.3 ms)
+        $act = Get-ChatSummary $null
+      }
       $unfinished = $act.ChatState -in 0, 4
+      if ($old -and -not $unfinished) {
+        $c = $script:CopilotFiles[$f.FullName]
+        if ($c -and $c.Session) { $c.Session = $null; $c.Offset = 0; $c.Head = '' }   # a change is read from the start
+        continue
+      }
+      if ($null -eq $act.ChatState -and -not $act.Turns) { continue }   # an empty chat: nothing asked yet
       $live = $up -and ($recent -or $unfinished)
       $goneAt = if ($live) { $null } else { $written }
       if ($goneAt -and -not $inKeep) { continue }
@@ -2707,7 +2736,18 @@ $script:GonePending = 0
 $script:RefreshIds = [System.Collections.Generic.HashSet[string]]::new()   # refresh these this frame
 $script:GoneCheckedAt = [datetime]::MinValue   # when every gone row's transcript was last checked
 $script:FreshIds   = [System.Collections.Generic.HashSet[string]]::new()   # refreshed this frame
-$script:AgentRows = @{}   # a gone Cline session's or Copilot chat's id -> @{ Key; Row } (Build-Rows)
+$script:AgentRows = @{}   # a gone Cline session's or Copilot chat's id -> @{ Key; Row; Act; Sig } (Build-Rows)
+# What a Cline or Copilot summary says, as one string: two reads of the same file content give the same.
+# An array counts by its length (its items are what LAST ACTION and peek already show).
+function Get-ActSignature($act) {
+  if ($null -eq $act) { return '' }
+  $sb = [Text.StringBuilder]::new()
+  foreach ($v in $act.Values) {
+    if ($v -is [array]) { [void]$sb.Append('#').Append($v.Count) } elseif ($v -is [datetime]) { [void]$sb.Append($v.Ticks) } else { [void]$sb.Append([string]$v) }
+    [void]$sb.Append([char]31)
+  }
+  return $sb.ToString()
+}
 function Update-GoneRow($r) {
   if ($r._Agent) {   # a Cline session or Copilot chat: only its clock cells
     if ($r._Gone) { $r.STATE = 'gone ' + (Get-Since $r._Gone) }
@@ -2962,15 +3002,25 @@ function Build-Rows {
     if (-not $ce.GoneAt) { if ($isCline) { New-ClineRow $ce $sample } else { New-CopilotRow $ce $sample }; continue }
     $id = if ($isCline) { [string]$ce.M.session_id } elseif ($ce.Act.SessionId) { [string]$ce.Act.SessionId } else { $ce.File.BaseName }
     $seenAgent[$id] = $true
-    $key = if ($isCline) { "$($ce.LastWrite.Ticks)|$($ce.GoneAt.Ticks)|$($ce.Status)" } else { "$($ce.Written.Ticks)|$($ce.GoneAt.Ticks)|$($ce.Act.ChatState)|$($ce.Running)" }
+    # the row is reused while its files and what was read from them are unchanged. The files alone are not
+    # enough: a read left for later, or one that failed, shows the last read under the files' new times,
+    # and the read that follows must still rebuild the row (Sol, step 3 F1). A new read is a new summary
+    # object; one with the same content (Get-ActSignature) keeps the row.
+    $key = if ($isCline) { "$($ce.LastWrite.Ticks)|$($ce.GoneAt.Ticks)|$($ce.Status)" } else { "$($ce.Written.Ticks)|$($ce.GoneAt.Ticks)|$($ce.Running)" }
     $hit = $script:AgentRows[$id]
+    $same = $false
     if ($hit -and $hit.Key -ceq $key) {
+      if ([object]::ReferenceEquals($hit.Act, $ce.Act)) { $same = $true }
+      elseif ((Get-ActSignature $ce.Act) -ceq $hit.Sig) { $hit.Act = $ce.Act; $same = $true }
+    }
+    if ($same) {
       if ($script:RefreshIds.Contains($id)) { Update-GoneRow $hit.Row; [void]$script:FreshIds.Add($id) }
       $hit.Row; continue
     }
-    if ($budget.ElapsedMilliseconds -ge $script:GoneBuildMs) { continue }   # (not counted in GonePending: the strip's gone x/y is Claude's history)
+    # no time to build it this frame: the old row, if there is one, until a later frame does
+    if ($budget.ElapsedMilliseconds -ge $script:GoneBuildMs) { if ($hit) { $hit.Row }; continue }   # (not counted in GonePending: the strip's gone x/y is Claude's history)
     $row = if ($isCline) { New-ClineRow $ce $sample } else { New-CopilotRow $ce $sample }
-    $script:AgentRows[$id] = @{ Key = $key; Row = $row }
+    $script:AgentRows[$id] = @{ Key = $key; Row = $row; Act = $ce.Act; Sig = (Get-ActSignature $ce.Act) }
     $row
   }
   if ($script:AgentRows.Count -gt 2 * $seenAgent.Count + 50) { foreach ($k in @($script:AgentRows.Keys)) { if (-not $seenAgent.ContainsKey($k)) { $script:AgentRows.Remove($k) } } }
