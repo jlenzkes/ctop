@@ -88,6 +88,13 @@ Flaky tests are listed separately in `CLAUDE.md` ("Flaky tests seen in CI").
 - **Why deferred:** not seen in practice.
 - **Possible fix:** build at least one row per frame, as the roster readers read at least one file per call.
 
+### D12. Fedora 45 is untested: PowerShell 7.6.9 cannot install Pester there
+- **Source:** CI run 86, attempt 5 (2026-11-09): `fedora:latest` became Fedora 45.
+- **Where:** not in ctop: PowerShell itself. CI's Fedora job is pinned to `fedora:44`.
+- **What happens:** `./ctop.ps1 -Version` ran and printed the version; then `Install-Module Pester` aborted with "No usable version of libssl was found" (exit 134), so no test ran. Fedora 45's image has `openssl-libs-4.0.3` and only `libssl.so.4` (checked in a `fedora:45` container). Inference: PowerShell 7.6.9's .NET looks for OpenSSL 3 or older, and needs it for network use. Whether ctop itself works there (it makes no network calls) is untested.
+- **Why deferred:** not ctop's code; the CI job needs Pester, which needs the network.
+- **Possible fix:** move CI back to `fedora:latest` once a PowerShell release, or a Fedora OpenSSL 3 compatibility package, works there. Neither has been checked.
+
 ## Not yet checked (not bugs)
 
 - **Cline's `cost`:** that it is in dollars is inference. Whether it equals the manifest's `metadata.totalCost` is unverified. A probe run that prints both would settle it.

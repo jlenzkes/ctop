@@ -54,7 +54,7 @@ Each step gets its own PR. Step 1 shared one with the probe and these notes.
 
 ## Deferred bugs
 
-Known problems left in place on purpose, each with where it came from, where it is, and what would fix it: `docs/deferred.md` (D1–D11, plus what is not yet checked). Add to it when a problem is found and not fixed.
+Known problems left in place on purpose, each with where it came from, where it is, and what would fix it: `docs/deferred.md` (D1–D12, plus what is not yet checked). Add to it when a problem is found and not fixed.
 
 ## Flaky tests seen in CI (2026-11-01: PR #2, push run 41330600708 for c144eb6)
 

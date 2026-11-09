@@ -69,7 +69,9 @@ sudo dnf install -y https://packages.microsoft.com/rhel/9/prod/Packages/p/powers
 ```
 
 Microsoft's install docs have pages, with support lists, for Ubuntu, Debian and RHEL; I found none
-for Fedora. The RHEL 9 package installs and runs there all the same (Fedora 44 in CI). Microsoft also documents package
+for Fedora. The RHEL 9 package installs and runs there all the same (Fedora 44 in CI). **Fedora 45 is untested:** it ships
+OpenSSL 4 only (`libssl.so.4`). There PowerShell 7.6.9 started and ran `ctop -Version`, but stopped with
+"No usable version of libssl was found" when installing Pester (CI, 2026-11-09), so the tests could not run. Microsoft also documents package
 repositories for each distribution, which keep PowerShell updated.
 
 Then clone the repository and run the script:
