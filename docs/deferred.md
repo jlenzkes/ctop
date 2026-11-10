@@ -47,6 +47,7 @@ Flaky tests are listed separately in `CLAUDE.md` ("Flaky tests seen in CI").
 - **Source:** Sol, PR #5 round 2, question 1.
 - **Where:** `Test-ClineFresh`, `ctop.ps1:1640`. This also applies to the transcript caches that key on length and write time.
 - **What happens:** a file version is identified by its length and last write time. A writer that changes the content but keeps both would not be noticed.
+- **Also for Copilot chats (Sol, step 3 round 4):** the SHA-256 prefix check (build 2026.11.10.3) runs only once the file's length or write time has changed, so it does not cover this case: a content change that keeps both still shows the old state.
 - **Why deferred:** ordinary writes change one or the other. Sol tested a same-length write racing a read on Windows (Node's `fs.writeFileSync`), and the next read recovered.
 - **Possible fix:** none planned.
 
