@@ -68,6 +68,7 @@ Flaky tests are listed separately in `CLAUDE.md` ("Flaky tests seen in CI").
 - **Where:** `Update-CopilotRoster` and `New-CopilotRow`.
 - **What happens:**
   - VS Code doesn't say which chats are open. ctop counts a chat as live while VS Code runs and the chat was written in the last hour or is unfinished.
+  - An unfinished chat has no age limit, by decision (user, 2026-11-10): one abandoned weeks ago, say in a VS Code that crashed, shows as `stalled` or `waiting` until it is answered, cancelled or deleted in VS Code. Inference, not checked: cancelling it in VS Code marks it finished.
   - A Pending request with no write for 10 min shows as `stalled`.
   - VS Code saves about once a minute, so a finished reply can show as working for up to a minute.
   - On macOS, VS Code's process is not looked for, so it always counts as running.

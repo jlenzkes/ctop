@@ -546,6 +546,7 @@ The existing Claude Code reader stays as it is.
 
 **Decisions in the code, for the user to confirm:**
 - **Live:** VS Code running (a process named `Code`/`code` or `Code - Insiders`/`code-insiders`) and the chat written in the last hour, or its newest request unfinished. Otherwise the chat is gone, from its last write, for the keep window.
+  - **Decided (user, 2026-11-10): an unfinished chat stays live, with no age limit, for as long as VS Code runs.** Showing it is the point: the user may not know it was left unanswered.
 - **`stalled`:** a Pending request whose file has not been written for 10 min.
 - **COST:** shown in Copilot credits (`1.5cr`), never added to dollar totals. `sessionCopilotCredits` is used when present (VS Code calls the per-request sum a lower bound).
 - **Not read:** `globalStorage/transferredChatSessions` (inference: copies made while moving a chat between windows); Copilot CLI sessions.
