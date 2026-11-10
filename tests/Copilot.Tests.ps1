@@ -381,3 +381,60 @@ Describe 'Build-Rows: a gone chat''s row follows its chat file once it is read (
     [object]::ReferenceEquals($a, $b) | Should -BeTrue
   }
 }
+
+Describe 'Update-CopilotRoster: unanswered chats are looked for back 7 days, and the catch-up shows its progress (Sol, step 3 round 2, F3)' {
+  BeforeAll {
+    Mock Get-GitInfo { @{ Branch = '-'; Worktree = $false; Main = '' } }
+    $root = Join-Path $TestDrive 'horizon'
+    $user = Join-Path $root 'Code/User'
+    function Put([string]$name, [int]$state, [double]$daysAgo, [int]$pad = 0) {
+      $p = Join-Path $user "globalStorage/emptyWindowChatSessions/$name.jsonl"
+      Write-Chat $p @(@{ kind = 0; v = (New-Session $name @((New-Request 'a' ('q' + ('x' * $pad)) $state))) })
+      [IO.File]::SetLastWriteTime($p, (Get-Date).AddDays(-$daysAgo))
+    }
+    Put 'aaaaaaaa-6days' 4 6
+    Put 'bbbbbbbb-8days' 4 8
+    for ($i = 0; $i -lt 5; $i++) { Put "cccccccc-done$i" 1 (1 + $i / 10) 20000 }
+    $up = { param($p) $p -eq 'Code' }
+  }
+  BeforeEach { Reset-Copilot; $env:VSCODE_APPDATA = $root; $savedPortable = $env:VSCODE_PORTABLE; $env:VSCODE_PORTABLE = $null }
+  AfterEach { $env:VSCODE_APPDATA = $null; $env:VSCODE_PORTABLE = $savedPortable }
+  It 'lists an unanswered chat from 6 days ago, and does not read one from 8 days ago' {
+    Update-CopilotRoster $up
+    @($script:CopilotRows | ForEach-Object { $_.Act.SessionId }) | Should -Be @('aaaaaaaa-6days')
+    $f8 = Get-Item (Join-Path $user 'globalStorage/emptyWindowChatSessions/bbbbbbbb-8days.jsonl')
+    $script:CopilotFiles.ContainsKey($f8.FullName) | Should -BeFalse -Because 'older than 7 days and outside the keep window: not read'
+  }
+  It 'lists the 8-day-old one once the keep window reaches back that far' {
+    $script:KeepMin = 14 * 1440
+    Update-CopilotRoster $up
+    @($script:CopilotRows | Where-Object { -not $_.GoneAt } | ForEach-Object { $_.Act.SessionId } | Sort-Object) | Should -Be @('aaaaaaaa-6days', 'bbbbbbbb-8days')
+  }
+  It 'counts the megabytes still to read while it catches up, and clears the count when done' {
+    Update-CopilotRoster $up 0
+    $script:CopilotPending | Should -BeGreaterThan 0
+    $s = $script:CopilotScan
+    $s.Total | Should -BeGreaterThan 0
+    $s.Done | Should -BeLessThan $s.Total
+    Format-CopilotScan | Should -Match '^\d+(\.\d)?/\d+(\.\d)?MB'
+    for ($n = 0; $n -lt 20 -and $script:CopilotPending; $n++) { Update-CopilotRoster $up 0 }
+    $script:CopilotPending | Should -Be 0
+    $script:CopilotScan | Should -BeNullOrEmpty
+    Format-CopilotScan | Should -Be ''
+  }
+}
+
+Describe 'Format-CopilotScan (the strip''s copilot cell)' {
+  It 'shows MB read of the total, and a time left once there is a rate' {
+    $script:CopilotScan = @{ Done = 35MB; Total = 120MB; Started = (Get-Date).AddSeconds(-10) }
+    Format-CopilotScan | Should -Be '35/120MB ~24s'
+  }
+  It 'shows a tenth of a MB below 10 MB, and no time left before any is read' {
+    $script:CopilotScan = @{ Done = 0; Total = 3.5MB; Started = (Get-Date) }
+    Format-CopilotScan | Should -Be '0/3.5MB'
+  }
+  It 'shows nothing when nothing is being read' {
+    $script:CopilotScan = $null
+    Format-CopilotScan | Should -Be ''
+  }
+}

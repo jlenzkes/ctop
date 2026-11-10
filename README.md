@@ -35,7 +35,8 @@ Everything is read locally. ctop makes no model calls and uses no tokens.
   - **GitHub Copilot in VS Code:**
     - **Its chats** (any model, a Claude API key included). VIA reads `copilot`. ctop reads VS Code's chat
       files, `User/workspaceStorage/<id>/chatSessions/` and `User/globalStorage/emptyWindowChatSessions/`.
-      A chat counts as live while VS Code runs and it was written in the last hour or is still unanswered.
+      A chat counts as live while VS Code runs and it was written in the last hour, or is still unanswered
+      and was written in the last 7 days (an older unanswered chat shows once the keep window reaches it).
       VS Code saves a chat about once a minute, so a finished reply can show as working for up to a
       minute. COST is in Copilot credits (`cr`), not dollars; there is no PID, as the chat runs inside VS
       Code. The file format was read from VS Code's source; ctop has not yet run against a real chat file.
@@ -245,12 +246,12 @@ The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meani
 
 ## Tested on
 
-What has actually been run, as of build `2026.11.10.1`. Anything not listed here is untested.
+What has actually been run, as of build `2026.11.10.2`. Anything not listed here is untested.
 
-**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (466, less those
+**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (472, less those
 that cannot apply: Linux skips the two Windows process tests; Windows skips the two that need a
 case-sensitive filesystem and the Linux config-folder test; Windows PowerShell 5.1 also skips the
-flag-width test: 464, 463 and 462 run).
+flag-width test: 470, 469 and 468 run).
 They include the worker run as a real process, the display against a worker that misbehaves, `-Snapshot`
 and the command line run as processes, on Windows PowerShell 5.1 too.
 *End to end*: the integration tests (41), which drive the real ctop in tmux against a fake `claude`

@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.10.1 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.10.2 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -136,7 +136,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.10.1'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.10.2'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -2152,6 +2152,25 @@ $script:CopilotPending = 0
 $script:CopilotBuildMs = 120
 $script:CopilotActiveMin = 60
 $script:CopilotStallMin = 10
+# Unanswered chats older than the hour are looked for this many days back (user, 2026-11-10: "the last few
+# days" is what matters; reading every chat ever took 36-74 s on Sol's 642 real chats). Older ones are read
+# only when the keep window reaches them.
+$script:CopilotScanDays = 7
+# The catch-up in progress, for the strip: bytes read so far and in all, and when it began; $null when idle
+$script:CopilotScan = $null
+function Format-CopilotScan {
+  $s = $script:CopilotScan
+  if (-not $s -or -not $s.Total) { return '' }
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  $mb = { param($b) $v = $b / 1MB; [string]::Format($inv, $(if ($v -lt 10) { '{0:0.#}' } else { '{0:0}' }), $v) }
+  $text = "$(& $mb $s.Done)/$(& $mb $s.Total)MB"
+  $secs = ((Get-Date) - $s.Started).TotalSeconds
+  if ($s.Done -gt 0 -and $secs -gt 0) {
+    $left = ($s.Total - $s.Done) / ($s.Done / $secs)
+    $text += if ($left -ge 90) { [string]::Format($inv, ' ~{0:0}m', $left / 60) } else { [string]::Format($inv, ' ~{0:0}s', $left) }
+  }
+  return $text
+}
 $script:CopilotFolders = @{}   # workspace storage folder -> @{ Write; Cwd }
 function Get-CopilotChatFiles([string]$userDir) {
   $files = [Collections.Generic.List[object]]::new()
@@ -2189,7 +2208,8 @@ function Update-CopilotRoster([scriptblock]$running = ${function:Test-VSCodeRunn
   $keepMin = [int]$script:KeepMin
   $keepCut = if ($keepMin -gt 0) { $now.AddMinutes(-$keepMin) } else { $null }
   $activeCut = $now.AddMinutes(-$activeMin)
-  $sw = [Diagnostics.Stopwatch]::StartNew(); $readOne = $false; $pending = 0
+  $scanCut = $now.AddDays(-$(if ($script:CopilotScanDays) { $script:CopilotScanDays } else { 7 }))
+  $sw = [Diagnostics.Stopwatch]::StartNew(); $readOne = $false; $pending = 0; $pendingBytes = 0L; $readBytes = 0L
   $list = [Collections.Generic.List[object]]::new()
   $seen = @{}
   foreach ($ud in @(Get-VSCodeUserDirs)) {
@@ -2212,14 +2232,14 @@ function Update-CopilotRoster([scriptblock]$running = ${function:Test-VSCodeRunn
       $fresh = Test-ClineFresh $cached $f
       $old = -not ($up -and $recent) -and -not $inKeep
       if ($old) {
-        if (-not $up) { continue }
+        if (-not $up -or $written -lt $scanCut) { continue }   # older than the 7 days looked through
         if ($fresh -and -not ($cached.Result -and $cached.Result.ChatState -in 0, 4)) { continue }
       }
       if ($fresh -or -not $readOne -or $sw.ElapsedMilliseconds -lt $budgetMs) {
         $act = Read-CopilotChat $f
-        if (-not $fresh) { $readOne = $true }
+        if (-not $fresh) { $readOne = $true; $readBytes += $f.Length }
       } else {
-        $pending++
+        $pending++; $pendingBytes += $f.Length
         $act = if ($cached) { $cached.Result } else { $null }   # what Read-CopilotChat -CachedOnly gives, without a call per file
       }
       if ($null -eq $act) {
@@ -2243,6 +2263,15 @@ function Update-CopilotRoster([scriptblock]$running = ${function:Test-VSCodeRunn
   foreach ($k in @($script:CopilotFiles.Keys)) { if (-not $seen.ContainsKey($k)) { $script:CopilotFiles.Remove($k) } }
   $script:CopilotRows = $list.ToArray()
   $script:CopilotPending = $pending
+  # the strip's progress: a catch-up starts when files are left for later, and its total grows if more
+  # turn up; it ends when nothing is left
+  if (-not $pending) { $script:CopilotScan = $null }
+  else {
+    $s = $script:CopilotScan
+    if (-not $s) { $s = @{ Done = 0L; Total = 0L; Started = $now }; $script:CopilotScan = $s }
+    $s.Done += $readBytes
+    if ($s.Done + $pendingBytes -gt $s.Total) { $s.Total = $s.Done + $pendingBytes }
+  }
 }
 # A Copilot chat as a ctop row: the same fields as a Claude Code row (Build-Rows), _Agent = 'copilot'.
 function New-CopilotRow($e, [bool]$sample) {
@@ -3748,7 +3777,9 @@ function Show-Help {
     '',
     'COPILOT   a GitHub Copilot chat in VS Code is read from VS Code''s chat files (User/workspaceStorage/',
     '  <id>/chatSessions, globalStorage/emptyWindowChatSessions; VSCODE_APPDATA / VSCODE_PORTABLE move them).',
-    '  It is live while VS Code runs and the chat was written in the last hour or is unanswered; else gone.',
+    '  It is live while VS Code runs and the chat was written in the last hour, or is unanswered and was',
+    '  written in the last 7 days; else gone. While ctop reads chat files left for later, the strip''s',
+    '  copilot cell shows MB read of the total and the time left.',
     '  STATE: working (the reply is pending), waiting (it needs your input), stalled (pending, but not written',
     '  for 10 min), idle, error. VS Code saves a chat about once a minute, so a finished reply can read',
     '  working for up to a minute. COST is in Copilot credits (cr), not dollars. No PID: it runs inside VS Code.',
@@ -4064,6 +4095,7 @@ function Invoke-Frame($view) {
            $(if ($script:Compact) { '│ compact ' }) +
            $(if ($script:HiddenCols.Count) { '│ ' + (Cell 'hidden' "$($script:HiddenCols.Count) cols" 15) }) +
            '│ ' + (Cell 'keep' (Format-Keep $script:KeepMin) 12) +
+           $(if ($script:CopilotScan) { '│ ' + (Cell 'copilot' (Format-CopilotScan) 22) }) +
            $(if ($keptGone) { '│ ' + (Cell 'gone' $(if ($script:GonePending -and $script:ShowGone) { "$($keptGone - $script:GonePending)/$keptGone" } else { "$keptGone$(if (-not $script:ShowGone) { ' hidden' })" }) 14) }) +
            '│ ' + (Cell 'build' $script:CtopVersion 20)   # labeled and away from the clock: a bare date beside it reads as "now"
   $frame = @()

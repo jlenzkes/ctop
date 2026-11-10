@@ -2,6 +2,15 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.10.2 — Sol's round 2 of step 3: F3
+
+- unanswered Copilot chats older than an hour are looked for in the last 7 days, not in every chat ever
+  written: reading them all took 36 to 74 s on Sol's copy of 642 real chats (486 MB), and held up the
+  screen for up to 6 s at a time. An older unanswered chat is listed once the keep window reaches it
+- while ctop reads chat files it has left for later, the strip shows a `copilot` cell with the MB read so
+  far, the total, and an estimate of the time left (`copilot 40/286MB ~25s`). The cell goes when the reading
+  is done. A single large file is read in one go; if that takes over 5 s, the screen's age shows as usual
+
 ## 2026.11.10.1 — Sol's round 2 of step 3: F2
 
 - a Copilot chat file that VS Code rewrote is read from the start whenever the byte before the point

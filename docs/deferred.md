@@ -68,7 +68,7 @@ Flaky tests are listed separately in `CLAUDE.md` ("Flaky tests seen in CI").
 - **Where:** `Update-CopilotRoster` and `New-CopilotRow`.
 - **What happens:**
   - VS Code doesn't say which chats are open. ctop counts a chat as live while VS Code runs and the chat was written in the last hour or is unfinished.
-  - An unfinished chat has no age limit, by decision (user, 2026-11-10): one abandoned weeks ago, say in a VS Code that crashed, shows as `stalled` or `waiting` until it is answered, cancelled or deleted in VS Code. Inference, not checked: cancelling it in VS Code marks it finished.
+  - An unanswered chat is looked for 7 days back (user, 2026-11-10; build 2026.11.10.2). One abandoned within that time, say in a VS Code that crashed, shows as `stalled` or `waiting` until it is answered, cancelled or deleted in VS Code, or until it is 7 days old. Inference, not checked: cancelling it in VS Code marks it finished.
   - A Pending request with no write for 10 min shows as `stalled`.
   - VS Code saves about once a minute, so a finished reply can show as working for up to a minute.
   - On macOS, VS Code's process is not looked for, so it always counts as running.
@@ -95,6 +95,13 @@ Flaky tests are listed separately in `CLAUDE.md` ("Flaky tests seen in CI").
 - **What happens:** `./ctop.ps1 -Version` ran and printed the version; then `Install-Module Pester` aborted with "No usable version of libssl was found" (exit 134), so no test ran. Fedora 45's image has `openssl-libs-4.0.3` and only `libssl.so.4` (checked in a `fedora:45` container). Inference: PowerShell 7.6.9's .NET looks for OpenSSL 3 or older, and needs it for network use. Whether ctop itself works there (it makes no network calls) is untested.
 - **Why deferred:** not ctop's code; the CI job needs Pester, which needs the network.
 - **Possible fix:** move CI back to `fedora:latest` once a PowerShell release, or a Fedora OpenSSL 3 compatibility package, works there. Neither has been checked.
+
+### D13. One large chat file is read in one go
+- **Source:** Sol, step 3 round 2, F3 (`SOL_STEP3_ROUND2_VALIDATION.md`): one 28.8 MB chat took 2.1 s in a single roster call on either runtime.
+- **Where:** `Read-CopilotChat` (the whole file is parsed at once); called from `Update-CopilotRoster`, which `Invoke-Frame` calls.
+- **What happens:** the per-call budget is checked between files, so a single large chat in the window or the 7-day horizon delays that frame for as long as its read takes. The strip's `copilot` cell can't move during it; the frontend shows the screen's age once a frame is 5 s late. Keys still work in the default two-process mode.
+- **Why deferred:** the user chose a 7-day horizon plus a progress cell over a background reader (2026-11-10).
+- **Possible fix:** read Copilot chats on a background thread (a runspace, since `Start-ThreadJob` may be missing on 5.1), and remember finished chats between runs.
 
 ## Not yet checked (not bugs)
 
