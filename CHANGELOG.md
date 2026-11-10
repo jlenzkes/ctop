@@ -2,6 +2,16 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.10.6 — Sol's round 5
+
+- a Copilot chat's token price uses each turn's whole usage per model where VS Code records it
+  (`modelTotals`: every model call of the turn, subagents too, with cached tokens at the cache-read
+  price). Where it doesn't, VS Code records only the turn's last model call's input, and peek now calls the
+  price partial instead of an upper estimate; it also says how many turns ran on a model with no price
+- LAST ACTION leaves out the model's thinking: a thinking part stored as text was joined into the reply
+- a gone chat that VS Code moved shows its new folder and file, even when the copy has the same content
+  and write time as the original
+
 ## 2026.11.10.5 — a chat VS Code moved
 
 - a chat VS Code moved keeps one row, with the folder it moved to. Opening a folder copies every chat file

@@ -234,7 +234,7 @@ Describe 'Read-CopilotChat (replaying the mutation log)' {
     $a = Read-Chat $p
     $a.Cost | Should -Be 6.0 -Because 'opus-5-5: 1M input at $4 plus 100K output at $20 a million'
     $a.CostFrom | Should -Be 'tokens'
-    Format-CopilotCost $a | Should -Match ('^' + [regex]::Escape(('${0:N2}' -f 6)) + " \(tokens at the model's API price, an upper estimate")
+    Format-CopilotCost $a | Should -Match ('^' + [regex]::Escape(('${0:N2}' -f 6)) + " \(tokens at the model's API price, partial: 1 turn\(s\) record only their last model call's input")
   }
   It 'prices a chat that used Copilot credits from the credits, and shows its token price beside them' {
     $script:Pricing = @(@{ Match = 'opus-5-5'; In = 4; W5 = 5; W1h = 8; Read = 0.2; Out = 20 })   # the built-in table's row
@@ -246,6 +246,37 @@ Describe 'Read-CopilotChat (replaying the mutation log)' {
     $t = Format-CopilotCost $a
     $t | Should -Match '\(300 Copilot credits at \$0\.01 each\)'
     $t | Should -Match ('its tokens at the API price: ' + [regex]::Escape(('${0:N2}' -f 4)))
+  }
+  It 'prices a turn from its whole-turn usage per model when the file has it (Sol, step 3 round 5, R1)' {
+    # promptTokens is only the turn's last model call (VS Code chatService.ts, IChatUsage); modelTotals sums
+    # every call, subagents included
+    $script:Pricing = @(@{ Match = 'opus-5-5'; In = 4; W5 = 5; W1h = 8; Read = 0.2; Out = 20 })
+    $p = Join-Path $dir 'c7e.jsonl'
+    $mt = @(@{ model = 'claude-opus-5-5'; inputTokens = 100000; cachedTokens = 100000; outputTokens = 1000 })
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c7e' @((New-Request 'a' 'q' 1 @{ modelId = 'anthropic/Anthropic/claude-opus-5-5'; promptTokens = 1000; completionTokens = 1000; lastCallCompletionTokens = 100; modelTotals = $mt }))) })
+    $a = Read-Chat $p
+    [math]::Round($a.Cost, 4) | Should -Be 0.44 -Because '100K input at $4, 100K cached at $0.20, 1K output at $20 a million'
+    Format-CopilotCost $a | Should -Match 'each turn''s recorded usage'
+    Format-CopilotCost $a | Should -Not -Match 'upper estimate|partial'
+  }
+  It 'calls a price from turns without whole-turn usage partial, not an upper estimate' {
+    $script:Pricing = @(@{ Match = 'opus-5-5'; In = 4; W5 = 5; W1h = 8; Read = 0.2; Out = 20 })
+    $p = Join-Path $dir 'c7f.jsonl'
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c7f' @((New-Request 'a' 'q' 1 @{ modelId = 'anthropic/Anthropic/claude-opus-5-5'; promptTokens = 1000000; completionTokens = 100000 }))) })
+    $t = Format-CopilotCost (Read-Chat $p)
+    $t | Should -Match 'partial'
+    $t | Should -Match 'last model call'
+    $t | Should -Not -Match 'upper estimate'
+  }
+  It 'says how many turns ran on a model with no price' {
+    $script:Pricing = @(@{ Match = 'opus-5-5'; In = 4; W5 = 5; W1h = 8; Read = 0.2; Out = 20 })
+    $p = Join-Path $dir 'c7g.jsonl'
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c7g' @(
+      (New-Request 'a' 'q' 1 @{ modelId = 'anthropic/Anthropic/claude-opus-5-5'; modelTotals = @(@{ model = 'claude-opus-5-5'; inputTokens = 1000000; cachedTokens = 0; outputTokens = 0 }) }),
+      (New-Request 'b' 'q' 1 @{ modelId = 'copilot/gpt-5.6-sol-gov'; promptTokens = 5000; completionTokens = 500 }))) })
+    $a = Read-Chat $p
+    $a.Cost | Should -Be 4.0
+    Format-CopilotCost $a | Should -Match '1 of 2 turns.*no price'
   }
   It 'leaves COST empty for a model ctop has no price for and no credits' {
     $p = Join-Path $dir 'c7d.jsonl'
@@ -268,6 +299,12 @@ Describe 'Read-CopilotChat (replaying the mutation log)' {
               @{ value = '** is a PowerShell script.' })
     Write-Chat $p @(@{ kind = 0; v = (New-Session 'c9b' @((New-Request 'a' 'q' 1 @{ response = $resp }))) })
     (Read-Chat $p).Last | Should -Be 'Here: **ctop.ps1** is a PowerShell script.'
+  }
+  It 'leaves the model''s thinking out of the reply it shows (Sol, step 3 round 5, R2)' {
+    $p = Join-Path $dir 'c9c.jsonl'
+    $resp = @(@{ kind = 'thinking'; value = 'Reasoning.' }, @{ kind = 'markdownContent'; content = @{ value = 'Final answer.' } }, @{ kind = 'thinking'; value = @('More', 'reasoning') })
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c9c' @((New-Request 'a' 'q' 1 @{ response = $resp }))) })
+    (Read-Chat $p).Last | Should -Be 'Final answer.'
   }
   It 'shows a tool call as the last action, and counts tools' {
     $p = Join-Path $dir 'c9.jsonl'
@@ -532,6 +569,35 @@ Describe 'a chat VS Code moved: one row, from the copy it writes to now' {
     $r = New-CopilotRow $rows[0] $false
     $r.CWD | Should -Be (Normalize-Path '/home/u/opened later')
     $r.TITLE | Should -Be 'renamed after the move'
+  }
+}
+
+Describe 'a gone chat VS Code moved: its cached row follows the copy (Sol, step 3 round 5, R3)' {
+  BeforeAll {
+    Mock Get-GitInfo { @{ Branch = '-'; Worktree = $false; Main = '' } }
+    $root = Join-Path $TestDrive 'moved-gone'
+    $user = Join-Path $root 'Code/User'
+    $ws = Join-Path $user 'workspaceStorage/wsnew'
+    New-Item -ItemType Directory -Force -Path (Join-Path $ws 'chatSessions') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $ws 'workspace.json'), '{"folder":"file:///home/u/new%20folder"}')
+    $down = { param($p) $false }
+  }
+  BeforeEach { Reset-Copilot; Reset-BuildRows; $script:KeepMin = -1; $env:VSCODE_APPDATA = $root; $savedPortable = $env:VSCODE_PORTABLE; $env:VSCODE_PORTABLE = $null }
+  AfterEach { $env:VSCODE_APPDATA = $null; $env:VSCODE_PORTABLE = $savedPortable }
+  It 'shows the new folder and file once the copy stands, though its content and write time are the same' {
+    $old = Join-Path $user 'globalStorage/emptyWindowChatSessions/eeee2222-gone.jsonl'
+    Write-Chat $old @(@{ kind = 0; v = (New-Session 'eeee2222-gone' @((New-Request 'a' 'long done' 1))) })
+    $when = (Get-Date).AddDays(-2); [IO.File]::SetLastWriteTime($old, $when)
+    Update-CopilotRoster $down
+    $r1 = @(Build-Rows) | Where-Object { $_._SessionId -eq 'eeee2222-gone' }
+    $r1.CWD | Should -Be '-'
+    $new = Join-Path $ws 'chatSessions/eeee2222-gone.jsonl'
+    Copy-Item $old $new; [IO.File]::SetLastWriteTime($new, $when)   # VS Code's copy: same bytes, same write time
+    Update-CopilotRoster $down
+    $r2 = @(Build-Rows) | Where-Object { $_._SessionId -eq 'eeee2222-gone' }
+    @($r2).Count | Should -Be 1
+    $r2.CWD | Should -Be (Normalize-Path '/home/u/new folder')
+    $r2._Transcript | Should -Be (Get-Item $new).FullName
   }
 }
 

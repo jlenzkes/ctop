@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.10.5 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.10.6 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -136,7 +136,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.10.5'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.10.6'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -2014,7 +2014,7 @@ function Invoke-ChatEntry($state, $e) {
 # What a chat says, in the same fields as Get-LastAction, plus the chat's own (title, credits, state).
 function Get-ChatSummary($session) {
   $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0
-                     ChatState = $null; Credits = 0.0; TokenCost = 0.0; CostFrom = ''; ModelId = ''; Title = ''; Created = $null; SessionId = ''; CtxLimit = 0 }
+                     ChatState = $null; Credits = 0.0; TokenCost = 0.0; CostFrom = ''; TurnsPriced = 0; TurnsLastCall = 0; TurnsUnpriced = 0; ModelId = ''; Title = ''; Created = $null; SessionId = ''; CtxLimit = 0 }
   if ($null -eq $session) { return $out }
   $out.SessionId = [string]$session.sessionId
   if ($session.creationDate) { $out.Created = ConvertFrom-UnixMs $session.creationDate }
@@ -2023,12 +2023,30 @@ function Get-ChatSummary($session) {
   $tools = 0; $counts = @{}; $sumCredits = 0.0; $sessCredits = $null; $tokCost = 0.0; $priced = $false
   foreach ($r in $reqs) {
     $out.InTok += [long]$r.promptTokens; $out.OutTok += [long]$r.completionTokens
-    # a chat on the user's own API key is billed by the model's provider, per token: priced like a Claude Code
-    # session, from ctop's price table (Claude models only). The chat file has no cache-read split, so all
-    # prompt tokens are priced as fresh input: an upper estimate.
-    $rm = (([string]$r.modelId -split '/')[-1]) -replace '^claude-', ''
-    $pr = if ($rm -and ($r.promptTokens -or $r.completionTokens)) { Get-Price $rm ([long]$r.promptTokens) }
-    if ($pr) { $priced = $true; $tokCost += ([double]$r.promptTokens * $pr.In + [double]$r.completionTokens * $pr.Out) / 1e6 }
+    # A chat on the user's own API key is billed by the model's provider, per token: priced like a Claude Code
+    # session, from ctop's price table (Claude models). VS Code (chatService.ts, IChatUsage at 1306698):
+    # promptTokens is only the turn's LAST model call; modelTotals, when present, sums every call of the turn
+    # per model (subagents too), with inputTokens, cachedTokens and outputTokens. With modelTotals the turn is
+    # priced in full (cachedTokens at the cache-read price, taken as not included in inputTokens: inference,
+    # Anthropic's API counts them apart); without, only the last call's input is known: a partial price.
+    $mts = @($r.modelTotals | Where-Object { $null -ne $_ })
+    $turnUsage = $false; $turnPriced = $false; $turnUnpriced = $false
+    if ($mts.Count) {
+      foreach ($mt in $mts) {
+        $in = [double]$mt.inputTokens; $ca = [double]$mt.cachedTokens; $ou = [double]$mt.outputTokens
+        if ($in + $ca + $ou -le 0) { continue }
+        $turnUsage = $true
+        $pr = Get-Price ((([string]$mt.model -split '/')[-1]) -replace '^claude-', '') ([long]($in + $ca))
+        if ($pr) { $turnPriced = $true; $tokCost += ($in * $pr.In + $ca * $pr.Read + $ou * $pr.Out) / 1e6 } else { $turnUnpriced = $true }
+      }
+    } elseif ($r.promptTokens -or $r.completionTokens) {
+      $turnUsage = $true
+      $rm = (([string]$r.modelId -split '/')[-1]) -replace '^claude-', ''
+      $pr = if ($rm) { Get-Price $rm ([long]$r.promptTokens) }
+      if ($pr) { $turnPriced = $true; $out.TurnsLastCall++; $tokCost += ([double]$r.promptTokens * $pr.In + [double]$r.completionTokens * $pr.Out) / 1e6 } else { $turnUnpriced = $true }
+    }
+    if ($turnPriced) { $priced = $true; $out.TurnsPriced++ }
+    if ($turnUnpriced) { $out.TurnsUnpriced++ }
     $c = 0.0; if ([double]::TryParse("$($r.copilotCredits)", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$c) -and $c -gt 0 -and -not [double]::IsInfinity($c)) { $sumCredits += $c }
     $s = 0.0; if ([double]::TryParse("$($r.sessionCopilotCredits)", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$s) -and $s -gt 0 -and -not [double]::IsInfinity($s)) { $sessCredits = $s }
     foreach ($p in @($r.response)) { if ($p -and $p.kind -eq 'toolInvocationSerialized') { $tools++; $n = if ($p.toolId) { [string]$p.toolId } else { 'tool' }; $counts[$n] = 1 + [int]$counts[$n] } }
@@ -2075,9 +2093,13 @@ function Get-ChatSummary($session) {
           [void]$sb.Append($nm)
         } elseif ($p.kind -eq 'progressMessage') {
           if ($p.content -and $p.content.value -is [string]) { $note = [string]$p.content.value }
-        } elseif ($p.value -is [string]) { [void]$sb.Append([string]$p.value) }
-        elseif ($p.value -and $p.value.value -is [string]) { [void]$sb.Append([string]$p.value.value) }
-        elseif ($p.content -and $p.content.value -is [string]) { [void]$sb.Append([string]$p.content.value) }
+        } elseif (-not $p.kind -or $p.kind -in 'markdownContent', 'markdownVuln') {
+          # the reply's text only: thinking, status and other parts with a string value are not the reply
+          # (Sol, step 3 round 5, R2: a string-valued thinking part was shown as part of the reply)
+          if ($p.value -is [string]) { [void]$sb.Append([string]$p.value) }
+          elseif ($p.value -and $p.value.value -is [string]) { [void]$sb.Append([string]$p.value.value) }
+          elseif ($p.content -and $p.content.value -is [string]) { [void]$sb.Append([string]$p.content.value) }
+        }
       }
       $text = $sb.ToString()
       if (-not $text.Trim()) {
@@ -2199,13 +2221,17 @@ $script:CopilotCreditUsd = 0.01
 function Format-CopilotCost($act) {
   $rate = if ($null -ne $script:CopilotCreditUsd) { [double]$script:CopilotCreditUsd } else { 0.01 }
   $inv = [Globalization.CultureInfo]::InvariantCulture
-  $est = 'an upper estimate: cache reads are not recorded'
+  # what the token price covers: each turn's recorded usage, or only part of it
+  $notes = @()
+  if ($act.TurnsLastCall) { $notes += "partial: $($act.TurnsLastCall) turn(s) record only their last model call's input" }
+  if ($act.TurnsUnpriced) { $notes += "partial: $($act.TurnsUnpriced) of $($act.TurnsPriced + $act.TurnsUnpriced) turns ran on a model with no price" }
+  $basis = if ($notes) { $notes -join '; ' } else { "from each turn's recorded usage" }
   if ($act.Credits -gt 0) {
     $t = ('${0:N2}' -f $act.Cost) + [string]::Format($inv, ' ({0:0.##} Copilot credits at ${1:0.##} each)', $act.Credits, $rate)
-    if ($act.TokenCost -gt 0) { $t += '; its tokens at the API price: ' + ('${0:N2}' -f $act.TokenCost) + ", $est" }
+    if ($act.TokenCost -gt 0) { $t += '; its tokens at the API price: ' + ('${0:N2}' -f $act.TokenCost) + " ($basis)" }
     return $t
   }
-  if ($act.TokenCost -gt 0) { return ('${0:N2}' -f $act.TokenCost) + " (tokens at the model's API price, $est)" }
+  if ($act.TokenCost -gt 0) { return ('${0:N2}' -f $act.TokenCost) + " (tokens at the model's API price, $basis)" }
   return 'none recorded'
 }
 # The catch-up in progress, for the strip: bytes read so far and in all, and when it began; $null when idle
@@ -3107,7 +3133,7 @@ function Build-Rows {
     # enough: a read left for later, or one that failed, shows the last read under the files' new times,
     # and the read that follows must still rebuild the row (Sol, step 3 F1). A new read is a new summary
     # object; one with the same content (Get-ActSignature) keeps the row.
-    $key = if ($isCline) { "$($ce.LastWrite.Ticks)|$($ce.GoneAt.Ticks)|$($ce.Status)" } else { "$($ce.Written.Ticks)|$($ce.GoneAt.Ticks)|$($ce.Running)" }
+    $key = if ($isCline) { "$($ce.LastWrite.Ticks)|$($ce.GoneAt.Ticks)|$($ce.Status)" } else { "$($ce.Written.Ticks)|$($ce.GoneAt.Ticks)|$($ce.Running)|$($ce.File.FullName)|$($ce.Cwd)" }   # the file and folder: a chat VS Code moved keeps its content and write time (Sol, step 3 round 5, R3)
     $hit = $script:AgentRows[$id]
     $same = $false
     if ($hit -and $hit.Key -ceq $key) {
@@ -3846,7 +3872,7 @@ function Show-Help {
     '  STATE: working (the reply is pending), waiting (it needs your input), stalled (pending, but not written',
     '  for 10 min), idle, error. VS Code saves a chat about once a minute, so a finished reply can read',
     '  working for up to a minute. COST in dollars: Copilot credits at $0.01 each, or, on your own API key,',
-    '  tokens at the model''s API price (an upper estimate; peek shows both). No PID: it runs inside VS Code.',
+    '  tokens at the model''s API price (peek says how much of the usage the file records). No PID: it runs inside VS Code.',
     '',
     'COLUMNS   (source: J = claude agents --json, R = Claude Code''s session registry (~/.claude/sessions),',
     '           O = OS, T = transcript file — heuristic. Without the claude command, J comes from R too.',

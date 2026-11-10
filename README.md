@@ -39,7 +39,8 @@ Everything is read locally. ctop makes no model calls and uses no tokens.
       and was written in the last 7 days (an older unanswered chat shows once the keep window reaches it).
       VS Code saves a chat about once a minute, so a finished reply can show as working for up to a
       minute. COST is in dollars: Copilot credits at $0.01 each, or, for a chat on your own API key, its
-      tokens at the model's API price (an upper estimate; peek shows both). There is no PID, as the chat runs inside VS
+      tokens at the model's API price; peek shows both, and says when the file records only part of the usage
+      (often only each turn's last model call). There is no PID, as the chat runs inside VS
       Code. The file format was read from VS Code's source; ctop has not yet run against a real chat file.
     - **Its Claude agent** (Claude, in the chat's list of harnesses). It runs Claude Code through the
       Claude Agent SDK, which registers each session and writes its transcript like the CLI does. VIA
@@ -247,12 +248,12 @@ The old `-SubagentWindow` (seconds) still works, and its `0` keeps its old meani
 
 ## Tested on
 
-What has actually been run, as of build `2026.11.10.5`. Anything not listed here is untested.
+What has actually been run, as of build `2026.11.10.6`. Anything not listed here is untested.
 
-**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (482, less those
+**CI** ([workflow](.github/workflows/ci.yml)), on every push. *Unit*: the Pester unit tests (487, less those
 that cannot apply: Linux skips the two Windows process tests; Windows skips the two that need a
 case-sensitive filesystem and the Linux config-folder test; Windows PowerShell 5.1 also skips the
-flag-width test: 480, 479 and 478 run).
+flag-width test: 485, 484 and 483 run).
 They include the worker run as a real process, the display against a worker that misbehaves, `-Snapshot`
 and the command line run as processes, on Windows PowerShell 5.1 too.
 *End to end*: the integration tests (41), which drive the real ctop in tmux against a fake `claude`
