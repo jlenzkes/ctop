@@ -145,6 +145,43 @@ Describe 'Read-CopilotChat (replaying the mutation log)' {
     $a.ChatState | Should -Be 1
     $a.Last | Should -Be 'done now'
   }
+  It 'reads such a file from the start when the old offset lands on a { inside it (Sol, step 3 round 2, F2)' {
+    # Sol's boundary case: the replacement has no final newline, and the old offset falls exactly on the
+    # opening brace of a nested object, so the tail looks like a line still being written
+    $p = Join-Path $dir 'c4d.jsonl'
+    $t = Now-Ms 30
+    $sess = { param($state, $resp) [ordered]@{ version = 3; sessionId = 'c4d'; creationDate = $t; customTitle = ('t' * 300)
+                                               requests = @((New-Request 'a' 'question' $state @{ response = @($resp) })) } }
+    Write-Chat $p @([ordered]@{ kind = 0; v = (& $sess 0 @(@{ value = 'partial' })) })
+    $null = Read-Chat $p
+    $off = [int]$script:CopilotFiles[(Get-Item $p).FullName].Offset
+    $text = $null
+    for ($k = 0; $k -lt 400 -and -not $text; $k++) {   # pad the first reply until the second one's { is at the old offset
+      $cand = J ([ordered]@{ kind = 0; v = (& $sess 1 @(@{ value = ('x' * $k) }, @{ value = 'final answer' })) })
+      if ($cand.Length -gt $off -and $cand[$off] -eq '{' -and $cand[$off - 1] -ne "`n") { $text = $cand }
+    }
+    $text | Should -Not -BeNullOrEmpty -Because 'the test needs a layout with { at the old offset'
+    [IO.File]::WriteAllText($p, $text)   # no final newline
+    $a = Read-Chat $p
+    $a.ChatState | Should -Be 1
+    $a.Last | Should -Be 'final answer'
+    (Read-Chat $p).ChatState | Should -Be 1
+  }
+  It 'reads a file rewritten to exactly the length read before from the start' {
+    $p = Join-Path $dir 'c4e.jsonl'
+    $t = Now-Ms 30
+    $sess = { param($state, $word) [ordered]@{ version = 3; sessionId = 'c4e'; creationDate = $t; customTitle = ('t' * 300)
+                                               requests = @((New-Request 'a' 'question' $state @{ response = @(@{ value = $word }) })) } }
+    Write-Chat $p @([ordered]@{ kind = 0; v = (& $sess 0 'aaaa') })
+    $null = Read-Chat $p
+    $len = (Get-Item $p).Length
+    Write-Chat $p @([ordered]@{ kind = 0; v = (& $sess 1 'bbbb') })
+    (Get-Item $p).Length | Should -Be $len
+    [IO.File]::SetLastWriteTimeUtc($p, [datetime]::UtcNow.AddSeconds(5))
+    $a = Read-Chat $p
+    $a.ChatState | Should -Be 1
+    $a.Last | Should -Be 'bbbb'
+  }
   It 'keeps the last good read of a broken file, and does not parse that version again' {
     $p = Join-Path $dir 'c5.jsonl'
     Write-Chat $p @(@{ kind = 0; v = (New-Session 'c5' @((New-Request 'a' 'good' 1))) })

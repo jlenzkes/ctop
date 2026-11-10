@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.02.5 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.10.1 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -136,7 +136,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.02.5'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.10.1'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -2087,12 +2087,21 @@ function Read-CopilotChat([IO.FileInfo]$f, [switch]$CachedOnly) {
     $session = $null; $from = 0L
     if ($c -and $c.Session -and $f.Length -ge $c.Offset -and $c.Head -and (Test-SameHead $f.FullName $c.Head)) { $session = $c.Session; $from = [long]$c.Offset }
     while ($true) {
+      # an append keeps what was read: the byte before the offset is still the newline that ended the last
+      # line read, and something follows it. Otherwise the file was rewritten, here or before the offset,
+      # with the same first bytes (VS Code compacts it into one new initial entry; Sol, step 3 round 2, F2):
+      # read it whole
+      $at = if ($from -gt 0) { $from - 1 } else { 0L }
       $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
       try {
-        $null = $fs.Seek($from, 'Begin')
-        $buf = New-Object byte[] ($fs.Length - $from); $n = 0
+        $null = $fs.Seek($at, 'Begin')
+        $buf = New-Object byte[] ([math]::Max(0, $fs.Length - $at)); $n = 0
         while ($n -lt $buf.Length) { $r = $fs.Read($buf, $n, $buf.Length - $n); if ($r -le 0) { break }; $n += $r }
       } finally { $fs.Dispose() }
+      if ($from -gt 0) {
+        if ($n -lt 2 -or $buf[0] -ne 10) { $session = $null; $from = 0L; continue }
+        $n--; $tail = New-Object byte[] $n; [Array]::Copy($buf, 1, $tail, 0, $n); $buf = $tail
+      }
       $end = $n - 1; while ($end -ge 0 -and $buf[$end] -ne 10) { $end-- }   # the last whole line ends here
       try {
         if ($end -lt 0) {

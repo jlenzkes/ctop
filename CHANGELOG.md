@@ -2,6 +2,13 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.10.1 — Sol's round 2 of step 3: F2
+
+- a Copilot chat file that VS Code rewrote is read from the start whenever the byte before the point
+  read up to is no longer a newline, or nothing follows it. Two rewrites were still taken for appends: one
+  with no final newline whose old read point fell on a `{` inside it (Sol's case), and one exactly as
+  long as what was read before
+
 ## 2026.11.02.5 — Sol's audit of step 3 (2026.11.02.4)
 
 - a gone Cline session's or Copilot chat's row shows what its files say once they are read: a read left
