@@ -311,7 +311,9 @@ Describe 'titles in a non-Latin script' -Tag Integration -Skip:$script:noTmux {
       } finally { Stop-Ctop $s }
     }
     Write-Host ("    frame median: ascii titles {0} ms, hebrew {1} ms, chinese {2} ms" -f $med.ascii, $med.hebrew, $med.chinese)
-    $limit = [math]::Max(1.5 * $med.ascii, $med.ascii + 15)
+    # the bug this guards made Hebrew frames ~150 ms; frame medians on CI runners vary by ~20 ms between
+    # runs (Hebrew 36 vs a limit of 34 in run 89, Chinese 41 vs 38 locally), so the margin is 40 ms
+    $limit = [math]::Max(1.5 * $med.ascii, $med.ascii + 40)
     $med.hebrew | Should -BeLessThan $limit
     $med.chinese | Should -BeLessThan $limit
   }
