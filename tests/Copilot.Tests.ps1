@@ -502,3 +502,54 @@ Describe 'Format-CopilotScan (the strip''s copilot cell)' {
     Format-CopilotScan | Should -Be ''
   }
 }
+
+Describe 'a chat VS Code moved: one row, from the copy it writes to now' {
+  # VS Code 1306698, chatSessionStore.ts: opening a folder copies every chat file to the new folder's
+  # storage under the same name (the chat's id), "originals preserved at old location"; a transfer to
+  # another window also keeps the id. ctop keeps one row per id, from the newest copy.
+  BeforeAll {
+    Mock Get-GitInfo { @{ Branch = '-'; Worktree = $false; Main = '' } }
+    $root = Join-Path $TestDrive 'moved'
+    $user = Join-Path $root 'Code/User'
+    $ws = Join-Path $user 'workspaceStorage/wsnew'
+    New-Item -ItemType Directory -Force -Path $ws | Out-Null
+    [IO.File]::WriteAllText((Join-Path $ws 'workspace.json'), '{"folder":"file:///home/u/opened%20later"}')
+    $up = { param($p) $p -eq 'Code' }
+  }
+  BeforeEach { Reset-Copilot; $env:VSCODE_APPDATA = $root; $savedPortable = $env:VSCODE_PORTABLE; $env:VSCODE_PORTABLE = $null }
+  AfterEach { $env:VSCODE_APPDATA = $null; $env:VSCODE_PORTABLE = $savedPortable }
+  It 'lists a chat copied from the empty window into a folder once, with the folder as CWD' {
+    $old = Join-Path $user 'globalStorage/emptyWindowChatSessions/dddd1111-moved.jsonl'
+    $new = Join-Path $ws 'chatSessions/dddd1111-moved.jsonl'
+    Write-Chat $old @(@{ kind = 0; v = (New-Session 'dddd1111-moved' @((New-Request 'a' 'started without a folder' 1))) })
+    [IO.File]::SetLastWriteTime($old, (Get-Date).AddMinutes(-5))
+    New-Item -ItemType Directory -Force -Path (Split-Path $new) | Out-Null
+    Copy-Item $old $new
+    Write-Chat $new @(@{ kind = 1; k = @('customTitle'); v = 'renamed after the move' }) -Append   # written in its new place
+    Update-CopilotRoster $up
+    $rows = @($script:CopilotRows | Where-Object { $_.Act.SessionId -eq 'dddd1111-moved' })
+    $rows.Count | Should -Be 1
+    $r = New-CopilotRow $rows[0] $false
+    $r.CWD | Should -Be (Normalize-Path '/home/u/opened later')
+    $r.TITLE | Should -Be 'renamed after the move'
+  }
+}
+
+Describe 'Test-NewerChatFile (which copy of a chat stands)' {
+  BeforeAll {
+    function F([int]$writeMin, [int]$createMin, [string]$ws) {
+      $t0 = [datetime]::new(2026, 11, 10, 12, 0, 0, [DateTimeKind]::Utc)
+      @{ File = [pscustomobject]@{ LastWriteTimeUtc = $t0.AddMinutes($writeMin); CreationTimeUtc = $t0.AddMinutes($createMin) }; Ws = $ws }
+    }
+  }
+  It 'takes the one written later' { Test-NewerChatFile (F 5 0 '') (F 1 9 'ws') | Should -BeTrue }
+  It 'keeps the one written later' { Test-NewerChatFile (F 1 9 'ws') (F 5 0 '') | Should -BeFalse }
+  It 'takes the copy made later when both were last written at the same time (a copy can keep the original''s write time)' {
+    Test-NewerChatFile (F 5 9 'wsB') (F 5 0 'wsA') | Should -BeTrue
+    Test-NewerChatFile (F 5 0 'wsA') (F 5 9 'wsB') | Should -BeFalse
+  }
+  It 'prefers a folder''s copy to the empty window''s when the times are all the same' {
+    Test-NewerChatFile (F 5 5 'ws') (F 5 5 '') | Should -BeTrue
+    Test-NewerChatFile (F 5 5 '') (F 5 5 'ws') | Should -BeFalse
+  }
+}

@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.10.4 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.10.5 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -136,7 +136,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.10.4'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.10.5'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -2191,8 +2191,9 @@ $script:CopilotStallMin = 10
 # days" is what matters; reading every chat ever took 36-74 s on Sol's 642 real chats). Older ones are read
 # only when the keep window reaches them.
 $script:CopilotScanDays = 7
-# GitHub's price of one Copilot (AI) credit, in dollars. From a web search of GitHub's billing docs
-# (2026-11-10: "1 AI credit = $0.01 USD"); the docs page itself could not be read from where this was built.
+# GitHub's price of one Copilot (AI) credit, in dollars: "1 AI credit = $0.01 USD" (docs.github.com, Copilot
+# billing and usage-based billing for individuals, read 2026-11-10). That VS Code's copilotCredits count these
+# credits is inference (its credit status type is AiCreditsStatus).
 $script:CopilotCreditUsd = 0.01
 # Peek's COST line for a Copilot chat: the dollars, and what they come from (credits, tokens, or both)
 function Format-CopilotCost($act) {
@@ -2235,10 +2236,19 @@ function Get-CopilotChatFiles([string]$userDir) {
   }
   $empty = [IO.Path]::Combine($userDir, 'globalStorage', 'emptyWindowChatSessions')
   if ([IO.Directory]::Exists($empty)) { & $add $empty '' }
-  # one session can have both a .json (older) and a .jsonl: the newer file stands
+  # one row per chat id. A chat can have several files: a .json (older) and a .jsonl, and copies VS Code
+  # makes when it moves the chat (opening a folder copies every chat file into the folder's storage, same
+  # name, originals kept; chatSessionStore.ts at 1306698). Test-NewerChatFile picks the one that stands.
   $byId = @{}
-  foreach ($x in $files) { $id = $x.File.BaseName; $o = $byId[$id]; if (-not $o -or $x.File.LastWriteTimeUtc -gt $o.File.LastWriteTimeUtc) { $byId[$id] = $x } }
+  foreach ($x in $files) { $id = $x.File.BaseName; $o = $byId[$id]; if (-not $o -or (Test-NewerChatFile $x $o)) { $byId[$id] = $x } }
   return @($byId.Values)
+}
+# Does chat file $a stand over $b, a copy of the same chat? The one written later; at the same write time
+# (a copy can keep the original's), the one created later (the copy); then a folder's over the empty window's.
+function Test-NewerChatFile($a, $b) {
+  if ($a.File.LastWriteTimeUtc -ne $b.File.LastWriteTimeUtc) { return $a.File.LastWriteTimeUtc -gt $b.File.LastWriteTimeUtc }
+  if ($a.File.CreationTimeUtc -ne $b.File.CreationTimeUtc) { return $a.File.CreationTimeUtc -gt $b.File.CreationTimeUtc }
+  return [bool]$a.Ws -and -not $b.Ws
 }
 function Get-CopilotFolder([string]$ws) {
   if (-not $ws) { return '' }

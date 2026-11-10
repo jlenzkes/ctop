@@ -2,6 +2,15 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.10.5 — a chat VS Code moved
+
+- a chat VS Code moved keeps one row, with the folder it moved to. Opening a folder copies every chat file
+  into the folder's storage under the same name (the chat's id) and keeps the originals; a transfer to
+  another window keeps the id too (VS Code's `chatSessionStore.ts`). ctop already listed one row per id,
+  from the newest copy; a copy written at the same time as the original is now told apart by which was
+  created later, then by a folder's copy over the empty window's
+- the $0.01 price of a Copilot credit is now read from GitHub's billing docs ("1 AI credit = $0.01 USD")
+
 ## 2026.11.10.4 — from the first run on real Copilot chats (the user's machine, 2026-11-10)
 
 - COST for a Copilot chat is in dollars: the Copilot credits it used at $0.01 each (GitHub's price per
