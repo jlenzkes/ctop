@@ -2,6 +2,19 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.10.4 — from the first run on real Copilot chats (the user's machine, 2026-11-10)
+
+- COST for a Copilot chat is in dollars: the Copilot credits it used at $0.01 each (GitHub's price per
+  credit, from its billing docs via a web search), or, for a chat on your own API key, its tokens at the
+  model's API price from ctop's price table (Claude models). That token figure is an upper estimate: the
+  chat file doesn't say how many prompt tokens were cache reads. Peek shows the credits and the token
+  price. The dollars also count in the cost sort and the session totals
+- an unanswered chat is live only if it was written in the last 7 days, as documented: with the keep
+  window at ∞, chats unanswered 24 to 84 days ago were listed as live (`waiting`, `stalled`); they are now
+  gone rows
+- LAST ACTION shows a reply's text from its last tool call on, its pieces joined. VS Code splits a reply
+  around inline file references, and the last piece alone read like `** is a PowerShell`
+
 ## 2026.11.10.3 — Sol's round 3 of step 3: F2
 
 - a Copilot chat file is taken as appended to only if it still starts with exactly the bytes read before

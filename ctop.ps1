@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.10.3 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.10.4 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -136,7 +136,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.10.3'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.10.4'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -2014,15 +2014,21 @@ function Invoke-ChatEntry($state, $e) {
 # What a chat says, in the same fields as Get-LastAction, plus the chat's own (title, credits, state).
 function Get-ChatSummary($session) {
   $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0
-                     ChatState = $null; Credits = 0.0; ModelId = ''; Title = ''; Created = $null; SessionId = ''; CtxLimit = 0 }
+                     ChatState = $null; Credits = 0.0; TokenCost = 0.0; CostFrom = ''; ModelId = ''; Title = ''; Created = $null; SessionId = ''; CtxLimit = 0 }
   if ($null -eq $session) { return $out }
   $out.SessionId = [string]$session.sessionId
   if ($session.creationDate) { $out.Created = ConvertFrom-UnixMs $session.creationDate }
   $reqs = @($session.requests | Where-Object { $null -ne $_ })
   $out.Turns = $reqs.Count
-  $tools = 0; $counts = @{}; $sumCredits = 0.0; $sessCredits = $null
+  $tools = 0; $counts = @{}; $sumCredits = 0.0; $sessCredits = $null; $tokCost = 0.0; $priced = $false
   foreach ($r in $reqs) {
     $out.InTok += [long]$r.promptTokens; $out.OutTok += [long]$r.completionTokens
+    # a chat on the user's own API key is billed by the model's provider, per token: priced like a Claude Code
+    # session, from ctop's price table (Claude models only). The chat file has no cache-read split, so all
+    # prompt tokens are priced as fresh input: an upper estimate.
+    $rm = (([string]$r.modelId -split '/')[-1]) -replace '^claude-', ''
+    $pr = if ($rm -and ($r.promptTokens -or $r.completionTokens)) { Get-Price $rm ([long]$r.promptTokens) }
+    if ($pr) { $priced = $true; $tokCost += ([double]$r.promptTokens * $pr.In + [double]$r.completionTokens * $pr.Out) / 1e6 }
     $c = 0.0; if ([double]::TryParse("$($r.copilotCredits)", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$c) -and $c -gt 0 -and -not [double]::IsInfinity($c)) { $sumCredits += $c }
     $s = 0.0; if ([double]::TryParse("$($r.sessionCopilotCredits)", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$s) -and $s -gt 0 -and -not [double]::IsInfinity($s)) { $sessCredits = $s }
     foreach ($p in @($r.response)) { if ($p -and $p.kind -eq 'toolInvocationSerialized') { $tools++; $n = if ($p.toolId) { [string]$p.toolId } else { 'tool' }; $counts[$n] = 1 + [int]$counts[$n] } }
@@ -2030,6 +2036,12 @@ function Get-ChatSummary($session) {
   # sessionCopilotCredits is the session's total; the per-request credits summed are only a lower bound
   # (chatService.ts, IChatUsage)
   $out.Credits = if ($null -ne $sessCredits) { $sessCredits } else { $sumCredits }
+  # COST in dollars: what GitHub bills (credits at $script:CopilotCreditUsd each) when the chat used Copilot
+  # credits, else the token estimate for a chat on an API key; both are shown in peek
+  $out.TokenCost = $tokCost
+  $rate = if ($null -ne $script:CopilotCreditUsd) { [double]$script:CopilotCreditUsd } else { 0.01 }
+  if ($out.Credits -gt 0) { $out.Cost = $out.Credits * $rate; $out.CostFrom = 'credits' }
+  elseif ($priced) { $out.Cost = $tokCost; $out.CostFrom = 'tokens' }
   $out.Tools = $tools
   $out.ToolMix = ($counts.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ' · '
   $first = $reqs | Select-Object -First 1
@@ -2048,12 +2060,28 @@ function Get-ChatSummary($session) {
     $text = ''
     if ($out.ChatState -in 0, 4 -and $last.message) { $text = 'prompt: ' + [string]$last.message.text }
     else {
+      # the reply after its last tool call, its pieces joined: VS Code splits a reply's text around inline
+      # references (a file name), so its last piece alone read "** is a PowerShell" (seen 2026-11-10)
       $parts = @($last.response | Where-Object { $null -ne $_ })
-      for ($j = $parts.Count - 1; $j -ge 0 -and -not $text; $j--) {
-        $p = $parts[$j]
-        if ($p.kind -eq 'toolInvocationSerialized') { $text = 'tool: ' + $(if ($p.toolId) { [string]$p.toolId } else { '?' }) }
-        elseif ($p.value -is [string] -and $p.value.Trim()) { $text = [string]$p.value }
-        elseif ($p.content -and $p.content.value -is [string] -and $p.content.value.Trim()) { $text = [string]$p.content.value }
+      $j = $parts.Count - 1; while ($j -ge 0 -and $parts[$j].kind -ne 'toolInvocationSerialized') { $j-- }
+      $sb = [Text.StringBuilder]::new(); $note = ''
+      for ($k = $j + 1; $k -lt $parts.Count; $k++) {
+        $p = $parts[$k]
+        if ($p.kind -eq 'inlineReference') {
+          $ref = $p.inlineReference
+          $nm = if ($p.name) { [string]$p.name } elseif ($ref.name) { [string]$ref.name } else {
+                  $path = if ($ref.path) { [string]$ref.path } elseif ($ref.uri -and $ref.uri.path) { [string]$ref.uri.path } else { '' }
+                  ($path -split '/')[-1] }
+          [void]$sb.Append($nm)
+        } elseif ($p.kind -eq 'progressMessage') {
+          if ($p.content -and $p.content.value -is [string]) { $note = [string]$p.content.value }
+        } elseif ($p.value -is [string]) { [void]$sb.Append([string]$p.value) }
+        elseif ($p.value -and $p.value.value -is [string]) { [void]$sb.Append([string]$p.value.value) }
+        elseif ($p.content -and $p.content.value -is [string]) { [void]$sb.Append([string]$p.content.value) }
+      }
+      $text = $sb.ToString()
+      if (-not $text.Trim()) {
+        $text = if ($j -ge 0) { 'tool: ' + $(if ($parts[$j].toolId) { [string]$parts[$j].toolId } else { '?' }) } else { $note }
       }
       if ($out.ChatState -eq 2) { $text = 'cancelled' + $(if ($text) { ' · ' + $text }) }
     }
@@ -2163,6 +2191,22 @@ $script:CopilotStallMin = 10
 # days" is what matters; reading every chat ever took 36-74 s on Sol's 642 real chats). Older ones are read
 # only when the keep window reaches them.
 $script:CopilotScanDays = 7
+# GitHub's price of one Copilot (AI) credit, in dollars. From a web search of GitHub's billing docs
+# (2026-11-10: "1 AI credit = $0.01 USD"); the docs page itself could not be read from where this was built.
+$script:CopilotCreditUsd = 0.01
+# Peek's COST line for a Copilot chat: the dollars, and what they come from (credits, tokens, or both)
+function Format-CopilotCost($act) {
+  $rate = if ($null -ne $script:CopilotCreditUsd) { [double]$script:CopilotCreditUsd } else { 0.01 }
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  $est = 'an upper estimate: cache reads are not recorded'
+  if ($act.Credits -gt 0) {
+    $t = ('${0:N2}' -f $act.Cost) + [string]::Format($inv, ' ({0:0.##} Copilot credits at ${1:0.##} each)', $act.Credits, $rate)
+    if ($act.TokenCost -gt 0) { $t += '; its tokens at the API price: ' + ('${0:N2}' -f $act.TokenCost) + ", $est" }
+    return $t
+  }
+  if ($act.TokenCost -gt 0) { return ('${0:N2}' -f $act.TokenCost) + " (tokens at the model's API price, $est)" }
+  return 'none recorded'
+}
 # The catch-up in progress, for the strip: bytes read so far and in all, and when it began; $null when idle
 $script:CopilotScan = $null
 function Format-CopilotScan {
@@ -2260,7 +2304,9 @@ function Update-CopilotRoster([scriptblock]$running = ${function:Test-VSCodeRunn
         continue
       }
       if ($null -eq $act.ChatState -and -not $act.Turns) { continue }   # an empty chat: nothing asked yet
-      $live = $up -and ($recent -or $unfinished)
+      # an unanswered chat stays live for 7 days (user, 2026-11-10); an older one is gone, shown only once the
+      # keep window reaches it (with -Keep inf, chats unanswered 24-84 days ago were listed as live)
+      $live = $up -and ($recent -or ($unfinished -and $written -ge $scanCut))
       $goneAt = if ($live) { $null } else { $written }
       if ($goneAt -and -not $inKeep) { continue }
       if (-not (Test-KindListed 'interactive' ([bool]$All))) { continue }
@@ -2314,7 +2360,7 @@ function New-CopilotRow($e, [bool]$sample) {
     CMP      = ''
     MODEL    = $act.Model
     BRANCH   = $(if ($git.Worktree) { 'wt:' + $git.Branch } else { $git.Branch })
-    COST     = if ($act.Credits -gt 0) { ('{0:0.##}cr' -f $act.Credits) } else { '-' }   # Copilot credits, not dollars
+    COST     = if ($act.Cost -gt 0) { '${0:N2}' -f $act.Cost } else { '-' }   # dollars: Copilot credits at their price, or tokens on an API key
     RATE     = '-'
     ACTIVITY = $script:History[$id]
     'LAST ACTION' = $act.Last
@@ -2363,7 +2409,7 @@ function Build-CopilotPeek([object]$r) {
     "  IDLE         $($r.IDLE)      TURN $(Paint $(if ($r.TURN) { $r.TURN } else { '-' }) (Cell-Color 'TURN' $r))      TURNS $($r.TURNS)",
     $(Peek-Block 'TOOLS' "$($r.TOOLS) calls$(if ($act.ToolMix) { ':  ' + $act.ToolMix })" $pw),
     "  CTX          $($r.CTX) tokens in context$(if ($act.CtxLimit) { " of $([math]::Round($act.CtxLimit / 1000))K" })      MODEL $(Paint $r.MODEL (Cell-Color 'MODEL' $r))$(if ($act.ModelId) { " ($($act.ModelId))" })      BRANCH $($r.BRANCH)",
-    "  COST         $(if ($act.Credits -gt 0) { "$('{0:0.##}' -f $act.Credits) Copilot credits (not dollars)" } else { 'no Copilot credits recorded' })     tokens: prompt $($act.InTok)  completion $($act.OutTok)",
+    "  COST         $(Format-CopilotCost $act)     tokens: prompt $($act.InTok)  completion $($act.OutTok)",
     "  ACTIVITY     $(Paint-Spark $r.ACTIVITY)   ($(Paint-Spark '█') working  $(Paint-Spark '·') idle  $(Paint-Spark '▁') waiting on you, 1 char = 2 s, newest right)",
     $(Peek-Block 'LAST ACTION' $(if ($act.LastFull) { $act.LastFull } else { $r.'LAST ACTION' }) $pw),
     "  CWD          $($r.CWD)",
@@ -3789,7 +3835,8 @@ function Show-Help {
     '  copilot cell shows MB read of the total and the time left.',
     '  STATE: working (the reply is pending), waiting (it needs your input), stalled (pending, but not written',
     '  for 10 min), idle, error. VS Code saves a chat about once a minute, so a finished reply can read',
-    '  working for up to a minute. COST is in Copilot credits (cr), not dollars. No PID: it runs inside VS Code.',
+    '  working for up to a minute. COST in dollars: Copilot credits at $0.01 each, or, on your own API key,',
+    '  tokens at the model''s API price (an upper estimate; peek shows both). No PID: it runs inside VS Code.',
     '',
     'COLUMNS   (source: J = claude agents --json, R = Claude Code''s session registry (~/.claude/sessions),',
     '           O = OS, T = transcript file — heuristic. Without the claude command, J comes from R too.',

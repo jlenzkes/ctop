@@ -548,7 +548,7 @@ The existing Claude Code reader stays as it is.
 - **Live:** VS Code running (a process named `Code`/`code` or `Code - Insiders`/`code-insiders`) and the chat written in the last hour, or its newest request unfinished. Otherwise the chat is gone, from its last write, for the keep window.
   - **Decided (user, 2026-11-10):** an unanswered chat is looked for 7 days back (build 2026.11.10.2). An earlier "no age limit" decision the same day was narrowed once Sol measured its cost (36–74 s to read 642 real chats, 486 MB, at every start): the user's actual use is the last few days. An older unanswered chat is listed once the keep window reaches it.
 - **`stalled`:** a Pending request whose file has not been written for 10 min.
-- **COST:** shown in Copilot credits (`1.5cr`), never added to dollar totals. `sessionCopilotCredits` is used when present (VS Code calls the per-request sum a lower bound).
+- **COST (changed 2026-11-10, user's decision):** in dollars. A chat that used Copilot credits: credits × $0.01 (rate from a web search of GitHub's billing docs, not read directly). A chat on the user's own API key (no credits): its tokens at the model's API price, an upper estimate since the file has no cache-read split. Peek shows both. `sessionCopilotCredits` is used when present (VS Code calls the per-request sum a lower bound).
 - **Not read:** `globalStorage/transferredChatSessions` (inference: copies made while moving a chat between windows); Copilot CLI sessions.
 - **macOS:** VS Code's process there is not looked for, so VS Code counts as running (untested).
 

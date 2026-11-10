@@ -221,7 +221,7 @@ Describe 'a snapshot (-Snapshot)' {
     $row | Should -Not -BeNullOrEmpty -Because $x.Text
     $row | Should -Match '\bcopilot\b' -Because 'VIA'
     $row | Should -Match 'Explain the build'
-    $row | Should -Match '\b2cr\b' -Because 'Copilot credits, not dollars'
+    $row | Should -Match '\$0\.02\b' -Because '2 Copilot credits at $0.01 each'
     $row | Should -Match 'haiku-4-5-20251001'
     $row | Should -Match 'It builds in three steps\.'
   }

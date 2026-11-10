@@ -164,7 +164,7 @@ Describe 'Read-CopilotChat (replaying the mutation log)' {
     [IO.File]::WriteAllText($p, $text)   # no final newline
     $a = Read-Chat $p
     $a.ChatState | Should -Be 1
-    $a.Last | Should -Be 'final answer'
+    $a.Last | Should -Match 'final answer$'   # the reply's two pieces, joined
     (Read-Chat $p).ChatState | Should -Be 1
   }
   It 'reads a file rewritten to exactly the length read before from the start' {
@@ -226,11 +226,48 @@ Describe 'Read-CopilotChat (replaying the mutation log)' {
     Write-Chat $p @(@{ kind = 0; v = (New-Session 'c7' @((New-Request 'a' 'q' 1 @{ copilotCredits = 1 }), (New-Request 'b' 'q' 1 @{ copilotCredits = 0.5 }))) })
     (Read-Chat $p).Credits | Should -Be 1.5
   }
+  It 'prices a chat on an API key from its tokens, in dollars, when it used no Copilot credits' {
+    $script:Pricing = @(@{ Match = 'opus-5-5'; In = 4; W5 = 5; W1h = 8; Read = 0.2; Out = 20 })   # the built-in table's row
+    # the user runs Claude in Copilot on an Anthropic API key: billed per token, not in credits
+    $p = Join-Path $dir 'c7b.jsonl'
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c7b' @((New-Request 'a' 'q' 1 @{ modelId = 'anthropic/claude-opus-5-5'; promptTokens = 1000000; completionTokens = 100000 }))) })
+    $a = Read-Chat $p
+    $a.Cost | Should -Be 6.0 -Because 'opus-5-5: 1M input at $4 plus 100K output at $20 a million'
+    $a.CostFrom | Should -Be 'tokens'
+    Format-CopilotCost $a | Should -Match ('^' + [regex]::Escape(('${0:N2}' -f 6)) + " \(tokens at the model's API price, an upper estimate")
+  }
+  It 'prices a chat that used Copilot credits from the credits, and shows its token price beside them' {
+    $script:Pricing = @(@{ Match = 'opus-5-5'; In = 4; W5 = 5; W1h = 8; Read = 0.2; Out = 20 })   # the built-in table's row
+    $p = Join-Path $dir 'c7c.jsonl'
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c7c' @((New-Request 'a' 'q' 1 @{ modelId = 'copilot/claude-opus-5-5'; promptTokens = 1000000; completionTokens = 0; sessionCopilotCredits = 300 }))) })
+    $a = Read-Chat $p
+    $a.Cost | Should -Be 3.0 -Because '300 credits at $0.01'
+    $a.CostFrom | Should -Be 'credits'
+    $t = Format-CopilotCost $a
+    $t | Should -Match '\(300 Copilot credits at \$0\.01 each\)'
+    $t | Should -Match ('its tokens at the API price: ' + [regex]::Escape(('${0:N2}' -f 4)))
+  }
+  It 'leaves COST empty for a model ctop has no price for and no credits' {
+    $p = Join-Path $dir 'c7d.jsonl'
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c7d' @((New-Request 'a' 'q' 1 @{ modelId = 'copilot/gpt-5.6-sol-gov'; promptTokens = 1000 }))) })
+    $a = Read-Chat $p
+    $a.Cost | Should -Be 0
+    Format-CopilotCost $a | Should -Be 'none recorded'
+  }
   It 'takes CTX from contextUsage when the request has it' {
     $p = Join-Path $dir 'c8.jsonl'
     Write-Chat $p @(@{ kind = 0; v = (New-Session 'c8' @((New-Request 'a' 'q' 1 @{ promptTokens = 9000; contextUsage = @{ currentTokens = 42000; tokenLimit = 200000 } }))) })
     $a = Read-Chat $p
     $a.Ctx | Should -Be 42; $a.CtxLimit | Should -Be 200000
+  }
+  It 'shows the reply''s text whole, not its last piece (an inline file reference splits it)' {
+    # seen on the user's machine (2026-11-10): LAST ACTION read "** is a PowerShell", "'s `allow_reuse_ad"
+    $p = Join-Path $dir 'c9b.jsonl'
+    $resp = @(@{ kind = 'toolInvocationSerialized'; toolId = 'copilot_readFile' }, @{ value = 'Here: **' },
+              @{ kind = 'inlineReference'; inlineReference = @{ scheme = 'file'; path = '/c:/dev/src/ctop/ctop.ps1' } },
+              @{ value = '** is a PowerShell script.' })
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c9b' @((New-Request 'a' 'q' 1 @{ response = $resp }))) })
+    (Read-Chat $p).Last | Should -Be 'Here: **ctop.ps1** is a PowerShell script.'
   }
   It 'shows a tool call as the last action, and counts tools' {
     $p = Join-Path $dir 'c9.jsonl'
@@ -262,7 +299,7 @@ Describe 'Update-CopilotRoster and New-CopilotRow' {
     }
     Put 'workspaceStorage/ws1/chatSessions/aaaaaaaa-working.jsonl' @(@{ kind = 0; v = (New-Session 'aaaaaaaa-working' @((New-Request 'a' 'fix the build' 0))) })
     Put 'workspaceStorage/ws1/chatSessions/bbbbbbbb-asks.jsonl' @(@{ kind = 0; v = (New-Session 'bbbbbbbb-asks' @((New-Request 'a' 'may I?' 4))) })
-    Put 'globalStorage/emptyWindowChatSessions/cccccccc-done.jsonl' @(@{ kind = 0; v = (New-Session 'cccccccc-done' @((New-Request 'a' 'hello' 1 @{ sessionCopilotCredits = 1.5; response = @(@{ value = 'hi there' }) }))) }) 5
+    Put 'globalStorage/emptyWindowChatSessions/cccccccc-done.jsonl' @(@{ kind = 0; v = (New-Session 'cccccccc-done' @((New-Request 'a' 'hello' 1 @{ sessionCopilotCredits = 150; response = @(@{ value = 'hi there' }) }))) }) 5
     Put 'globalStorage/emptyWindowChatSessions/dddddddd-old.jsonl' @(@{ kind = 0; v = (New-Session 'dddddddd-old' @((New-Request 'a' 'long ago' 1))) }) 180
     Put 'globalStorage/emptyWindowChatSessions/eeeeeeee-stuck.jsonl' @(@{ kind = 0; v = (New-Session 'eeeeeeee-stuck' @((New-Request 'a' 'stuck' 0))) }) 20
     Put 'globalStorage/emptyWindowChatSessions/ffffffff-empty.jsonl' @(@{ kind = 0; v = (New-Session 'ffffffff-empty' @()) })
@@ -281,7 +318,7 @@ Describe 'Update-CopilotRoster and New-CopilotRow' {
     $by['aaaaaaaa-working'].NAME | Should -Be 'copilot-aaaaaaaa'
     $by['bbbbbbbb-asks'].STATE | Should -Be 'waiting'
     $by['cccccccc-done'].STATE | Should -Be 'idle'
-    $by['cccccccc-done'].COST | Should -Be '1.5cr'
+    $by['cccccccc-done'].COST | Should -Be ('${0:N2}' -f 1.5) -Because '150 Copilot credits at $0.01 each'
     $by['cccccccc-done'].'LAST ACTION' | Should -Be 'hi there'
     $by['eeeeeeee-stuck'].STATE | Should -Be 'stalled' -Because 'Pending, and not written for 20 min'
     $by.ContainsKey('dddddddd-old') | Should -BeFalse -Because 'finished, three hours ago, outside the keep window'
@@ -302,12 +339,12 @@ Describe 'Update-CopilotRoster and New-CopilotRow' {
     $script:CopilotPending | Should -Be 0
     @($script:CopilotRows).Count | Should -Be 4
   }
-  It 'peeks and gives a contact block, with credits not dollars and no resume command' {
+  It 'peeks and gives a contact block, with dollars and the credits behind them, and no resume command' {
     Mock Get-WindowWidth { 140 }
     Update-CopilotRoster $up
     $r = New-CopilotRow (@($script:CopilotRows | Where-Object { $_.Act.SessionId -eq 'cccccccc-done' })[0]) $false
     $text = (@(Build-Peek $r) | ForEach-Object { if ($_ -is [hashtable]) { $_.Text } else { $_ } }) -join "`n"
-    $text | Should -Match '1\.5 Copilot credits \(not dollars\)'
+    $text | Should -Match ([regex]::Escape(('${0:N2}' -f 1.5)) + ' \(150 Copilot credits at \$0\.01 each\)')
     $text | Should -Match 'the chat file says: Complete'
     $text | Should -Not -Match 'claude --resume'
     $c = Format-Contact $r 'box'
@@ -379,12 +416,12 @@ Describe 'Build-Rows: a gone chat''s row follows its chat file once it is read (
   BeforeEach { Reset-Copilot; Reset-BuildRows; $env:VSCODE_APPDATA = $root; $savedPortable = $env:VSCODE_PORTABLE; $env:VSCODE_PORTABLE = $null }
   AfterEach { $env:VSCODE_APPDATA = $null; $env:VSCODE_PORTABLE = $savedPortable }
   It 'shows the final reply and credits after a read that had to wait for the budget' {
-    foreach ($n in 'aaaaaaaa-one', 'bbbbbbbb-two') { Put $n 0.25 'old reply' }
+    foreach ($n in 'aaaaaaaa-one', 'bbbbbbbb-two') { Put $n 2500 'old reply' }
     Update-CopilotRoster $down
     $rows = @(Build-Rows); $rows.Count | Should -Be 2
-    @($rows | Where-Object { $_.COST -eq '0.25cr' }).Count | Should -Be 2
+    @($rows | Where-Object { $_.COST -eq ('${0:N2}' -f 25) }).Count | Should -Be 2
     Start-Sleep -Milliseconds 20
-    foreach ($n in 'aaaaaaaa-one', 'bbbbbbbb-two') { Put $n 1.25 'final reply' }
+    foreach ($n in 'aaaaaaaa-one', 'bbbbbbbb-two') { Put $n 12500 'final reply' }
     Update-CopilotRoster $down 0        # one chat is read; the other shows its last read, and is pending
     $script:CopilotPending | Should -Be 1
     $null = @(Build-Rows)
@@ -392,7 +429,7 @@ Describe 'Build-Rows: a gone chat''s row follows its chat file once it is read (
     $script:CopilotPending | Should -Be 0
     $rows = @(Build-Rows)
     @($rows | ForEach-Object { $_.'LAST ACTION' }) | Should -Be @('final reply', 'final reply')
-    @($rows | ForEach-Object { $_.COST }) | Should -Be @('1.25cr', '1.25cr')
+    @($rows | ForEach-Object { $_.COST }) | Should -Be @(('${0:N2}' -f 125), ('${0:N2}' -f 125))
   }
   It 'builds an unchanged gone row once, and reuses it' {
     Put 'cccccccc-same' 0.5 'same reply'
@@ -422,15 +459,20 @@ Describe 'Update-CopilotRoster: unanswered chats are looked for back 7 days, and
   BeforeEach { Reset-Copilot; $env:VSCODE_APPDATA = $root; $savedPortable = $env:VSCODE_PORTABLE; $env:VSCODE_PORTABLE = $null }
   AfterEach { $env:VSCODE_APPDATA = $null; $env:VSCODE_PORTABLE = $savedPortable }
   It 'lists an unanswered chat from 6 days ago, and does not read one from 8 days ago' {
-    Update-CopilotRoster $up
+    Update-CopilotRoster $up ([int]::MaxValue)   # no time limit: on a cold start the budget ran out before the 6-day chat
     @($script:CopilotRows | ForEach-Object { $_.Act.SessionId }) | Should -Be @('aaaaaaaa-6days')
     $f8 = Get-Item (Join-Path $user 'globalStorage/emptyWindowChatSessions/bbbbbbbb-8days.jsonl')
     $script:CopilotFiles.ContainsKey($f8.FullName) | Should -BeFalse -Because 'older than 7 days and outside the keep window: not read'
   }
-  It 'lists the 8-day-old one once the keep window reaches back that far' {
+  It 'lists the 8-day-old one as gone, not live, once the keep window reaches back that far' {
+    # seen on the user's machine (2026-11-10, -Keep inf): unanswered chats from 24 to 84 days ago were
+    # listed as live (waiting, stalled), though live means written in the last 7 days
     $script:KeepMin = 14 * 1440
-    Update-CopilotRoster $up
-    @($script:CopilotRows | Where-Object { -not $_.GoneAt } | ForEach-Object { $_.Act.SessionId } | Sort-Object) | Should -Be @('aaaaaaaa-6days', 'bbbbbbbb-8days')
+    Update-CopilotRoster $up ([int]::MaxValue)
+    @($script:CopilotRows | Where-Object { -not $_.GoneAt } | ForEach-Object { $_.Act.SessionId }) | Should -Be @('aaaaaaaa-6days')
+    $old = @($script:CopilotRows | Where-Object { $_.Act.SessionId -eq 'bbbbbbbb-8days' })
+    $old.Count | Should -Be 1
+    (New-CopilotRow $old[0] $false).STATE | Should -Match '^gone 8d'
   }
   It 'counts the megabytes still to read while it catches up, and clears the count when done' {
     Update-CopilotRoster $up 0
