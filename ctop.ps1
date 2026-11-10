@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.10.2 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.10.3 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -136,7 +136,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.10.2'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.10.3'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -2062,11 +2062,21 @@ function Get-ChatSummary($session) {
   return $out
 }
 
-# One chat file, read again only when it changes: a .jsonl that only grew is replayed from where the last
-# read stopped (whole lines only: a line still being written waits for the next read); one that shrank or
-# starts differently (VS Code compacted it) is read from the start. A failed read is remembered for that
+# One chat file, read again only when it changes: a .jsonl that was only appended to is replayed from where
+# the last read stopped (whole lines only: a line still being written waits for the next read); any other
+# change (VS Code compacted it) is read from the start. A failed read is remembered for that
 # version of the file, like Cline's (Test-ClineFresh), and a file that could not be opened is retried.
-$script:CopilotFiles = @{}   # path -> @{ Length; Write; Offset; Head; Session; Result; Failed; RetryAt }
+$script:CopilotFiles = @{}   # path -> @{ Length; Write; Offset; Prefix; Session; Result; Failed; RetryAt }
+# SHA-256 of a byte array's first $count bytes, as Base64; '' if no SHA-256 is available (every read is
+# then a full one). Windows PowerShell 5.1 under a FIPS policy refuses the managed class, so the
+# CryptoServiceProvider one is the fallback.
+function Get-BytesHash([byte[]]$bytes, [int]$count) {
+  $h = $null
+  try { $h = [Security.Cryptography.SHA256]::Create() } catch { }
+  if (-not $h) { try { $h = New-Object Security.Cryptography.SHA256CryptoServiceProvider } catch { } }
+  if (-not $h) { return '' }
+  try { return [Convert]::ToBase64String($h.ComputeHash($bytes, 0, $count)) } catch { return '' } finally { $h.Dispose() }
+}
 $script:CopilotMaxBytes = 64MB
 function Read-CopilotChat([IO.FileInfo]$f, [switch]$CachedOnly) {
   $c = $script:CopilotFiles[$f.FullName]
@@ -2075,47 +2085,45 @@ function Read-CopilotChat([IO.FileInfo]$f, [switch]$CachedOnly) {
   $prev = if ($c) { $c.Result } else { $null }
   # a failed read keeps the last result to show, and drops the replayed session: a replay that stopped
   # part-way may have changed it, so the next read starts over from the beginning
-  $fail = { param($retry) $script:CopilotFiles[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Offset = 0; Head = ''; Session = $null; Result = $prev; Failed = $true; RetryAt = $retry }; $prev }
+  $fail = { param($retry) $script:CopilotFiles[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Offset = 0; Prefix = ''; Session = $null; Result = $prev; Failed = $true; RetryAt = $retry }; $prev }
   if ($f.Length -gt $(if ($script:CopilotMaxBytes) { $script:CopilotMaxBytes } else { 64MB })) { return (& $fail $null) }
   try {
     if ($f.Extension -eq '.json') {
       $session = ConvertFrom-Json -InputObject (Read-SharedText $f.FullName) -ErrorAction Stop
       $res = Get-ChatSummary $session
-      $script:CopilotFiles[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Offset = $f.Length; Head = ''; Session = $null; Result = $res }
+      $script:CopilotFiles[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Offset = $f.Length; Prefix = ''; Session = $null; Result = $res }
       return $res
     }
-    $session = $null; $from = 0L
-    if ($c -and $c.Session -and $f.Length -ge $c.Offset -and $c.Head -and (Test-SameHead $f.FullName $c.Head)) { $session = $c.Session; $from = [long]$c.Offset }
+    # The whole file is read each time it changes; only what follows the offset is parsed. What was read
+    # before is reused only if the file still starts with exactly those bytes (their SHA-256 matches): that
+    # is what an append is. Any rewrite, even one exactly as long as the offset and followed by an append
+    # (VS Code compacts the log into one new initial entry; Sol, step 3 rounds 2 and 3, F2), is replayed
+    # from the start.
+    $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
+    try {
+      $buf = New-Object byte[] $fs.Length; $n = 0
+      while ($n -lt $buf.Length) { $r = $fs.Read($buf, $n, $buf.Length - $n); if ($r -le 0) { break }; $n += $r }
+    } finally { $fs.Dispose() }
+    $session = $null; $from = 0
+    if ($c -and $c.Session -and $c.Prefix -and $c.Offset -gt 0 -and $n -ge $c.Offset -and
+        (Get-BytesHash $buf ([int]$c.Offset)) -ceq $c.Prefix) { $session = $c.Session; $from = [int]$c.Offset }
+    if ($from -gt 0 -and $n -eq $from) {
+      # nothing new: the same bytes, written again
+      $c.Length = $f.Length; $c.Write = $f.LastWriteTimeUtc; $c.Failed = $null; $c.RetryAt = $null
+      return $c.Result
+    }
+    $end = $n - 1; while ($end -ge $from -and $buf[$end] -ne 10) { $end-- }   # the last whole line ends here
     while ($true) {
-      # an append keeps what was read: the byte before the offset is still the newline that ended the last
-      # line read, and something follows it. Otherwise the file was rewritten, here or before the offset,
-      # with the same first bytes (VS Code compacts it into one new initial entry; Sol, step 3 round 2, F2):
-      # read it whole
-      $at = if ($from -gt 0) { $from - 1 } else { 0L }
-      $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
       try {
-        $null = $fs.Seek($at, 'Begin')
-        $buf = New-Object byte[] ([math]::Max(0, $fs.Length - $at)); $n = 0
-        while ($n -lt $buf.Length) { $r = $fs.Read($buf, $n, $buf.Length - $n); if ($r -le 0) { break }; $n += $r }
-      } finally { $fs.Dispose() }
-      if ($from -gt 0) {
-        if ($n -lt 2 -or $buf[0] -ne 10) { $session = $null; $from = 0L; continue }
-        $n--; $tail = New-Object byte[] $n; [Array]::Copy($buf, 1, $tail, 0, $n); $buf = $tail
-      }
-      $end = $n - 1; while ($end -ge 0 -and $buf[$end] -ne 10) { $end-- }   # the last whole line ends here
-      try {
-        if ($end -lt 0) {
+        if ($end -lt $from) {
           if ($from -eq 0 -and $n -gt 0) {
             # one line with no newline yet: a whole kind 0 the writer has not finished, or one that is complete
             $text = [Text.Encoding]::UTF8.GetString($buf, 0, $n); $e = ConvertFrom-Json -InputObject $text -ErrorAction Stop
             if ([int]$e.kind -eq 0) { $session = $e.v; $end = $n - 1 } else { return (& $fail $null) }
-          } elseif ($from -gt 0 -and $n -gt 0 -and $buf[0] -ne 123) {
-            # no whole line after the offset, and what is there does not start one ('{'): not an append still
-            # being written, but a replaced file whose first line runs past the offset
-            throw 'not an append'
-          } elseif ($c) { return $c.Result } else { return (Get-ChatSummary $null) }
+          } elseif ($from -gt 0) { return $c.Result }   # an appended line still being written
+          else { return (Get-ChatSummary $null) }       # an empty file
         } else {
-          $text = [Text.Encoding]::UTF8.GetString($buf, 0, $end + 1)
+          $text = [Text.Encoding]::UTF8.GetString($buf, $from, $end + 1 - $from)
           foreach ($line in $text.Split([char]10)) {
             if (-not $line.Trim()) { continue }
             $e = ConvertFrom-Json -InputObject $line -ErrorAction Stop
@@ -2124,16 +2132,15 @@ function Read-CopilotChat([IO.FileInfo]$f, [switch]$CachedOnly) {
         }
         break
       } catch {
-        # what follows the offset is not whole lines: VS Code replaced the file (compacted it into one new
-        # initial entry) with one that starts the same and is longer than what was read. Read it whole, once;
-        # only a file that fails that too is remembered as broken (Sol, step 3 F2).
-        if ($from -gt 0) { $session = $null; $from = 0L; continue }
+        # an appended line that is not JSON: replay the whole file once before calling it broken (the
+        # replayed session may have been changed part-way)
+        if ($from -gt 0) { $session = $null; $from = 0; $end = $n - 1; while ($end -ge 0 -and $buf[$end] -ne 10) { $end-- }; continue }
         throw
       }
     }
     $res = Get-ChatSummary $session
-    $script:CopilotFiles[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Offset = $from + $end + 1
-                                           Head = $(if ($from -eq 0) { Get-HeadPrint $f.FullName } else { $c.Head }); Session = $session; Result = $res }
+    $script:CopilotFiles[$f.FullName] = @{ Length = $f.Length; Write = $f.LastWriteTimeUtc; Offset = $end + 1
+                                           Prefix = (Get-BytesHash $buf ($end + 1)); Session = $session; Result = $res }
     return $res
   } catch {
     # could not be opened (locked): try again in a few seconds; anything else (not JSON): when it changes
@@ -2249,7 +2256,7 @@ function Update-CopilotRoster([scriptblock]$running = ${function:Test-VSCodeRunn
       $unfinished = $act.ChatState -in 0, 4
       if ($old -and -not $unfinished) {
         $c = $script:CopilotFiles[$f.FullName]
-        if ($c -and $c.Session) { $c.Session = $null; $c.Offset = 0; $c.Head = '' }   # a change is read from the start
+        if ($c -and $c.Session) { $c.Session = $null; $c.Offset = 0; $c.Prefix = '' }   # a change is read from the start
         continue
       }
       if ($null -eq $act.ChatState -and -not $act.Turns) { continue }   # an empty chat: nothing asked yet

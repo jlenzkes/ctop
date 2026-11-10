@@ -182,6 +182,28 @@ Describe 'Read-CopilotChat (replaying the mutation log)' {
     $a.ChatState | Should -Be 1
     $a.Last | Should -Be 'bbbb'
   }
+  It 'reads a rewrite exactly as long as what was read, followed by an append, from the start (Sol, step 3 round 3, F2)' {
+    # Sol's case: the old log is an initial entry plus mutations; VS Code compacts it into one initial entry
+    # with its newline, exactly as long as the offset read up to, then appends a line before ctop reads
+    # again. The start, the newline before the offset and the appended line all look like an append.
+    $p = Join-Path $dir 'c4f.jsonl'
+    $t = Now-Ms 30
+    $sess = { param($state, $resp, $pad) [ordered]@{ version = 3; sessionId = 'c4f'; creationDate = $t; customTitle = ('t' * 300)
+                                                     requests = @((New-Request 'a' 'question' $state @{ response = @($resp); pad = $pad })) } }
+    $entries = @([ordered]@{ kind = 0; v = (& $sess 0 @{ value = 'partial' } '') })
+    for ($i = 1; $i -le 60; $i++) { $entries += [ordered]@{ kind = 1; k = @('requests', 0, 'completionTokens'); v = $i } }
+    Write-Chat $p $entries
+    (Read-Chat $p).ChatState | Should -Be 0
+    $off = [int]$script:CopilotFiles[(Get-Item $p).FullName].Offset
+    $base = (J ([ordered]@{ kind = 0; v = (& $sess 1 @{ value = 'final answer' } '') })).Length
+    $line = J ([ordered]@{ kind = 0; v = (& $sess 1 @{ value = 'final answer' } ('p' * ($off - 1 - $base))) })
+    ($line.Length + 1) | Should -Be $off -Because 'the rewrite must end exactly at the old offset'
+    [IO.File]::WriteAllText($p, $line + "`n" + (J ([ordered]@{ kind = 1; k = @('customTitle'); v = 'renamed' })) + "`n")
+    $a = Read-Chat $p
+    $a.ChatState | Should -Be 1
+    $a.Last | Should -Be 'final answer'
+    $a.Title | Should -Be 'renamed'
+  }
   It 'keeps the last good read of a broken file, and does not parse that version again' {
     $p = Join-Path $dir 'c5.jsonl'
     Write-Chat $p @(@{ kind = 0; v = (New-Session 'c5' @((New-Request 'a' 'good' 1))) })

@@ -2,6 +2,14 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.10.3 — Sol's round 3 of step 3: F2
+
+- a Copilot chat file is taken as appended to only if it still starts with exactly the bytes read before
+  (their SHA-256 matches); anything else is read from the start. Sol's case got past every earlier check: a
+  rewrite exactly as long as what was read, ending in a newline, then a new line appended before ctop read
+  again. Each change to a chat file now reads the whole file (65 to 115 ms for a 27 MB chat, PowerShell 7 on
+  Linux); only what follows the old offset is parsed
+
 ## 2026.11.10.2 — Sol's round 2 of step 3: F3
 
 - unanswered Copilot chats older than an hour are looked for in the last 7 days, not in every chat ever
