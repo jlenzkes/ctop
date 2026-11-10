@@ -839,7 +839,8 @@ Describe 'the worker process' -Tag Integration -Skip:$script:noTmux {
       $w = Get-WorkerPid $s
       $w | Should -Not -BeNullOrEmpty -Because 'ctop runs a worker by default'
       & kill -9 $w
-      Wait-Screen $s 'worker stopped .*running in one process' 10 | Should -Not -BeNullOrEmpty
+      # killed mid-frame, the display reads half a frame first and says so instead (CI run 97, debian 12)
+      Wait-Screen $s '(worker stopped|worker sent an unreadable frame).*running in one process' 10 | Should -Not -BeNullOrEmpty
       Wait-Screen $s '(?m)^live-one ' 10 | Should -Not -BeNullOrEmpty
       & tmux send-keys -t $s '+'                                      # and it still answers keys
       Wait-Screen $s 'keep 30m' 5 | Should -Not -BeNullOrEmpty
