@@ -103,6 +103,17 @@ Flaky tests are listed separately in `CLAUDE.md` ("Flaky tests seen in CI").
 - **Why deferred:** the user chose a 7-day horizon plus a progress cell over a background reader (2026-11-10).
 - **Possible fix:** read Copilot chats on a background thread (a runspace, since `Start-ThreadJob` may be missing on 5.1), and remember finished chats between runs.
 
+### D14. The `copilot` progress cell counts attempted reads, not unique bytes
+- **Source:** Sol, step 3 round 3 (`SOL_STEP3_ROUND3_VALIDATION.md`), "Accounting limits".
+- **Where:** `Update-CopilotRoster` (the end, where `$script:CopilotScan` is kept) and `Format-CopilotScan`.
+- **What happens:**
+  - A file read again counts again, and can grow the total.
+  - A read that failed on a lock still counts as done. The cell can go before that file's retry is due.
+  - A file that shrank or was deleted keeps the total at its high point, so the cell can go before 100%.
+  - Sol found no overflow, no total that drops during a catch-up, and no cell that stays after the reading is done.
+- **Why deferred:** Sol judged these display limits within the chosen F3 scope.
+- **Possible fix:** count each file version once, by path, length and write time, and leave failed reads out of the done count.
+
 ## Not yet checked (not bugs)
 
 - **Cline's `cost`:** that it is in dollars is inference. Whether it equals the manifest's `metadata.totalCost` is unverified. A probe run that prints both would settle it.
