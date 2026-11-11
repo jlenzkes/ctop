@@ -276,7 +276,17 @@ Describe 'Read-CopilotChat (replaying the mutation log)' {
       (New-Request 'b' 'q' 1 @{ modelId = 'copilot/gpt-5.6-sol-gov'; promptTokens = 5000; completionTokens = 500 }))) })
     $a = Read-Chat $p
     $a.Cost | Should -Be 4.0
-    Format-CopilotCost $a | Should -Match '1 of 2 turns.*no price'
+    Format-CopilotCost $a | Should -Match '1 of 2 turns had usage on a model with no price'
+  }
+  It 'counts a turn that used a priced and an unpriced model once (Sol, step 3 round 6)' {
+    $script:Pricing = @(@{ Match = 'opus-5-5'; In = 4; W5 = 5; W1h = 8; Read = 0.2; Out = 20 })
+    $mixed = { @(@{ model = 'claude-opus-5-5'; inputTokens = 1000; cachedTokens = 0; outputTokens = 0 }, @{ model = 'gpt-5.6-sol-gov'; inputTokens = 1000; cachedTokens = 0; outputTokens = 0 }) }
+    $p = Join-Path $dir 'c7h.jsonl'
+    Write-Chat $p @(@{ kind = 0; v = (New-Session 'c7h' @((New-Request 'a' 'q' 1 @{ modelTotals = (& $mixed) }))) })
+    Format-CopilotCost (Read-Chat $p) | Should -Match 'partial: 1 of 1 turns'
+    $p2 = Join-Path $dir 'c7i.jsonl'
+    Write-Chat $p2 @(@{ kind = 0; v = (New-Session 'c7i' @((New-Request 'a' 'q' 1 @{ modelTotals = (& $mixed) }), (New-Request 'b' 'q' 1 @{ modelTotals = (& $mixed) }))) })
+    Format-CopilotCost (Read-Chat $p2) | Should -Match 'partial: 2 of 2 turns'
   }
   It 'leaves COST empty for a model ctop has no price for and no credits' {
     $p = Join-Path $dir 'c7d.jsonl'

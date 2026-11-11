@@ -2,6 +2,11 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.10.7 — Sol's round 6
+
+- peek's note on turns with usage on a model ctop has no price for counts each turn once: a turn on a
+  priced and an unpriced model read as two ("1 of 2 turns" for one turn)
+
 ## 2026.11.10.6 — Sol's round 5
 
 - a Copilot chat's token price uses each turn's whole usage per model where VS Code records it
