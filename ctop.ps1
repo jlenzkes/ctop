@@ -678,7 +678,7 @@ $script:PriceFrom = 'the built-in table, read 2026-10-20 (-PricingFile for your 
 # 2: titles are unescaped (\" was kept literally)
 # 3: a prompt that mentions tool_result counts as a turn (it was taken for a tool result)
 # 4: a first prompt needs three letters in a row of any script to be the title, not three ASCII letters
-$script:ScanVer = 4
+$script:ScanVer = 5
 $script:Pricing = @(
   @{ Match = 'fable-5-1|mythos-5-1'; In = 10;  W5 = 12.5;  W1h = 20;  Read = 0.25; Out = 50 }
   @{ Match = 'fable-5|mythos-5';     In = 10;  W5 = 12.5;  W1h = 20;  Read = 1;    Out = 50 }
@@ -832,7 +832,8 @@ function New-ScanState([System.IO.FileInfo]$file) {
   @{ Path = $file.FullName; Head = (Get-HeadPrint $file.FullName)
      PriceVer = $script:PriceVer; ScanVer = $script:ScanVer; Offset = 0; Turns = 0; Tools = 0; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0;
      LastId = ''; LastCost = 0.0; LastOut = 0; Model = '-'; AiTitle = ''; Summary = ''; Title = ''; First = ''; MsgSummary = ''; Cwd = ''; GitBranch = ''; ToolCounts = @{}
-     Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; ToolLog = @() }
+     Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; ToolLog = @()
+     CacheAnchor = ''; CacheAnchorId = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = '' }
 }
 function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
   $st = $script:ScanCache[$key]
@@ -892,6 +893,8 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
         if ($line -match '"timestamp":"([^"]+)"') { try { $st.LastCompactAt = [datetime]$Matches[1] } catch {} }
         if ($line -match '"trigger":"([^"]+)"') { $st.LastCompactTrigger = $Matches[1] }
         if ($line -match '"preTokens":(\d+)') { $st.LastCompactPreTokens = [long]$Matches[1] }
+        $cts = Get-EntryTimestamp $tailPart
+        if ($cts) { $st.CacheCompactAt = $cts }
         continue
       }
       if ($line.Contains('"type":"ai-title"')) {
@@ -945,6 +948,8 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
           $cr  = if ($line -match '"cache_read_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
           $cw  = if ($line -match '"cache_creation_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
           $cw1h = if ($line -match '"ephemeral_1h_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
+          $cw5m = if ($line -match '"ephemeral_5m_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
+          Update-CacheAnchor $st (Get-EntryTimestamp $tailPart) $id $in $cr $cw $cw1h $cw5m
           $cw5 = [math]::Max(0, $cw - $cw1h)
           $price = Get-Price $st.Model ($in + $cr + $cw)
           $c = if ($price) { ($in * $price.In + $out * $price.Out + $cr * $price.Read + $cw5 * $price.W5 + $cw1h * $price.W1h) / 1e6 } else { 0.0 }
@@ -960,6 +965,54 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
     }
   } catch {} finally { if ($fs) { $fs.Dispose() } }
   return $st
+}
+
+# The entry's own timestamp: the last one in the line's tail (entry-level fields follow the message body).
+function Get-EntryTimestamp([string]$tail) {
+  $ms = [regex]::Matches($tail, '"timestamp":"([^"]+)"')
+  if ($ms.Count) { return $ms[$ms.Count - 1].Groups[1].Value }
+  return ''
+}
+# The prompt cache, by the rule of the Claude Code extension for VS Code (anthropic.claude-code-2.1.323,
+# webview/index.js, read 2026-11-13): anchored on the last model call (lines of one message keep the first
+# one's time); 1h or 5m from that call's cache writes, the previous TTL when it only read the cache, unknown
+# when it used none; a compaction makes it cold until a later call.
+function Update-CacheAnchor($st, [string]$ts, [string]$id, [long]$in, [long]$cr, [long]$cw, [long]$w1h, [long]$w5m) {
+  $same = $id -and $id -ceq $st.CacheAnchorId
+  if (-not ($same -and $st.CacheAnchor) -and $ts) { $st.CacheAnchor = $ts }
+  $st.CacheAnchorId = $id
+  if ($cr + $cw -gt 0) { if ($w1h -gt 0) { $st.CacheTtl = '1h' } elseif ($w5m -gt 0) { $st.CacheTtl = '5m' } }
+  else { $st.CacheTtl = '' }
+  $st.RecacheTok = $in + $cr + $cw
+  if ($st.CacheCompactAt -and -not $same) {
+    $t = ConvertFrom-CacheTime $ts; $c = ConvertFrom-CacheTime $st.CacheCompactAt
+    if ($t -and $c -and $t -gt $c) { $st.CacheCompactAt = '' }
+  }
+}
+function ConvertFrom-CacheTime([string]$ts) {
+  if (-not $ts) { return $null }
+  $d = [DateTimeOffset]::MinValue
+  if ([DateTimeOffset]::TryParse($ts, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$d)) { return $d.UtcDateTime }
+  return $null
+}
+# warm / cold / unknown at $now, as the extension decides it. $act: anything with the Cache* fields.
+function Get-CacheState($act, [datetime]$now) {
+  if (-not $act) { return @{ Kind = 'unknown' } }
+  $now = $now.ToUniversalTime()
+  $tok = [long]$act.RecacheTok
+  $c = ConvertFrom-CacheTime ([string]$act.CacheCompactAt)
+  if ($c) { return @{ Kind = 'cold'; Reason = 'compacted'; IdleMs = [math]::Max(0.0, ($now - $c).TotalMilliseconds); RecacheTokens = 0 } }
+  $a = ConvertFrom-CacheTime ([string]$act.CacheAnchor)
+  $ttl = [string]$act.CacheTtl
+  if (-not $a -or $ttl -notin '1h', '5m') { return @{ Kind = 'unknown' } }
+  $len = if ($ttl -eq '1h') { 3600000.0 } else { 300000.0 }
+  $left = [math]::Min($len, $len - ($now - $a).TotalMilliseconds)
+  if ($left -gt 0) { return @{ Kind = 'warm'; Ttl = $ttl; MsLeft = $left; MinutesLeft = [math]::Ceiling($left / 60000); RecacheTokens = $tok; Anchor = $a } }
+  return @{ Kind = 'cold'; Reason = 'expired'; Ttl = $ttl; IdleMs = ($now - $a).TotalMilliseconds; RecacheTokens = $tok; Anchor = $a }
+}
+function Format-CacheCell($state) {
+  if (-not $state) { return '-' }
+  switch ($state.Kind) { 'warm' { return "$($state.MinutesLeft)m" } 'cold' { return 'cold' } default { return '-' } }
 }
 
 # Read the tail of the transcript and summarize the last assistant action.
@@ -983,7 +1036,7 @@ function Read-TailLines([string]$path, [int]$bytes) {
 }
 
 function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
-  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $null; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0 }
+  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $null; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; CacheAnchor = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = '' }
   if (-not $file) { return $out }
   $stamp = $script:TailCache[$sessionId]
   # the same file, unchanged: a session's transcript can become another file (it follows the cwd)
@@ -1154,6 +1207,7 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
   $out.ToolLog = @($sc.ToolLog)
   $out.GitBranch = $sc.GitBranch
   $out.Compacts = $sc.Compacts; $out.LastCompactAt = $sc.LastCompactAt; $out.LastCompactTrigger = $sc.LastCompactTrigger; $out.LastCompactPreTokens = $sc.LastCompactPreTokens
+  $out.CacheAnchor = $sc.CacheAnchor; $out.CacheTtl = $sc.CacheTtl; $out.RecacheTok = $sc.RecacheTok; $out.CacheCompactAt = $sc.CacheCompactAt
   $out.ToolMix = ($sc.ToolCounts.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ' · '
   # newest message was synthetic: its zero usage must not mask the context size; take CTX from
   # the newest real assistant entry in the tail
@@ -1728,7 +1782,7 @@ function Read-ClineManifests([string]$dir, [int]$budgetMs = [int]::MaxValue) {
 $script:ClineMsgCache = @{}   # path -> @{ Length; Write; Result }
 # -CachedOnly: no read; the last result (even of an older version of the file), or $null if there is none.
 function Read-ClineMessages([string]$path, [switch]$CachedOnly) {
-  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0 }
+  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; CacheAnchor = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = '' }
   if (-not $path) { return $out }
   $f = $null; try { $f = [IO.FileInfo]::new($path) } catch { return $out }
   if (-not $f.Exists) { return $out }
