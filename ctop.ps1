@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.10.7 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.1 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -136,7 +136,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.10.7'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.1'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -4044,14 +4044,29 @@ namespace CtopCon {
       if (!GetNumberOfConsoleInputEvents(In, out n) || n == 0) return list.ToArray();
       var buf = new INPUT_RECORD[Math.Min(n, 64u)]; uint got;
       if (!ReadConsoleInput(In, buf, (uint)buf.Length, out got)) return list.ToArray();
-      for (int i = 0; i < got; i++) {
-        var r = buf[i];
-        if (r.EventType == 1 && r.Key.bKeyDown != 0)
-          list.Add(new Ev { Kind = 1, Vk = r.Key.wVirtualKeyCode, Ch = (char)r.Key.UnicodeChar, Ctrl = r.Key.dwControlKeyState, Repeat = Math.Max(1, (int)r.Key.wRepeatCount) });
-        else if (r.EventType == 2)
-          list.Add(new Ev { Kind = 2, X = r.Mouse.X, Y = r.Mouse.Y, Buttons = r.Mouse.dwButtonState, Flags = r.Mouse.dwEventFlags });
-      }
+      for (int i = 0; i < got; i++) { Ev e = ConvertRecord(buf[i]); if (e != null) list.Add(e); }
       return list.ToArray();
+    }
+    // One console record as ctop's event, or null for a record that is no command (from cxtop 2026.11.06.2).
+    public static Ev ConvertRecord(INPUT_RECORD r) {
+      if (r.EventType == 2)
+        return new Ev { Kind = 2, X = r.Mouse.X, Y = r.Mouse.Y, Buttons = r.Mouse.dwButtonState, Flags = r.Mouse.dwEventFlags };
+      if (r.EventType != 1) return null;
+      ushort vk = r.Key.wVirtualKeyCode;
+      bool altKey = vk == 0x12 || vk == 0xa4 || vk == 0xa5;
+      if (r.Key.bKeyDown == 0) {
+        // Alt+numpad, an IME and some pastes deliver the finished character on Alt's release, with no key-down
+        if (!altKey || r.Key.UnicodeChar == 0) return null;
+        return new Ev { Kind = 1, Vk = 0, Ch = (char)r.Key.UnicodeChar, Repeat = 1 };
+      }
+      // a modifier or lock key on its own: Shift, Ctrl, Alt, Caps/Num/Scroll Lock, left and right variants
+      if ((vk >= 0x10 && vk <= 0x12) || vk == 0x14 || vk == 0x90 || vk == 0x91 || (vk >= 0xa0 && vk <= 0xa5)) return null;
+      if ((r.Key.dwControlKeyState & 0x3u) != 0) {
+        // the digits of Alt+numpad composition (and numpad navigation keys with NumLock off) are no commands
+        if (vk >= 0x60 && vk <= 0x69) return null;
+        if ((r.Key.dwControlKeyState & 0x100u) == 0 && (vk == 0x0c || vk == 0x2d || (vk >= 0x21 && vk <= 0x28))) return null;
+      }
+      return new Ev { Kind = 1, Vk = vk, Ch = (char)r.Key.UnicodeChar, Ctrl = r.Key.dwControlKeyState, Repeat = Math.Max(1, (int)r.Key.wRepeatCount) };
     }
   }
 }
@@ -4074,17 +4089,29 @@ function Enable-Mouse {
 function Disable-Mouse { if ($null -ne $script:ConModeOld) { try { [CtopCon.Con]::Restore($script:ConModeOld) } catch {} } }
 # One queue for keys and mouse: Next-Input returns a ConsoleKeyInfo, a CtopCon.Ev (mouse), or $null.
 $script:InQ = [System.Collections.Generic.Queue[object]]::new()
+# A console key record as a ConsoleKeyInfo, or $null. ConsoleKey names only some key codes, and casting any
+# other (a lone Alt is 18) throws, which stopped ctop: such a key keeps its character with key None, or is
+# dropped when it has none.
+function ConvertFrom-ConsoleKeyEvent($e) {
+  $vk = [int]$e.Vk
+  $key = [Enum]::ToObject([ConsoleKey], 0)
+  if ([Enum]::IsDefined([ConsoleKey], $vk)) { $key = [ConsoleKey]$vk }
+  elseif ([char]$e.Ch -eq [char]0) { return $null }
+  [ConsoleKeyInfo]::new([char]$e.Ch, $key, (($e.Ctrl -band 0x10) -ne 0), (($e.Ctrl -band 0x3) -ne 0), (($e.Ctrl -band 0xC) -ne 0))
+}
+function Add-ConsoleInputEvents($events) {
+  foreach ($e in $events) {
+    if ($e.Kind -eq 1) {
+      $ki = ConvertFrom-ConsoleKeyEvent $e
+      if ($null -eq $ki) { continue }
+      for ($r = 0; $r -lt [math]::Min($e.Repeat, 10); $r++) { $script:InQ.Enqueue($ki) }
+    } else { $script:InQ.Enqueue($e) }
+  }
+}
 function Next-Input {
   if ($script:InQ.Count -eq 0) {
-    if ($script:Mouse) {
-      foreach ($e in [CtopCon.Con]::Read()) {
-        if ($e.Kind -eq 1) {
-          $sh = ($e.Ctrl -band 0x10) -ne 0; $alt = ($e.Ctrl -band 0x3) -ne 0; $ctl = ($e.Ctrl -band 0xC) -ne 0
-          $ki = [ConsoleKeyInfo]::new($e.Ch, [ConsoleKey][int]$e.Vk, $sh, $alt, $ctl)
-          for ($r = 0; $r -lt [math]::Min($e.Repeat, 10); $r++) { $script:InQ.Enqueue($ki) }
-        } else { $script:InQ.Enqueue($e) }
-      }
-    } elseif ([Console]::KeyAvailable) { $script:InQ.Enqueue([Console]::ReadKey($true)) }
+    if ($script:Mouse) { Add-ConsoleInputEvents ([CtopCon.Con]::Read()) }
+    elseif ([Console]::KeyAvailable) { $script:InQ.Enqueue([Console]::ReadKey($true)) }
   }
   if ($script:InQ.Count) { return $script:InQ.Dequeue() }
   return $null
@@ -4297,6 +4324,16 @@ function New-View {
 # One key against the view and the last frame drawn (its row ids, page size). Returns what the loop must
 # do beyond redrawing: quit, help, closed (the log), poll, or copy-<t|y|n|d>; $null for nothing more.
 function Apply-Key($view, $k, $packet) {
+  # Commands are plain keys (Shift only picks punctuation). An Alt or Ctrl chord belongs to the terminal or
+  # the OS: Alt+q must not quit. AltGr (reported as Alt+Ctrl) types a character, such as ] on a German
+  # keyboard, and that character is taken as typed.
+  $mods = $k.Modifiers -band ([ConsoleModifiers]::Alt -bor [ConsoleModifiers]::Control)
+  if ($mods) {
+    $altGrText = $mods -eq ([ConsoleModifiers]::Alt -bor [ConsoleModifiers]::Control) -and -not [char]::IsControl($k.KeyChar) -and
+                 -not [char]::IsLetterOrDigit($k.KeyChar)
+    if (-not $altGrText) { return $null }
+    $k = [ConsoleKeyInfo]::new($k.KeyChar, [Enum]::ToObject([ConsoleKey], 0), $false, $false, $false)
+  }
   $ids = @($packet.Ids); $idx = [array]::IndexOf($ids, [string]$view.SelectedId); $page = [math]::Max(1, [int]$packet.PageRows)
   $to = $null
   switch ($k.Key) {

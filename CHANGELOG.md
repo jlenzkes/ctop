@@ -2,6 +2,16 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.1 — keys that stopped ctop
+
+- pressing Shift, Ctrl, Alt, Caps Lock, Num Lock or Scroll Lock on its own no longer stops ctop on Windows
+  with the mouse on ("Cannot convert value "18" to type "System.ConsoleKey""): the console reports those
+  keys by codes .NET's ConsoleKey has no name for. A key with no name keeps its character; one with neither
+  is dropped. The digits typed while composing a character with Alt and the number pad are no longer read
+  as commands, and the character they compose arrives as typed. Ported from cxtop 2026.11.06.1 and .2.
+- Alt and Ctrl chords no longer act as commands (Alt+q quit ctop). AltGr text still works: AltGr+9 on a
+  German keyboard types `]` and shortens the tick, as `]` does.
+
 ## 2026.11.10.7 — Sol's round 6
 
 - peek's note on turns with usage on a model ctop has no price for counts each turn once: a turn on a
