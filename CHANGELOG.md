@@ -2,6 +2,17 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.2 — more from cxtop
+
+- the files ctop reads are opened so that their owners can still rename or delete them meanwhile:
+  transcripts, session files, Cline and Copilot files, and git's `HEAD` (git renames `HEAD.lock` over it).
+  Before, a rename or delete by Claude Code, VS Code or git failed on Windows for as long as ctop held the
+  file (seen in a test with a held handle; not seen happening to those programs)
+- `-HighlightModel` must be a valid regular expression and `-SelectBg` an SGR code (digits and `;`); ctop
+  refuses others at the start, naming the flag. A bad pattern used to stop ctop at its first session row
+- the scan cache is written to a temporary file and renamed over the old one, so a kill mid-save no longer
+  leaves a truncated cache that makes ctop rescan everything
+
 ## 2026.11.13.1 — keys that stopped ctop
 
 - pressing Shift, Ctrl, Alt, Caps Lock, Num Lock or Scroll Lock on its own no longer stops ctop on Windows

@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.1 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.2 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -124,8 +124,9 @@ param(
   [ValidateSet('wrap','truncate')][string]$Layout = 'wrap',
   [int]$WrapLines = 2,
   [int]$MaxWidth = 0,
+  [ValidateScript({ try { $null = [regex]::new($_); $true } catch { throw "not a valid regular expression: $($_.Exception.Message)" } })]
   [string]$HighlightModel = 'fable|mythos',
-  [string]$SelectBg = '48;5;238',
+  [ValidatePattern('^[0-9;]*$')][string]$SelectBg = '48;5;238',
   [string]$ClosedLog = '',
   [switch]$NoColor,
   [switch]$All,
@@ -136,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.1'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.2'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -552,7 +553,7 @@ function Get-SessionTitle([string]$sessionId, [System.IO.FileInfo]$file) {
       if (-not $c -or $c.Write -ne $fi.LastWriteTimeUtc) {
         $map = @{}
         try {
-          $j = Get-Content -LiteralPath $ip -Raw | ConvertFrom-Json
+          $j = Read-SharedText $ip | ConvertFrom-Json
           $entries = if ($j -is [array]) { $j } elseif ($j.sessions) { $j.sessions } elseif ($j.entries) { $j.entries } else { @($j) }
           foreach ($e in $entries) {
             $id = $e.sessionId; if (-not $id) { $id = $e.id }
@@ -787,8 +788,28 @@ function Save-ScanCache {
     $cut = (Get-Date).ToUniversalTime().AddDays(-$script:CacheDays).Ticks
     $keep = @{}
     foreach ($k in @($script:ScanCache.Keys)) { $e = $script:ScanCache[$k]; if ($e.Path -and $e.Used -and [long]$e.Used -ge $cut) { $keep[$k] = $e } }
-    $keep | ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $script:ScanCachePath -Encoding UTF8
+    # written beside the cache and then renamed over it, so a kill or a crash mid-write leaves the old cache
+    # whole rather than a truncated one (which Load-ScanCache would drop entirely, rescanning everything)
+    $tmp = "$($script:ScanCachePath).$PID.tmp"
+    try {
+      $keep | ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $tmp -Encoding UTF8 -ErrorAction Stop
+      if (Test-Path -LiteralPath $script:ScanCachePath) { [IO.File]::Replace($tmp, $script:ScanCachePath, [NullString]::Value) }
+      else { [IO.File]::Move($tmp, $script:ScanCachePath) }
+    } finally { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }
   } catch {}
+}
+# Files other programs write, rename and delete (transcripts, session files, chat files, git's HEAD) are
+# opened sharing Read, Write AND Delete: without Delete, a rename or delete by Claude Code, VS Code or git
+# fails for as long as ctop holds the file (Windows; from cxtop, which opens every file this way).
+function Open-Shared([string]$path) {
+  [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+}
+function Read-SharedText([string]$path, [switch]$FirstLine) {
+  $fs = Open-Shared $path
+  try {
+    $r = [IO.StreamReader]::new($fs, [Text.Encoding]::UTF8, $true)
+    if ($FirstLine) { $r.ReadLine() } else { $r.ReadToEnd() }
+  } finally { $fs.Dispose() }
 }
 # Identity of a transcript: its first 256 bytes (the opening entry never changes as the file grows,
 # and a replaced file starts differently). Creation time is not portable: on Linux .NET reports the
@@ -796,7 +817,7 @@ function Save-ScanCache {
 function Get-HeadPrint([string]$path, [int]$max = 256) {
   $fs = $null
   try {
-    $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    $fs = Open-Shared $path
     $b = New-Object byte[] ([math]::Min($max, $fs.Length)); $n = $fs.Read($b, 0, $b.Length)
     return [Convert]::ToBase64String($b, 0, $n)
   } catch { return '' } finally { if ($fs) { $fs.Dispose() } }
@@ -844,7 +865,7 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
   if ($file.Length -eq $st.Offset) { $st.Write = $write; return $st }
   $fs = $null
   try {
-    $fs = [IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite')
+    $fs = Open-Shared $file.FullName
     $null = $fs.Seek($st.Offset, 'Begin')
     $buf = New-Object byte[] ($file.Length - $st.Offset)
     $n = $fs.Read($buf, 0, $buf.Length)
@@ -947,7 +968,7 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
 function Read-TailLines([string]$path, [int]$bytes) {
   $fs = $null
   try {
-    $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    $fs = Open-Shared $path
     $len = $fs.Length
     if ($len -eq 0) { return @() }
     $start = [math]::Max(0, $len - $bytes)
@@ -1177,7 +1198,7 @@ function Get-GitInfo([string]$dir) {
       $wt = $false; $main = ''
       $headFile = if (Test-Path -LiteralPath $g -PathType Leaf) {
         # linked worktree: .git is a pointer file "gitdir: <main>/.git/worktrees/<name>"
-        $ptr = (Get-Content -LiteralPath $g -First 1) -replace '^gitdir:\s*', ''
+        $ptr = ([string]$(try { Read-SharedText $g -FirstLine } catch { '' })) -replace '^gitdir:\s*', ''
         if (-not [IO.Path]::IsPathRooted($ptr)) { $ptr = Join-Path $d $ptr }
         $wt = $true
         if ($ptr -match '^(.*)[\\/]\.git[\\/]worktrees[\\/]') { $main = $Matches[1] }
@@ -1185,7 +1206,7 @@ function Get-GitInfo([string]$dir) {
       } else { Join-Path $g 'HEAD' }
       $branch = '-'
       if (Test-Path -LiteralPath $headFile) {
-        $h = Get-Content -LiteralPath $headFile -First 1
+        $h = [string]$(try { Read-SharedText $headFile -FirstLine } catch { '' })
         $branch = if ($h -match '^ref: refs/heads/(.+)$') { $Matches[1] } else { $h.Substring(0, 7) }   # detached
       }
       $result = @{ Branch = $branch; Worktree = $wt; Main = $main }
@@ -1227,7 +1248,7 @@ function Get-SubagentMeta([System.IO.FileInfo]$sf) {
   if ($script:MetaCache.ContainsKey($mp) -and $script:MetaWrite[$mp] -eq $w) { return $script:MetaCache[$mp] }
   if (-not $script:MetaCache.ContainsKey($mp) -and $script:MetaMiss.ContainsKey($mp) -and ((Get-Date) - $script:MetaMiss[$mp]).TotalSeconds -lt 2) { return $null }
   $m = $null
-  try { if ($w.Year -gt 1601) { $m = Get-Content -LiteralPath $mp -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } } catch { $m = $null }
+  try { if ($w.Year -gt 1601) { $m = Read-SharedText $mp | ConvertFrom-Json -ErrorAction Stop } } catch { $m = $null }
   if ($m) { $script:MetaCache[$mp] = $m; $script:MetaWrite[$mp] = $w; $script:MetaMiss.Remove($mp) }
   elseif ($script:MetaCache.ContainsKey($mp)) { return $script:MetaCache[$mp] }   # mid-rewrite: keep the last good copy
   else { $script:MetaMiss[$mp] = Get-Date }
@@ -1560,7 +1581,7 @@ function Read-SessionRegistry([string]$dir) {
   foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq '.json' })) {
     $o = $null
     try {
-      $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
+      $fs = Open-Shared $f.FullName
       try { $text = [IO.StreamReader]::new($fs).ReadToEnd() } finally { $fs.Dispose() }
       $o = ConvertFrom-Json -InputObject $text -ErrorAction Stop
     } catch { if ($f.BaseName -match '^\d+$') { $unread.Add($f.BaseName) }; continue }   # being written, or not a session entry
@@ -1647,10 +1668,6 @@ function ConvertFrom-IsoTime($v) {
   $d = [DateTimeOffset]::MinValue
   if ([DateTimeOffset]::TryParse([string]$v, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$d)) { return $d.LocalDateTime }
   return $null
-}
-function Read-SharedText([string]$path) {
-  $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
-  try { return [IO.StreamReader]::new($fs).ReadToEnd() } finally { $fs.Dispose() }
 }
 # Every session folder's manifest, parsed once per change (one stat per session per poll otherwise). Cline
 # rewrites a manifest in place, so a read can catch it half-written: then the last good copy stands.
@@ -2154,7 +2171,7 @@ function Read-CopilotChat([IO.FileInfo]$f, [switch]$CachedOnly) {
     # is what an append is. Any rewrite, even one exactly as long as the offset and followed by an append
     # (VS Code compacts the log into one new initial entry; Sol, step 3 rounds 2 and 3, F2), is replayed
     # from the start.
-    $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
+    $fs = Open-Shared $f.FullName
     try {
       $buf = New-Object byte[] $fs.Length; $n = 0
       while ($n -lt $buf.Length) { $r = $fs.Read($buf, $n, $buf.Length - $n); if ($r -le 0) { break }; $n += $r }
