@@ -357,3 +357,16 @@ Describe 'Get-QuestionLines (peek: a question waiting on you)' {
     @(Get-QuestionLines @() 100).Count | Should -Be 0
   }
 }
+
+Describe 'moving the cursor after the window shrank (a resize while a frame is drawn)' {
+  It 'keeps the row inside the console buffer' {
+    Mock Get-ConsoleBufferHeight { 40 }
+    $t = Get-CursorTarget 0 50
+    $t[1] | Should -Be 39
+    (Get-CursorTarget 0 12)[1] | Should -Be 12
+  }
+  It 'does not stop ctop when the console refuses the move' {
+    Mock Get-ConsoleBufferHeight { 0 }   # no console here (output redirected): the move itself throws
+    { Set-ConsoleCursor 0 50 } | Should -Not -Throw
+  }
+}

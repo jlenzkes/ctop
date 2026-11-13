@@ -116,7 +116,8 @@ jobs:
           - { image: 'registry.access.redhat.com/ubi9/ubi:latest', integration: Skip }   # UBI's repositories have no tmux
           - { image: 'almalinux:9', integration: Expect }
           - { image: 'rockylinux/rockylinux:9', integration: Expect }
-          - { image: 'fedora:latest', integration: Expect }
+          - { image: 'fedora:44', integration: Expect }   # Fedora 45 has OpenSSL 4 only: Install-Module in PowerShell 7.6.9
+                                                           # stops there with "No usable version of libssl was found" (run 86)
     runs-on: ubuntu-latest
     container: ${{ matrix.image }}
     steps:

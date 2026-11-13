@@ -2,6 +2,93 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.10.7 — Sol's round 6
+
+- peek's note on turns with usage on a model ctop has no price for counts each turn once: a turn on a
+  priced and an unpriced model read as two ("1 of 2 turns" for one turn)
+
+## 2026.11.10.6 — Sol's round 5
+
+- a Copilot chat's token price uses each turn's whole usage per model where VS Code records it
+  (`modelTotals`: every model call of the turn, subagents too, with cached tokens at the cache-read
+  price). Where it doesn't, VS Code records only the turn's last model call's input, and peek now calls the
+  price partial instead of an upper estimate; it also says how many turns ran on a model with no price
+- LAST ACTION leaves out the model's thinking: a thinking part stored as text was joined into the reply
+- a gone chat that VS Code moved shows its new folder and file, even when the copy has the same content
+  and write time as the original
+
+## 2026.11.10.5 — a chat VS Code moved
+
+- a chat VS Code moved keeps one row, with the folder it moved to. Opening a folder copies every chat file
+  into the folder's storage under the same name (the chat's id) and keeps the originals; a transfer to
+  another window keeps the id too (VS Code's `chatSessionStore.ts`). ctop already listed one row per id,
+  from the newest copy; a copy written at the same time as the original is now told apart by which was
+  created later, then by a folder's copy over the empty window's
+- the $0.01 price of a Copilot credit is now read from GitHub's billing docs ("1 AI credit = $0.01 USD")
+
+## 2026.11.10.4 — from the first run on real Copilot chats (the user's machine, 2026-11-10)
+
+- COST for a Copilot chat is in dollars: the Copilot credits it used at $0.01 each (GitHub's price per
+  credit, from its billing docs via a web search), or, for a chat on your own API key, its tokens at the
+  model's API price from ctop's price table (Claude models). That token figure is an upper estimate: the
+  chat file doesn't say how many prompt tokens were cache reads. Peek shows the credits and the token
+  price. The dollars also count in the cost sort and the session totals
+- an unanswered chat is live only if it was written in the last 7 days, as documented: with the keep
+  window at ∞, chats unanswered 24 to 84 days ago were listed as live (`waiting`, `stalled`); they are now
+  gone rows
+- LAST ACTION shows a reply's text from its last tool call on, its pieces joined. VS Code splits a reply
+  around inline file references, and the last piece alone read like `** is a PowerShell`
+
+## 2026.11.10.3 — Sol's round 3 of step 3: F2
+
+- a Copilot chat file is taken as appended to only if it still starts with exactly the bytes read before
+  (their SHA-256 matches); anything else is read from the start. Sol's case got past every earlier check: a
+  rewrite exactly as long as what was read, ending in a newline, then a new line appended before ctop read
+  again. Each change to a chat file now reads the whole file (65 to 115 ms for a 27 MB chat, PowerShell 7 on
+  Linux); only what follows the old offset is parsed
+
+## 2026.11.10.2 — Sol's round 2 of step 3: F3
+
+- unanswered Copilot chats older than an hour are looked for in the last 7 days, not in every chat ever
+  written: reading them all took 36 to 74 s on Sol's copy of 642 real chats (486 MB), and held up the
+  screen for up to 6 s at a time. An older unanswered chat is listed once the keep window reaches it
+- while ctop reads chat files it has left for later, the strip shows a `copilot` cell with the MB read so
+  far, the total, and an estimate of the time left (`copilot 40/286MB ~25s`). The cell goes when the reading
+  is done. A single large file is read in one go; if that takes over 5 s, the screen's age shows as usual
+
+## 2026.11.10.1 — Sol's round 2 of step 3: F2
+
+- a Copilot chat file that VS Code rewrote is read from the start whenever the byte before the point
+  read up to is no longer a newline, or nothing follows it. Two rewrites were still taken for appends: one
+  with no final newline whose old read point fell on a `{` inside it (Sol's case), and one exactly as
+  long as what was read before
+
+## 2026.11.02.5 — Sol's audit of step 3 (2026.11.02.4)
+
+- a gone Cline session's or Copilot chat's row shows what its files say once they are read: a read left
+  for a later frame, or one that failed (a locked file), showed the old cost and last action under the
+  files' new times, and the row kept them after the read caught up
+- a Copilot chat file that VS Code rewrote into one bigger entry with the same start is read from the
+  start: it was taken for an append, failed, and its old summary stayed until the next write
+- while VS Code runs, an unanswered Copilot chat older than an hour is listed from ctop's first poll (it
+  was listed only if this ctop had read it before). Older chats are each read once, a few per poll, and
+  a finished one is not read again until it changes
+
+## 2026.11.02.4
+
+- GitHub Copilot chats in VS Code are listed, with VIA `copilot`, read from VS Code's own chat files:
+  `User/workspaceStorage/<id>/chatSessions/*.jsonl` and `globalStorage/emptyWindowChatSessions/` (a
+  mutation log, replayed from where the last read stopped). STATE from the newest request: working
+  (pending), waiting (needs your input), stalled (pending, no write for 10 min), idle, error. A chat is
+  live while VS Code runs and it was written in the last hour or is unanswered; otherwise it is gone, for
+  the keep window. COST is in Copilot credits, not dollars; CTX from the request's context usage; the
+  folder from the workspace's `workspace.json`. VS Code's folder follows `VSCODE_PORTABLE` /
+  `VSCODE_APPDATA` as VS Code does
+- a window made smaller while a frame was being drawn no longer stops ctop ("SetCursorPosition … must be
+  less than the console's buffer size", seen on Windows with 2026.11.01.3): the cursor stays inside the
+  buffer, and the next frame redraws at the new size
+- the agent probe (2026.11.02.3) names a Copilot reply's parts by kind and field names
+
 ## 2026.11.02.3 — Sol's audit of PRs #3 and #4 (2026.11.01.3 to 2026.11.02.2)
 
 - an ended Cline session shows its final cost, tokens and last action: a conversation that changed after

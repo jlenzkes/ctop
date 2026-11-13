@@ -66,7 +66,7 @@ BeforeAll {
     }
     $closedLog = Join-Path $root 'closed.jsonl'
     [IO.File]::WriteAllLines($closedLog, [string[]]@($log | Where-Object { $_ }))   # none: an empty log
-    return @{ Cfg = $cfg; Log = $closedLog; Env = "CLAUDE_CONFIG_DIR='$cfg' CLINE_SESSION_DATA_DIR='$cfg/no-cline' PATH='${bin}:$PathTail'"; Closed = $closed
+    return @{ Cfg = $cfg; Log = $closedLog; Env = "CLAUDE_CONFIG_DIR='$cfg' CLINE_SESSION_DATA_DIR='$cfg/no-cline' VSCODE_APPDATA='$cfg/no-vscode' VSCODE_PORTABLE= PATH='${bin}:$PathTail'"; Closed = $closed
               RosterFile = $rosterFile; LiveJson = $liveJson; Fake = $fake }
   }
 
@@ -311,7 +311,9 @@ Describe 'titles in a non-Latin script' -Tag Integration -Skip:$script:noTmux {
       } finally { Stop-Ctop $s }
     }
     Write-Host ("    frame median: ascii titles {0} ms, hebrew {1} ms, chinese {2} ms" -f $med.ascii, $med.hebrew, $med.chinese)
-    $limit = [math]::Max(1.5 * $med.ascii, $med.ascii + 15)
+    # the bug this guards made Hebrew frames ~150 ms; frame medians on CI runners vary by ~20 ms between
+    # runs (Hebrew 36 vs a limit of 34 in run 89, Chinese 41 vs 38 locally), so the margin is 40 ms
+    $limit = [math]::Max(1.5 * $med.ascii, $med.ascii + 40)
     $med.hebrew | Should -BeLessThan $limit
     $med.chinese | Should -BeLessThan $limit
   }
@@ -837,7 +839,8 @@ Describe 'the worker process' -Tag Integration -Skip:$script:noTmux {
       $w = Get-WorkerPid $s
       $w | Should -Not -BeNullOrEmpty -Because 'ctop runs a worker by default'
       & kill -9 $w
-      Wait-Screen $s 'worker stopped .*running in one process' 10 | Should -Not -BeNullOrEmpty
+      # killed mid-frame, the display reads half a frame first and says so instead (CI run 97, debian 12)
+      Wait-Screen $s '(worker stopped|worker sent an unreadable frame).*running in one process' 10 | Should -Not -BeNullOrEmpty
       Wait-Screen $s '(?m)^live-one ' 10 | Should -Not -BeNullOrEmpty
       & tmux send-keys -t $s '+'                                      # and it still answers keys
       Wait-Screen $s 'keep 30m' 5 | Should -Not -BeNullOrEmpty

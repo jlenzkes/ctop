@@ -521,3 +521,44 @@ The existing Claude Code reader stays as it is.
 - Check where Cline keeps tokens and cost.
 - Check VS Code's user data paths from the source.
 - Capture one real file from each agent as a test fixture; until then, every reader is written against source reading only.
+
+## Step 3 in ctop: Copilot chats (builds 2026.11.02.4 and .5)
+
+**Verified from VS Code's source at `1306698`** (read 2026-11-02):
+- **The user data folder** (`src/vs/platform/environment/node/userDataPath.ts`):
+  - `VSCODE_PORTABLE` gives `<it>/user-data`.
+  - Else `VSCODE_APPDATA` gives `<it>/<product>`.
+  - Else `%APPDATA%\<product>` on Windows, `~/Library/Application Support/<product>` on macOS, and `$XDG_CONFIG_HOME` or `~/.config/<product>` on Linux.
+  - The product is `Code`, or `Code - Insiders`.
+- **The mutation log** (`objectMutationLog.ts`, `read`, `_applySet`, `_applyPush`):
+  - kind 0 replaces the state.
+  - kind 1 sets at a path; an empty path is ignored.
+  - kind 2 pushes, after cutting the array to length `i` when `i` is given.
+  - kind 3 sets the path to undefined.
+  - After 1024 entries the chat log's writer replaces the whole file with a single kind 0 plus a newline (`ChatSessionOperationLog` passes 1024 to `ObjectMutationLog`, whose default `_compactAfterEntries` is 512). The new file can start like the old one and be longer than it.
+- **The request schema** (`chatSessionOperationLog.ts`): `message.text`, `modelId`, `modelState` (from `response.stateT`), `promptTokens`, `completionTokens`, `contextUsage`, `copilotCredits`, `sessionCopilotCredits`, and `response` (parts). The session has `creationDate`, `customTitle` and `sessionId`.
+- **`ResponseModelState`** (`chatService.ts`): Pending 0, Complete 1, Cancelled 2, Failed 3, NeedsInput 4.
+- **`workspace.json`** (`storageMain.ts`): `{ folder: <URI> }`, or `workspace` for a multi-root workspace.
+
+**Inference, not checked against a real file:**
+- **The shape of reply parts:** a markdown part's text is in `value` or `content.value`, and a tool call is `kind: toolInvocationSerialized` with `toolId`.
+- **To check:** the probe (2026.11.02.3) now prints the reply parts' kinds and field names.
+
+**Decisions in the code, for the user to confirm:**
+- **Live:** VS Code running (a process named `Code`/`code` or `Code - Insiders`/`code-insiders`) and the chat written in the last hour, or its newest request unfinished. Otherwise the chat is gone, from its last write, for the keep window.
+  - **Decided (user, 2026-11-10):** an unanswered chat is looked for 7 days back (build 2026.11.10.2). An earlier "no age limit" decision the same day was narrowed once Sol measured its cost (36–74 s to read 642 real chats, 486 MB, at every start): the user's actual use is the last few days. An older unanswered chat is listed once the keep window reaches it.
+- **`stalled`:** a Pending request whose file has not been written for 10 min.
+- **COST (changed 2026-11-10, user's decision):** in dollars. A chat that used Copilot credits: credits × $0.01 (rate from a web search of GitHub's billing docs, not read directly). A chat on the user's own API key (no credits): its tokens at the model's API price, an upper estimate since the file has no cache-read split. Peek shows both. `sessionCopilotCredits` is used when present (VS Code calls the per-request sum a lower bound).
+- **Not read:** `globalStorage/transferredChatSessions`. Read in VS Code's source at `1306698` (`chatSessionStore.ts` `storeTransferSession`, `readTransferredSession`; `chatServiceImpl.ts` `transferChatSession`): a chat transferred to another window is written there as `<id>.json` for the target window, which reads it within 5 minutes and deletes it; the original file stays where it was, and the chat keeps its id. Opening a folder instead copies every chat file into the folder's storage (`migrateSessionsToNewWorkspace`, "originals preserved"). ctop keeps one row per id from the newest copy, so it needs neither the transfer file nor the old copies. Also not read: Copilot CLI sessions.
+- **macOS:** VS Code's process there is not looked for, so VS Code counts as running (untested).
+
+**Measured** (this container, PowerShell 7.6.9; 300 workspaces, 640 chats of 63 KB, 3 written recently):
+- **First poll:** about 540 ms; later polls about 40 ms.
+- **Keep set to inf:** 45 calls of at most 342 ms to read all 600, then 131 ms a poll.
+- **Rows:** 600 gone chat rows took ~750 ms to build per frame, so gone Cline and Copilot rows are now built once and cached, like Claude's.
+
+**Sol's audit of 2026.11.02.4 (2026-11-02), fixed in 2026.11.02.5:**
+- **F1:** a cached gone row kept old content after a deferred or failed read caught up. The row is now reused only while the summary read from the files is the same object, or has the same content.
+- **F2:** a larger rewritten file with the same first 256 bytes was read as an append. A tail that doesn't parse, or doesn't start a line, is now read again from the start, once.
+- **F3:** an old unfinished chat was missed on a fresh start. While VS Code runs, every chat outside the hour and the keep window is read once, within the budget. A finished one keeps only its summary.
+- **Measured after F3** (same container; 600 old finished chats of 6 KB, VS Code taken as running): the first start reads them in 18 calls of 120–170 ms (the first, 365 ms, includes warm-up), 2.6 s in all; later polls about 40 ms.

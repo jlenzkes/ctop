@@ -67,6 +67,8 @@ BeforeAll {
     $psi.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
     $psi.EnvironmentVariables['CLAUDE_CONFIG_DIR'] = $fx.Cfg
     $psi.EnvironmentVariables['CLINE_SESSION_DATA_DIR'] = if ($fx.Cline) { $fx.Cline } else { Join-Path $fx.Cfg 'no-cline' }   # not this machine's Cline
+    $psi.EnvironmentVariables['VSCODE_APPDATA'] = if ($fx.VSCode) { $fx.VSCode } else { Join-Path $fx.Cfg 'no-vscode' }      # nor its VS Code chats
+    $psi.EnvironmentVariables['VSCODE_PORTABLE'] = ''
     $psi.EnvironmentVariables['PATH'] = if ($fx.NoClaude) { $script:pathWithoutClaude } else { $fx.Bin + [IO.Path]::PathSeparator + $env:PATH }
     $p = [Diagnostics.Process]::Start($psi)
     $p.StandardInput.Close()
@@ -201,6 +203,27 @@ Describe 'a snapshot (-Snapshot)' {
     $rows = @($x.Text -split "`r?`n" | Where-Object { $_ -match '^cline-m\d{4} ' })
     $rows.Count | Should -Be 80
     @($rows | Where-Object { $_ -match '\$0\.40' }).Count | Should -Be 80 -Because 'every row''s cost is read: 40 replies at $0.01'
+  }
+  It 'lists a Copilot chat from VS Code''s chat files, with no claude command' {
+    $fx = New-Fixture (Join-Path $TestDrive 'snap-copilot') @() -NoLive
+    $fx.NoClaude = $true
+    $fx.VSCode = Join-Path $fx.Cfg 'vscode-appdata'
+    $dir = Join-Path $fx.VSCode 'Code/User/globalStorage/emptyWindowChatSessions'; New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+    $session = [ordered]@{ version = 3; sessionId = '4033627a-32bb-4f5e-a0dc-930c8e19319a'; creationDate = $ms; customTitle = 'Explain the build'; requests = @() }
+    $req = [ordered]@{ requestId = 'r1'; timestamp = $ms; message = @{ text = 'explain it' }; modelId = 'anthropic/Anthropic/claude-haiku-4-5-20251001'; modelState = @{ value = 1; completedAt = $ms }
+                       promptTokens = 28971; completionTokens = 112; sessionCopilotCredits = 2; response = @(@{ value = 'It builds in three steps.' }) }
+    $log = @((@{ kind = 0; v = $session } | ConvertTo-Json -Depth 10 -Compress), (@{ kind = 2; k = @('requests'); v = @($req) } | ConvertTo-Json -Depth 10 -Compress)) -join "`n"
+    [IO.File]::WriteAllText((Join-Path $dir '4033627a-32bb-4f5e-a0dc-930c8e19319a.jsonl'), $log + "`n")
+    $x = Invoke-Snapshot $fx @('-MaxWidth', '400', '-Keep', 'inf')
+    $x.Code | Should -Be 0 -Because $x.Err
+    $row = @($x.Text -split "`r?`n" | Where-Object { $_ -match '^copilot-4033627a ' })[0]
+    $row | Should -Not -BeNullOrEmpty -Because $x.Text
+    $row | Should -Match '\bcopilot\b' -Because 'VIA'
+    $row | Should -Match 'Explain the build'
+    $row | Should -Match '\$0\.02\b' -Because '2 Copilot credits at $0.01 each'
+    $row | Should -Match 'haiku-4-5-20251001'
+    $row | Should -Match 'It builds in three steps\.'
   }
   It 'says why when the roster cannot be read, and still exits' {
     $fx = New-Fixture (Join-Path $TestDrive 'snap-bad') @() -NoLive
