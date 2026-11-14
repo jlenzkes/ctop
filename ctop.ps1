@@ -55,7 +55,7 @@
   Disable ANSI colors (STATE, TURN, MODEL, sparkline, COST).
 
 .PARAMETER Compact
-  Show only the essential columns (NAME, STATE, TURN, CACHE, CTX, LAST ACTION, ACTIVITY, COST,
+  Show only the essential columns (NAME, STATE, CACHE, TURN, CTX, LAST ACTION, ACTIVITY, COST,
   BRANCH) regardless of window width. Toggle at runtime with 'c'.
 
 .PARAMETER NoSubagents
@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.7 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.8 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.7'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.8'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -3542,8 +3542,8 @@ $script:Columns = @(
   @{ Name = 'NAME';        Fixed = 0;  Min = 12; Flex = 2; Align = 'L'; Priority = 100 }
   @{ Name = 'TITLE';       Fixed = 0;  Min = 12; Flex = 3; Align = 'L'; Priority = 95 }   # picker's friendly name
   @{ Name = 'STATE';       Fixed = 8;  Auto = $true; Align = 'L'; Priority = 100 }
-  @{ Name = 'TURN';        Fixed = 5;  Align = 'R'; Priority = 90 }   # time on current turn
   @{ Name = 'CACHE';       Fixed = 5;  Align = 'R'; Priority = 85 }   # prompt cache: minutes left; IDLE is in peek
+  @{ Name = 'TURN';        Fixed = 5;  Align = 'R'; Priority = 90 }   # time on current turn
   @{ Name = 'CTX';         Fixed = 5;  Align = 'R'; Priority = 80 }   # "123K"
   @{ Name = 'CMP';         Fixed = 3;  Align = 'R'; Priority = 79 }   # compactions so far
   @{ Name = 'LAST ACTION'; Fixed = 0;  Min = 16; Flex = 4; Align = 'L'; Priority = 75 }
@@ -4090,10 +4090,10 @@ function Show-Help {
     '  VIA         R  what the session runs in: cli, vscode (the Claude Code extension), sdk (the Claude',
     '                 Agent SDK: VS Code''s own Claude agent, or another program built on it), remote,',
     '                 cline (a Cline session), copilot (a GitHub Copilot chat in VS Code)',
-    '  TURN        T  time since your last prompt — how long Claude has been on this turn (blank when idle).',
-    '                 Yellow >= 10 min, red >= 30 min',
     '  CACHE       T  prompt cache: minutes left while warm (yellow near the end), cold once expired, - unknown;',
     '                 the rule of the Claude Code extension for VS Code. In peek: what the next turn costs warm and cold',
+    '  TURN        T  time since your last prompt — how long Claude has been on this turn (blank when idle).',
+    '                 Yellow >= 10 min, red >= 30 min',
     '  IDLE        T  (peek) time since the transcript was last written to',
     '  CTX         T  context size in K tokens (input + cache tokens on the newest assistant entry)',
     '  CMP         T  compactions so far. Magenta = one in the last 10 min, yellow = older. Each replaces',

@@ -166,6 +166,12 @@ Describe 'the CACHE column' {
     $src | Should -Match "@\{ Name = 'CACHE';"
     $src | Should -Not -Match "@\{ Name = 'IDLE';"
   }
+  It 'stands between STATE and TURN (user, 2026-11-13: "flip the turn and cache columns")' {
+    $src = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'ctop.ps1')
+    $at = @('STATE', 'CACHE', 'TURN' | ForEach-Object { $src.IndexOf("@{ Name = '$_';") })
+    $at[0] | Should -BeLessThan $at[1]
+    $at[1] | Should -BeLessThan $at[2]
+  }
   It 'sorts warm rows soonest-first, then cold, then unknown' {
     $script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx', 'cache')
     $script:SortMode = 5

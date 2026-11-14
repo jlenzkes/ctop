@@ -2,6 +2,11 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.8 — CACHE before TURN
+
+- CACHE now stands right after STATE, before TURN (the user's choice). Which hides first on a narrow window
+  is unchanged: CACHE before TURN
+
 ## 2026.11.13.7 — prompt-cache countdown
 
 - a CACHE column shows how long each Claude Code session's prompt cache stays warm: minutes left (`43m`),
