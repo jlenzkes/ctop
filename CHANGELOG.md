@@ -2,6 +2,65 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.11 — Sol's round 1 on PR #7
+
+- the console helper is compiled under a name of its own and renamed into place. ctops starting at the
+  same time used to compile into the shared DLL at once; the losers found no helper and saved their scan
+  cache through `File.Replace` (Sol measured 2 to 7 of 8 Windows PowerShell 5.1 processes started together;
+  with Sol's own test, 15 of 32 before this build and 0 of 32 after). A compile killed before its rename
+  leaves a `ctop-con-tmp-*.dll`, deleted after 10 minutes. Numbered .11: builds .7 to .10 are on PRs #8–#9
+
+## 2026.11.13.6 — a second review of 2026.11.13.1–.2
+
+- correction to 2026.11.13.2 and .4: sharing delete lets another program delete a file while ctop reads it
+  (Node's `unlinkSync` too), and lets git rename `HEAD.lock` over `HEAD` (measured). It does not help a
+  rename over the file by Node's `fs.rename` (Claude Code, VS Code, Cline) or by `MoveFileEx` with
+  replace-existing: Windows refuses those over any open file (EPERM / access denied), whatever ctop shares.
+  ctop holds a file only for the length of a read
+- the compiled console helper's DLL is now named by the runtime too: a DLL PowerShell 7 compiled doesn't
+  load in Windows PowerShell 5.1, which then lost the mouse (since the helper was added) and fell back to
+  `File.Replace` for the cache save
+- a subagent transcript that disappears while ctop looks for a nested agent's spawner no longer stops ctop
+
+## 2026.11.13.4 — a review of 2026.11.13.1–.2
+
+- the scan cache is now renamed over the old one in one step (`File.Move` with overwrite; on Windows
+  PowerShell 5.1, `MoveFileEx` through ctop's compiled console helper). 2026.11.13.2 used `File.Replace`,
+  which is several steps: in a test that killed ctop mid-save, 3 of 130 kills left no cache at all. With
+  one rename, 80 kills left none missing and none unreadable (timing-dependent, so evidence, not proof).
+  When the helper can't be compiled, `File.Replace` is still used rather than no save
+- the files a killed save leaves beside the cache (`ctop-scancache.json.<pid>.tmp` of a ctop no longer
+  running, and `~RF….TMP` from 2026.11.13.2) are deleted at the start; so are the compiled helper DLLs of
+  earlier builds (`ctop-con-*.dll`) when a new one is compiled
+- finding which agent spawned a nested subagent (when Claude Code wrote no `parentAgentId`) read the other
+  subagent transcripts with `Select-String`, which doesn't share delete; it now reads them through the
+  same shared open, line by line
+- 2026.11.13.2's "rename over it" holds for `File.Replace`, Node's `fs.rename` (Claude Code, VS Code,
+  Cline) and git (measured). A rename with `MoveFileEx` and replace-existing (.NET `File.Move` with
+  overwrite, Python `os.replace`) is still refused while ctop holds the file: Windows refuses that over any
+  open file, whatever it shares
+
+## 2026.11.13.2 — more from cxtop
+
+- the files ctop reads are opened so that their owners can still rename or delete them meanwhile:
+  transcripts, session files, Cline and Copilot files, and git's `HEAD` (git renames `HEAD.lock` over it).
+  Before, a rename or delete by Claude Code, VS Code or git failed on Windows for as long as ctop held the
+  file (seen in a test with a held handle; not seen happening to those programs)
+- `-HighlightModel` must be a valid regular expression and `-SelectBg` an SGR code (digits and `;`); ctop
+  refuses others at the start, naming the flag. A bad pattern used to stop ctop at its first session row
+- the scan cache is written to a temporary file and renamed over the old one, so a kill mid-save no longer
+  leaves a truncated cache that makes ctop rescan everything
+
+## 2026.11.13.1 — keys that stopped ctop
+
+- pressing Shift, Ctrl, Alt, Caps Lock, Num Lock or Scroll Lock on its own no longer stops ctop on Windows
+  with the mouse on ("Cannot convert value "18" to type "System.ConsoleKey""): the console reports those
+  keys by codes .NET's ConsoleKey has no name for. A key with no name keeps its character; one with neither
+  is dropped. The digits typed while composing a character with Alt and the number pad are no longer read
+  as commands, and the character they compose arrives as typed. Ported from cxtop 2026.11.06.1 and .2.
+- Alt and Ctrl chords no longer act as commands (Alt+q quit ctop). AltGr text still works: AltGr+9 on a
+  German keyboard types `]` and shortens the tick, as `]` does.
+
 ## 2026.11.10.7 — Sol's round 6
 
 - peek's note on turns with usage on a model ctop has no price for counts each turn once: a turn on a

@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.10.7 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.11 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -124,8 +124,9 @@ param(
   [ValidateSet('wrap','truncate')][string]$Layout = 'wrap',
   [int]$WrapLines = 2,
   [int]$MaxWidth = 0,
+  [ValidateScript({ try { $null = [regex]::new($_); $true } catch { throw "not a valid regular expression: $($_.Exception.Message)" } })]
   [string]$HighlightModel = 'fable|mythos',
-  [string]$SelectBg = '48;5;238',
+  [ValidatePattern('^[0-9;]*$')][string]$SelectBg = '48;5;238',
   [string]$ClosedLog = '',
   [switch]$NoColor,
   [switch]$All,
@@ -136,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.10.7'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.11'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -552,7 +553,7 @@ function Get-SessionTitle([string]$sessionId, [System.IO.FileInfo]$file) {
       if (-not $c -or $c.Write -ne $fi.LastWriteTimeUtc) {
         $map = @{}
         try {
-          $j = Get-Content -LiteralPath $ip -Raw | ConvertFrom-Json
+          $j = Read-SharedText $ip | ConvertFrom-Json
           $entries = if ($j -is [array]) { $j } elseif ($j.sessions) { $j.sessions } elseif ($j.entries) { $j.entries } else { @($j) }
           foreach ($e in $entries) {
             $id = $e.sessionId; if (-not $id) { $id = $e.id }
@@ -596,7 +597,7 @@ function Get-Spawner([System.IO.FileInfo]$sf, $meta, [object[]]$siblings) {
   if ($meta -and $meta.toolUseId -and [int]$meta.spawnDepth -ge 2) {   # fallback: find the Agent call by id
     foreach ($o in $siblings) {
       if ($o.FullName -ceq $k) { continue }
-      if (Select-String -LiteralPath $o.FullName -Pattern ([regex]::Escape('"id":"' + $meta.toolUseId + '"')) -Quiet) { $result = 'sub:' + $o.FullName; break }
+      if (Test-SharedContains $o.FullName ('"id":"' + $meta.toolUseId + '"')) { $result = 'sub:' + $o.FullName; break }
     }
   }
   if ($meta) { $script:SpawnerCache[$k] = $result }   # no meta yet = undecided, ask again next time
@@ -765,8 +766,24 @@ function ConvertTo-Hashtable($o) {
   if ($o -is [System.Collections.IList]) { return ,@(foreach ($x in $o) { ConvertTo-Hashtable $x }) }
   return $o
 }
+# What a killed save leaves beside the cache: ctop-scancache.json.<pid>.tmp (a whole new cache never moved into
+# place), and ctop-scancache.json~RF*.TMP from build 2026.11.13.2, which saved through File.Replace. A .tmp whose
+# ctop is still running may be mid-save, so only those of a process that is gone, or older than a day, go.
+function Remove-StaleCacheTemps {
+  try {
+    $dir = Split-Path -Parent $script:ScanCachePath; $name = Split-Path -Leaf $script:ScanCachePath
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter "$name*" -File -ErrorAction SilentlyContinue)) {
+      if ($f.Name -match ('^' + [regex]::Escape($name) + '\.(\d+)\.tmp$')) {
+        $alive = [int]$Matches[1] -ne $PID -and (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)
+        if ($alive -and $f.LastWriteTimeUtc -gt [datetime]::UtcNow.AddDays(-1)) { continue }
+      } elseif ($f.Name -notmatch ('^' + [regex]::Escape($name) + '~RF[0-9a-fA-F]+\.TMP$')) { continue }
+      Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+    }
+  } catch {}
+}
 function Load-ScanCache {
   try {
+    Remove-StaleCacheTemps
     if (-not (Test-Path -LiteralPath $script:ScanCachePath)) { return }
     $raw = Get-Content -LiteralPath $script:ScanCachePath -Raw -Encoding UTF8
     $h = if ($PSVersionTable.PSVersion.Major -ge 6) { $raw | ConvertFrom-Json -AsHashtable } else { ConvertTo-Hashtable ($raw | ConvertFrom-Json) }
@@ -787,8 +804,55 @@ function Save-ScanCache {
     $cut = (Get-Date).ToUniversalTime().AddDays(-$script:CacheDays).Ticks
     $keep = @{}
     foreach ($k in @($script:ScanCache.Keys)) { $e = $script:ScanCache[$k]; if ($e.Path -and $e.Used -and [long]$e.Used -ge $cut) { $keep[$k] = $e } }
-    $keep | ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $script:ScanCachePath -Encoding UTF8
+    # written beside the cache and then renamed over it in one step, so a kill or a crash mid-save leaves the
+    # old cache or the new one, whole (a truncated one Load-ScanCache would drop, rescanning everything).
+    # Not File.Replace: that is several steps, and a kill between them left no cache at all (seen in 3 of
+    # 130 kills, 2026-11-13).
+    $tmp = "$($script:ScanCachePath).$PID.tmp"
+    try {
+      $keep | ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $tmp -Encoding UTF8 -ErrorAction Stop
+      Move-Over $tmp $script:ScanCachePath
+    } finally { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }
   } catch {}
+}
+# Renames $src over $dst in one step, replacing it: rename(2) on Linux and macOS, MoveFileEx with
+# MOVEFILE_REPLACE_EXISTING on Windows. .NET Framework (Windows PowerShell 5.1) has no File.Move overload
+# that replaces, so there it calls MoveFileEx itself, from the console helper ctop compiles once (CtopCon).
+# Throws when the rename fails (on Windows, for one, while another program has $dst open).
+function Move-Over([string]$src, [string]$dst) {
+  if ([IO.File].GetMethod('Move', [type[]]@([string], [string], [bool]))) { [IO.File]::Move($src, $dst, $true); return }
+  if (-not (Import-ConType)) {   # no compiler here (or not Windows): File.Replace, several steps, beats no save
+    if (Test-Path -LiteralPath $dst) { [IO.File]::Replace($src, $dst, [NullString]::Value) } else { [IO.File]::Move($src, $dst) }
+    return
+  }
+  if (-not [CtopCon.Fs]::MoveOver($src, $dst)) { throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
+}
+# Files other programs write, rename and delete (transcripts, session files, chat files, git's HEAD) are
+# opened sharing Read, Write AND Delete (Windows; from cxtop, which opens every file this way). Measured
+# 2026-11-13 against a file held so: a delete (Node's unlinkSync too) and git's rename of HEAD.lock over HEAD
+# succeed, where without Delete they fail. Node's fs.rename and MoveFileEx with replace-existing over it
+# still fail (EPERM / access denied): Windows refuses those over any open file. ctop holds a file only for
+# the length of a read.
+function Open-Shared([string]$path) {
+  [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+}
+# Whether a line of the file holds $needle (ordinal), read line by line through Open-Shared. A file that is
+# gone or can't be opened holds nothing (as Select-String's suppressed error gave before).
+function Test-SharedContains([string]$path, [string]$needle) {
+  $fs = $null
+  try { $fs = Open-Shared $path } catch { return $false }
+  try {
+    $sr = [IO.StreamReader]::new($fs)
+    while ($null -ne ($line = $sr.ReadLine())) { if ($line.Contains($needle)) { return $true } }
+    return $false
+  } finally { $fs.Dispose() }
+}
+function Read-SharedText([string]$path, [switch]$FirstLine) {
+  $fs = Open-Shared $path
+  try {
+    $r = [IO.StreamReader]::new($fs, [Text.Encoding]::UTF8, $true)
+    if ($FirstLine) { $r.ReadLine() } else { $r.ReadToEnd() }
+  } finally { $fs.Dispose() }
 }
 # Identity of a transcript: its first 256 bytes (the opening entry never changes as the file grows,
 # and a replaced file starts differently). Creation time is not portable: on Linux .NET reports the
@@ -796,7 +860,7 @@ function Save-ScanCache {
 function Get-HeadPrint([string]$path, [int]$max = 256) {
   $fs = $null
   try {
-    $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    $fs = Open-Shared $path
     $b = New-Object byte[] ([math]::Min($max, $fs.Length)); $n = $fs.Read($b, 0, $b.Length)
     return [Convert]::ToBase64String($b, 0, $n)
   } catch { return '' } finally { if ($fs) { $fs.Dispose() } }
@@ -844,7 +908,7 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
   if ($file.Length -eq $st.Offset) { $st.Write = $write; return $st }
   $fs = $null
   try {
-    $fs = [IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite')
+    $fs = Open-Shared $file.FullName
     $null = $fs.Seek($st.Offset, 'Begin')
     $buf = New-Object byte[] ($file.Length - $st.Offset)
     $n = $fs.Read($buf, 0, $buf.Length)
@@ -947,7 +1011,7 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
 function Read-TailLines([string]$path, [int]$bytes) {
   $fs = $null
   try {
-    $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    $fs = Open-Shared $path
     $len = $fs.Length
     if ($len -eq 0) { return @() }
     $start = [math]::Max(0, $len - $bytes)
@@ -1177,7 +1241,7 @@ function Get-GitInfo([string]$dir) {
       $wt = $false; $main = ''
       $headFile = if (Test-Path -LiteralPath $g -PathType Leaf) {
         # linked worktree: .git is a pointer file "gitdir: <main>/.git/worktrees/<name>"
-        $ptr = (Get-Content -LiteralPath $g -First 1) -replace '^gitdir:\s*', ''
+        $ptr = ([string]$(try { Read-SharedText $g -FirstLine } catch { '' })) -replace '^gitdir:\s*', ''
         if (-not [IO.Path]::IsPathRooted($ptr)) { $ptr = Join-Path $d $ptr }
         $wt = $true
         if ($ptr -match '^(.*)[\\/]\.git[\\/]worktrees[\\/]') { $main = $Matches[1] }
@@ -1185,7 +1249,7 @@ function Get-GitInfo([string]$dir) {
       } else { Join-Path $g 'HEAD' }
       $branch = '-'
       if (Test-Path -LiteralPath $headFile) {
-        $h = Get-Content -LiteralPath $headFile -First 1
+        $h = [string]$(try { Read-SharedText $headFile -FirstLine } catch { '' })
         $branch = if ($h -match '^ref: refs/heads/(.+)$') { $Matches[1] } else { $h.Substring(0, 7) }   # detached
       }
       $result = @{ Branch = $branch; Worktree = $wt; Main = $main }
@@ -1227,7 +1291,7 @@ function Get-SubagentMeta([System.IO.FileInfo]$sf) {
   if ($script:MetaCache.ContainsKey($mp) -and $script:MetaWrite[$mp] -eq $w) { return $script:MetaCache[$mp] }
   if (-not $script:MetaCache.ContainsKey($mp) -and $script:MetaMiss.ContainsKey($mp) -and ((Get-Date) - $script:MetaMiss[$mp]).TotalSeconds -lt 2) { return $null }
   $m = $null
-  try { if ($w.Year -gt 1601) { $m = Get-Content -LiteralPath $mp -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } } catch { $m = $null }
+  try { if ($w.Year -gt 1601) { $m = Read-SharedText $mp | ConvertFrom-Json -ErrorAction Stop } } catch { $m = $null }
   if ($m) { $script:MetaCache[$mp] = $m; $script:MetaWrite[$mp] = $w; $script:MetaMiss.Remove($mp) }
   elseif ($script:MetaCache.ContainsKey($mp)) { return $script:MetaCache[$mp] }   # mid-rewrite: keep the last good copy
   else { $script:MetaMiss[$mp] = Get-Date }
@@ -1560,7 +1624,7 @@ function Read-SessionRegistry([string]$dir) {
   foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq '.json' })) {
     $o = $null
     try {
-      $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
+      $fs = Open-Shared $f.FullName
       try { $text = [IO.StreamReader]::new($fs).ReadToEnd() } finally { $fs.Dispose() }
       $o = ConvertFrom-Json -InputObject $text -ErrorAction Stop
     } catch { if ($f.BaseName -match '^\d+$') { $unread.Add($f.BaseName) }; continue }   # being written, or not a session entry
@@ -1647,10 +1711,6 @@ function ConvertFrom-IsoTime($v) {
   $d = [DateTimeOffset]::MinValue
   if ([DateTimeOffset]::TryParse([string]$v, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$d)) { return $d.LocalDateTime }
   return $null
-}
-function Read-SharedText([string]$path) {
-  $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
-  try { return [IO.StreamReader]::new($fs).ReadToEnd() } finally { $fs.Dispose() }
 }
 # Every session folder's manifest, parsed once per change (one stat per session per poll otherwise). Cline
 # rewrites a manifest in place, so a read can catch it half-written: then the last good copy stands.
@@ -2154,7 +2214,7 @@ function Read-CopilotChat([IO.FileInfo]$f, [switch]$CachedOnly) {
     # is what an append is. Any rewrite, even one exactly as long as the offset and followed by an append
     # (VS Code compacts the log into one new initial entry; Sol, step 3 rounds 2 and 3, F2), is replayed
     # from the start.
-    $fs = [IO.File]::Open($f.FullName, 'Open', 'Read', 'ReadWrite')
+    $fs = Open-Shared $f.FullName
     try {
       $buf = New-Object byte[] $fs.Length; $n = 0
       while ($n -lt $buf.Length) { $r = $fs.Read($buf, $n, $buf.Length - $n); if ($r -le 0) { break }; $n += $r }
@@ -4026,6 +4086,11 @@ namespace CtopCon {
   [StructLayout(LayoutKind.Sequential)] public struct MOUSE_EVENT_RECORD { public short X; public short Y; public uint dwButtonState; public uint dwControlKeyState; public uint dwEventFlags; }
   [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD { [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; [FieldOffset(4)] public MOUSE_EVENT_RECORD Mouse; }
   public class Ev { public int Kind; public ushort Vk; public char Ch; public uint Ctrl; public int Repeat; public int X; public int Y; public uint Buttons; public uint Flags; }
+  public static class Fs {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "MoveFileExW")] static extern bool MoveFileEx(string src, string dst, uint flags);
+    // MOVEFILE_REPLACE_EXISTING 0x1 | MOVEFILE_WRITE_THROUGH 0x8
+    public static bool MoveOver(string src, string dst) { return MoveFileEx(src, dst, 0x9u); }
+  }
   public static class Con {
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr GetStdHandle(int n);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetConsoleMode(IntPtr h, out uint m);
@@ -4044,29 +4109,79 @@ namespace CtopCon {
       if (!GetNumberOfConsoleInputEvents(In, out n) || n == 0) return list.ToArray();
       var buf = new INPUT_RECORD[Math.Min(n, 64u)]; uint got;
       if (!ReadConsoleInput(In, buf, (uint)buf.Length, out got)) return list.ToArray();
-      for (int i = 0; i < got; i++) {
-        var r = buf[i];
-        if (r.EventType == 1 && r.Key.bKeyDown != 0)
-          list.Add(new Ev { Kind = 1, Vk = r.Key.wVirtualKeyCode, Ch = (char)r.Key.UnicodeChar, Ctrl = r.Key.dwControlKeyState, Repeat = Math.Max(1, (int)r.Key.wRepeatCount) });
-        else if (r.EventType == 2)
-          list.Add(new Ev { Kind = 2, X = r.Mouse.X, Y = r.Mouse.Y, Buttons = r.Mouse.dwButtonState, Flags = r.Mouse.dwEventFlags });
-      }
+      for (int i = 0; i < got; i++) { Ev e = ConvertRecord(buf[i]); if (e != null) list.Add(e); }
       return list.ToArray();
+    }
+    // One console record as ctop's event, or null for a record that is no command (from cxtop 2026.11.06.2).
+    public static Ev ConvertRecord(INPUT_RECORD r) {
+      if (r.EventType == 2)
+        return new Ev { Kind = 2, X = r.Mouse.X, Y = r.Mouse.Y, Buttons = r.Mouse.dwButtonState, Flags = r.Mouse.dwEventFlags };
+      if (r.EventType != 1) return null;
+      ushort vk = r.Key.wVirtualKeyCode;
+      bool altKey = vk == 0x12 || vk == 0xa4 || vk == 0xa5;
+      if (r.Key.bKeyDown == 0) {
+        // Alt+numpad, an IME and some pastes deliver the finished character on Alt's release, with no key-down
+        if (!altKey || r.Key.UnicodeChar == 0) return null;
+        return new Ev { Kind = 1, Vk = 0, Ch = (char)r.Key.UnicodeChar, Repeat = 1 };
+      }
+      // a modifier or lock key on its own: Shift, Ctrl, Alt, Caps/Num/Scroll Lock, left and right variants
+      if ((vk >= 0x10 && vk <= 0x12) || vk == 0x14 || vk == 0x90 || vk == 0x91 || (vk >= 0xa0 && vk <= 0xa5)) return null;
+      if ((r.Key.dwControlKeyState & 0x3u) != 0) {
+        // the digits of Alt+numpad composition (and numpad navigation keys with NumLock off) are no commands
+        if (vk >= 0x60 && vk <= 0x69) return null;
+        if ((r.Key.dwControlKeyState & 0x100u) == 0 && (vk == 0x0c || vk == 0x2d || (vk >= 0x21 && vk <= 0x28))) return null;
+      }
+      return new Ev { Kind = 1, Vk = vk, Ch = (char)r.Key.UnicodeChar, Ctrl = r.Key.dwControlKeyState, Repeat = Math.Max(1, (int)r.Key.wRepeatCount) };
     }
   }
 }
 '@
+# The compiled console helper's DLL: named by a hash of the source (String.GetHashCode is randomized per
+# process in .NET Core) and by the runtime, since a DLL PowerShell 7 compiled doesn't load in Windows
+# PowerShell 5.1 ("Unable to load one or more of the requested types", measured 2026-11-13).
+function Get-ConDllPath {
+  $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:ConSrc)), 0, 4) -replace '-'
+  $ed = if ($PSVersionTable.PSEdition -eq 'Core') { 'core' } else { 'desktop' }
+  Join-Path $ConfigDir "ctop-con-$h-$ed.dll"
+}
+# Deletes the helper DLLs of other sources for this runtime, and those named before the runtime was in the
+# name. The other runtime's are left alone: deleting them would make PowerShell 7 and 5.1 recompile on every
+# switch. One still loaded by a running ctop is locked, and stays.
+function Remove-OldConDlls([string]$keep) {
+  $ed = if ($keep -match '-(core|desktop)\.dll$') { $Matches[1] } else { return }
+  $old = [datetime]::UtcNow.AddMinutes(-10)
+  Get-ChildItem -LiteralPath (Split-Path -Parent $keep) -Filter 'ctop-con-*.dll' -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -ne $keep -and ($_.Name -match "^ctop-con-[0-9A-Fa-f]{8}(-$ed)?\.dll$" -or
+                   ($_.Name -like 'ctop-con-tmp-*.dll' -and $_.LastWriteTimeUtc -lt $old)) } |   # a compile killed before its rename
+    Remove-Item -Force -ErrorAction SilentlyContinue
+}
+# Loads CtopCon (Windows only); $true when it is loaded. Compiled once to a DLL beside the caches: compiling
+# on every start would cost ~1 s. Compiled under a name of its own, then renamed into place, so ctops starting
+# together never write the shared DLL at once: one that did lost, found no helper, and saved its cache through
+# File.Replace (Sol, 2026-11-13: in 2 to 7 of 8 Windows PowerShell 5.1 processes started at once). A ctop that
+# loses the rename loads the winner's DLL, which a rename only ever shows whole.
+function Import-ConType {
+  if ('CtopCon.Con' -as [type]) { return $true }
+  if (-not ($IsWindows -or $env:OS -eq 'Windows_NT')) { return $false }
+  $dll = $null
+  try { $dll = Get-ConDllPath } catch { return $false }
+  for ($try = 0; $try -lt 3; $try++) {
+    if (-not (Test-Path -LiteralPath $dll)) {
+      $tmp = Join-Path (Split-Path -Parent $dll) ("ctop-con-tmp-$PID-" + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.dll')
+      try {
+        Add-Type -TypeDefinition $script:ConSrc -OutputAssembly $tmp -OutputType Library -ErrorAction Stop
+        try { [IO.File]::Move($tmp, $dll); Remove-OldConDlls $dll } catch { }   # lost the race: the winner's DLL is there
+      } catch { }
+      finally { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }
+    }
+    try { Add-Type -Path $dll -ErrorAction Stop; return $true } catch { Start-Sleep -Milliseconds (50 * ($try + 1)) }
+  }
+  return [bool]('CtopCon.Con' -as [type])
+}
 function Enable-Mouse {
   if ($NoMouse -or -not ($IsWindows -or $env:OS -eq 'Windows_NT')) { return }
   try {
-    if (-not ('CtopCon.Con' -as [type])) {
-      # compiled once to a DLL beside the caches: compiling on every start would cost ~1 s
-      # named by a hash of the source (String.GetHashCode is randomized per process in .NET Core)
-      $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:ConSrc)), 0, 4) -replace '-'
-      $dll = Join-Path $ConfigDir "ctop-con-$h.dll"
-      if (-not (Test-Path -LiteralPath $dll)) { Add-Type -TypeDefinition $script:ConSrc -OutputAssembly $dll -OutputType Library -ErrorAction Stop }
-      Add-Type -Path $dll -ErrorAction Stop
-    }
+    if (-not (Import-ConType)) { $script:Mouse = $false; return }
     $old = [CtopCon.Con]::Enable()
     if ($old -ge 0) { $script:ConModeOld = $old; $script:Mouse = $true }
   } catch { $script:Mouse = $false }
@@ -4074,17 +4189,29 @@ function Enable-Mouse {
 function Disable-Mouse { if ($null -ne $script:ConModeOld) { try { [CtopCon.Con]::Restore($script:ConModeOld) } catch {} } }
 # One queue for keys and mouse: Next-Input returns a ConsoleKeyInfo, a CtopCon.Ev (mouse), or $null.
 $script:InQ = [System.Collections.Generic.Queue[object]]::new()
+# A console key record as a ConsoleKeyInfo, or $null. ConsoleKey names only some key codes, and casting any
+# other (a lone Alt is 18) throws, which stopped ctop: such a key keeps its character with key None, or is
+# dropped when it has none.
+function ConvertFrom-ConsoleKeyEvent($e) {
+  $vk = [int]$e.Vk
+  $key = [Enum]::ToObject([ConsoleKey], 0)
+  if ([Enum]::IsDefined([ConsoleKey], $vk)) { $key = [ConsoleKey]$vk }
+  elseif ([char]$e.Ch -eq [char]0) { return $null }
+  [ConsoleKeyInfo]::new([char]$e.Ch, $key, (($e.Ctrl -band 0x10) -ne 0), (($e.Ctrl -band 0x3) -ne 0), (($e.Ctrl -band 0xC) -ne 0))
+}
+function Add-ConsoleInputEvents($events) {
+  foreach ($e in $events) {
+    if ($e.Kind -eq 1) {
+      $ki = ConvertFrom-ConsoleKeyEvent $e
+      if ($null -eq $ki) { continue }
+      for ($r = 0; $r -lt [math]::Min($e.Repeat, 10); $r++) { $script:InQ.Enqueue($ki) }
+    } else { $script:InQ.Enqueue($e) }
+  }
+}
 function Next-Input {
   if ($script:InQ.Count -eq 0) {
-    if ($script:Mouse) {
-      foreach ($e in [CtopCon.Con]::Read()) {
-        if ($e.Kind -eq 1) {
-          $sh = ($e.Ctrl -band 0x10) -ne 0; $alt = ($e.Ctrl -band 0x3) -ne 0; $ctl = ($e.Ctrl -band 0xC) -ne 0
-          $ki = [ConsoleKeyInfo]::new($e.Ch, [ConsoleKey][int]$e.Vk, $sh, $alt, $ctl)
-          for ($r = 0; $r -lt [math]::Min($e.Repeat, 10); $r++) { $script:InQ.Enqueue($ki) }
-        } else { $script:InQ.Enqueue($e) }
-      }
-    } elseif ([Console]::KeyAvailable) { $script:InQ.Enqueue([Console]::ReadKey($true)) }
+    if ($script:Mouse) { Add-ConsoleInputEvents ([CtopCon.Con]::Read()) }
+    elseif ([Console]::KeyAvailable) { $script:InQ.Enqueue([Console]::ReadKey($true)) }
   }
   if ($script:InQ.Count) { return $script:InQ.Dequeue() }
   return $null
@@ -4297,6 +4424,16 @@ function New-View {
 # One key against the view and the last frame drawn (its row ids, page size). Returns what the loop must
 # do beyond redrawing: quit, help, closed (the log), poll, or copy-<t|y|n|d>; $null for nothing more.
 function Apply-Key($view, $k, $packet) {
+  # Commands are plain keys (Shift only picks punctuation). An Alt or Ctrl chord belongs to the terminal or
+  # the OS: Alt+q must not quit. AltGr (reported as Alt+Ctrl) types a character, such as ] on a German
+  # keyboard, and that character is taken as typed.
+  $mods = $k.Modifiers -band ([ConsoleModifiers]::Alt -bor [ConsoleModifiers]::Control)
+  if ($mods) {
+    $altGrText = $mods -eq ([ConsoleModifiers]::Alt -bor [ConsoleModifiers]::Control) -and -not [char]::IsControl($k.KeyChar) -and
+                 -not [char]::IsLetterOrDigit($k.KeyChar)
+    if (-not $altGrText) { return $null }
+    $k = [ConsoleKeyInfo]::new($k.KeyChar, [Enum]::ToObject([ConsoleKey], 0), $false, $false, $false)
+  }
   $ids = @($packet.Ids); $idx = [array]::IndexOf($ids, [string]$view.SelectedId); $page = [math]::Max(1, [int]$packet.PageRows)
   $to = $null
   switch ($k.Key) {

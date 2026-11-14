@@ -17,6 +17,7 @@
 
 - **Every time a PR is opened or reported on, state its merge status in plain words** (user, 2026-11-02): **ready to merge** (CI green and nothing else pending), or **not ready**, and what it waits on (CI still running, an audit, a fix). Put the same in a "Merge status" section of the PR description, and update it when the status changes. "I opened the PR" alone was read as "ready", and PR #4 was merged before its CI finished.
 - PRs go through Sol's audit, as PR #2 did. PRs #3 and #4 were merged without one (a miss); Sol audited them afterwards, and the fixes are in PR #5.
+- **`main` is protected (2026-11-13):** every change goes through a PR, admins included; no force-push, no deletion; no approving review required. **Not yet: requiring CI to pass before a merge.** User, 2026-11-13: "Not right now. But later? FOR SURE." When it is turned on, a PR whose last commit is `[skip ci]` cannot merge until a commit without it is pushed.
 
 ## Pending work: sessions from other agents
 

@@ -23,6 +23,8 @@ Describe 'the command line' {
     @{ Name = 'a flag it lacks';     Argv = @('-Bogus');           Says = 'Bogus' }
     @{ Name = 'a stray word';        Argv = @('foo');              Says = 'foo' }
     @{ Name = 'a bare number (no flag names it: it set -Tick)'; Argv = @('500'); Says = '500' }
+    @{ Name = 'a -HighlightModel that is not a regular expression'; Argv = @('-Version', '-HighlightModel', '['); Says = 'HighlightModel' }
+    @{ Name = 'a -SelectBg that is not an SGR code'; Argv = @('-Version', '-SelectBg', '1m;31'); Says = 'SelectBg' }
   ) {
     $x = Invoke-Ctop $Argv
     $x.Code | Should -Not -Be 0
