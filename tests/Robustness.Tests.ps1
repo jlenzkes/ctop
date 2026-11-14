@@ -70,6 +70,15 @@ Describe 'Move-Over' {
     try { { Move-Over $script:src $script:dst } | Should -Throw } finally { $fs.Dispose() }
     [IO.File]::ReadAllText($script:dst) | Should -Be 'old'
   }
+  # Tells the one-step rename from File.Replace by behaviour: ReplaceFile succeeds over a file held with
+  # delete sharing (as Open-Shared holds it), MoveFileEx with replace-existing does not (measured 2026-11-13).
+  # So a Move-Over that fell back to File.Replace on this runtime would succeed here.
+  It 'renames in one step on this runtime, not through File.Replace (Windows)' -Skip:(-not ($IsWindows -or $env:OS -eq 'Windows_NT')) {
+    [IO.File]::WriteAllText($script:dst, 'old')
+    $fs = Open-Shared $script:dst
+    try { { Move-Over $script:src $script:dst } | Should -Throw } finally { $fs.Dispose() }
+    [IO.File]::ReadAllText($script:dst) | Should -Be 'old'
+  }
   It 'replaces through MoveFileEx, as on Windows PowerShell 5.1 (Windows)' -Skip:(-not ($IsWindows -or $env:OS -eq 'Windows_NT')) {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path -Parent $PSScriptRoot) 'ctop.ps1'), [ref]$null, [ref]$null)
     $assign = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$script:ConSrc' }, $true)
