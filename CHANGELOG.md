@@ -2,6 +2,17 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+
+## 2026.11.13.16 — the hover box
+
+- the hover line becomes a box: rest the pointer on a cell and a framed box opens right under it (above it
+  near the bottom of the screen), lined up with the column, up to 56 characters wide: the column and row
+  in its title, the cell's whole value, then what the column means, dimmed. It closes when the pointer
+  leaves the cell or a key is pressed. The bottom line keeps the key hints (the user, 2026-11-13: the
+  bottom line was not obviously a tooltip, and one line was too few for long values).
+- tests: the box's geometry (under or above the row, at the column's edge, inside the window, every line
+  the same width), the overlay (cells left and right of the box kept), word wrapping with a cut ….
+
 ## 2026.11.13.15 — RECACHE gets its own column; BRANCH at most 14 wide
 
 - RECACHE, a new column right after CACHE: what the next turn costs once the prompt cache is cold (the

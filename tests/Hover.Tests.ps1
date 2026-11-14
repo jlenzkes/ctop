@@ -1,5 +1,5 @@
-﻿# The hover line: with the mouse on (Windows), the console reports pointer moves; the footer then shows the
-# cell under the pointer in full, and what its column means (the help screen's own words).
+﻿# The hover box: with the mouse on (Windows), the console reports pointer moves; a framed box under the cell
+# the pointer rests on shows the cell in full and what its column means (the help screen's own words).
 BeforeAll {
   . (Join-Path $PSScriptRoot 'Import-Ctop.ps1')
   $script:Pricing = @(@{ Match = '^priced$'; In = 5; Out = 25; Read = 0.5; W5 = 6.25; W1h = 10 })
@@ -32,36 +32,62 @@ Describe 'Get-ColumnMeaning' {
   }
 }
 
-Describe 'Format-Hover' {
-  It 'shows a CACHE cell as peek does, then what the column means' {
-    $t = Format-Hover (Row 'ctop-cc') 'CACHE' 400
-    $t | Should -Match '^  CACHE · ctop-cc: warm, 43 min left \(1h, last call [0-9:]{8}\) · next turn ≈ \$0\.11 warm, \$2\.20 cold \(220K tokens\)'
-    $t | Should -Match '— prompt cache: minutes left'
+Describe 'Get-HoverParts' {
+  It 'shows a CACHE cell as peek does, and what the column means' {
+    $p = Get-HoverParts (Row 'ctop-cc') 'CACHE'
+    $p.Title | Should -Be 'CACHE · ctop-cc'
+    $p.Value | Should -Match '^warm, 43 min left \(1h, last call [0-9:]{8}\) · next turn ≈ \$0\.11 warm, \$2\.20 cold \(220K tokens\)'
+    $p.Meaning | Should -Match '^prompt cache: minutes left'
   }
   It 'shows LAST ACTION and BRANCH whole, where the cells are cut' {
-    Format-Hover (Row 'a') 'LAST ACTION' 400 | Should -Match 'LAST ACTION · a: Bash git log --oneline -5 --graph'
-    Format-Hover (Row 'a') 'BRANCH' 400 | Should -Match 'BRANCH · a: claude/a-rather-long-branch-name'
+    (Get-HoverParts (Row 'a') 'LAST ACTION').Value | Should -Be 'Bash git log --oneline -5 --graph'
+    (Get-HoverParts (Row 'a') 'BRANCH').Value | Should -Be 'claude/a-rather-long-branch-name'
   }
   It 'names a subagent row without its tree rail' {
-    Format-Hover (Row '  ├ general-purpose') 'STATE' 400 | Should -Match '^  STATE · general-purpose: working'
+    (Get-HoverParts (Row '  ├ general-purpose') 'STATE').Title | Should -Be 'STATE · general-purpose'
   }
-  It 'fits the window width' {
-    $t = Format-Hover (Row 'a') 'CACHE' 60
-    Get-CellWidth $t | Should -BeLessOrEqual 60
+  It 'says what RECACHE prices' {
+    (Get-HoverParts (Row 'a') 'RECACHE').Value | Should -Match '^\$2\.20 to write 220K tokens back into the cache \(1h\)'
   }
 }
 
-Describe 'Get-HoverText' {
+Describe 'Split-Words' {
+  It 'keeps every line within <W> cells, breaking a word longer than a line' -ForEach @(@{ W = 10 }, @{ W = 16 }) {
+    foreach ($l in (Split-Words 'warm, 43 min left (1h, last call 21:12:03) claude/a-rather-long-branch-name' $W 20)) {
+      Get-CellWidth $l | Should -BeLessOrEqual $W
+    }
+  }
+  It 'ends with … when there are more than <Max> lines of it' -ForEach @(@{ Max = 2 }) {
+    $l = @(Split-Words ('word ' * 40) 12 $Max)
+    $l.Count | Should -Be $Max
+    $l[-1] | Should -Match '…$'
+  }
+}
+
+Describe 'Get-HoverBox' {
   BeforeAll {
     $script:ShownCols = @(@{ Name = 'NAME'; Width = 10 }, @{ Name = 'CACHE'; Width = 5 }); $script:ShownSep = 2
-    $script:BodyY0 = 5; $script:BodyMap = @(0, 0, -1, 1, 1)   # two rows of two lines, a gap line between
     $rows = @((Row 'first'), (Row 'second'))
   }
-  It 'is the hovered cell''s line over a row' {
-    Get-HoverText ([pscustomobject]@{ Hover = [pscustomobject]@{ X = 13; Y = 8 }; PeekId = $null }) $rows 200 | Should -Match '^  CACHE · second:'
-    Get-HoverText ([pscustomobject]@{ Hover = [pscustomobject]@{ X = 2; Y = 6 }; PeekId = $null }) $rows 200 | Should -Match '^  NAME · first: first'
+  BeforeEach { $script:BodyY0 = 5; $script:BodyMap = @(0, 0, -1, 1, 1) }   # two rows of two lines, a gap line between
+  It 'is a framed box under the hovered row, at its column''s left edge' {
+    $b = Get-HoverBox ([pscustomobject]@{ Hover = [pscustomobject]@{ X = 13; Y = 6 }; PeekId = $null }) $rows 120 40
+    $b.Y | Should -Be 7          # under the first row's two lines (5, 6)
+    $b.X | Should -Be 12         # CACHE starts after NAME (10) and the separator (2)
+    $b.Lines[0] | Should -Match '^┌ CACHE · first ─+┐$'
+    $b.Lines[-1] | Should -Match '^└─+┘$'
+    $w = Get-CellWidth (Strip-Ansi $b.Lines[0])
+    foreach ($l in $b.Lines) { Get-CellWidth (Strip-Ansi $l) | Should -Be $w }
   }
-  It 'is empty <Name>' -ForEach @(
+  It 'opens above the row when there is no room below' {
+    $b = Get-HoverBox ([pscustomobject]@{ Hover = [pscustomobject]@{ X = 2; Y = 9 }; PeekId = $null }) $rows 120 12
+    ($b.Y + $b.Lines.Count) | Should -BeLessOrEqual 8   # ends above the second row (lines 8, 9)
+  }
+  It 'stays inside a narrow window' {
+    $b = Get-HoverBox ([pscustomobject]@{ Hover = [pscustomobject]@{ X = 13; Y = 6 }; PeekId = $null }) $rows 30 40
+    ($b.X + (Get-CellWidth (Strip-Ansi $b.Lines[0]))) | Should -BeLessOrEqual 30
+  }
+  It 'is none <Name>' -ForEach @(
     @{ Name = 'with no pointer seen';     Hover = $null;                                     Peek = $null }
     @{ Name = 'over the header';          Hover = [pscustomobject]@{ X = 2; Y = 3 };         Peek = $null }
     @{ Name = 'over a line between rows'; Hover = [pscustomobject]@{ X = 2; Y = 7 };         Peek = $null }
@@ -69,7 +95,29 @@ Describe 'Get-HoverText' {
     @{ Name = 'below the table';          Hover = [pscustomobject]@{ X = 2; Y = 30 };        Peek = $null }
     @{ Name = 'in peek';                  Hover = [pscustomobject]@{ X = 2; Y = 5 };         Peek = 'x' }
   ) {
-    Get-HoverText ([pscustomobject]@{ Hover = $Hover; PeekId = $Peek }) $rows 200 | Should -BeNullOrEmpty
+    Get-HoverBox ([pscustomobject]@{ Hover = $Hover; PeekId = $Peek }) $rows 120 40 | Should -BeNullOrEmpty
+  }
+}
+
+Describe 'Add-HoverBox' {
+  It 'draws the box over the lines, keeping what is left and right of it' {
+    $lines = @('0123456789abcdefghij', @{ Text = 'ABCDEFGHIJKLMNOPQRST'; Fg = 'DarkGray' }, 'short')
+    $box = @{ X = 4; Y = 0; Lines = @('┌──┐', '│xy│', '└──┘') }
+    $out = Add-HoverBox $lines $box
+    Strip-Ansi $out[0] | Should -Be '0123┌──┐89abcdefghij'
+    Strip-Ansi $out[1] | Should -Be 'ABCD│xy│IJKLMNOPQRST'
+    Strip-Ansi $out[2] | Should -Be 'shor└──┘'
+  }
+  It 'pads a short line out to the box' {
+    $out = Add-HoverBox @('ab') @{ X = 4; Y = 0; Lines = @('┌┐') }
+    Strip-Ansi $out[0] | Should -Be 'ab  ┌┐'
+  }
+  It 'adds lines when the box runs past the frame' {
+    $out = Add-HoverBox @('a') @{ X = 0; Y = 0; Lines = @('┌┐', '└┘') }
+    $out.Count | Should -Be 2
+  }
+  It 'leaves the lines alone with no box' {
+    (Add-HoverBox @('a', 'b') $null).Count | Should -Be 2
   }
 }
 
@@ -86,17 +134,17 @@ Describe 'Read-Keys and Show-Packet with a hover' {
     $view.Hover.X | Should -Be 14
     $view.SelectedId | Should -Be 'a'
   }
-  It 'clears the hover on a key press, so the footer''s key hints come back' {
+  It 'clears the hover on a key press, so the box goes away' {
     $view = New-View; $view.Hover = [pscustomobject]@{ X = 1; Y = 1 }
     $script:InQ.Enqueue([ConsoleKeyInfo]::new([char]']', [ConsoleKey]::Oem6, $false, $false, $false))
     Mock Next-Input { if ($script:InQ.Count) { $script:InQ.Dequeue() } else { $null } }
     Read-Keys $view @{ Ids = @('a'); PageRows = 1 } | Out-Null
     $view.Hover | Should -BeNullOrEmpty
   }
-  It 'draws the hover line in the footer''s place, and keeps the footer for clicks' {
+  It 'keeps the footer''s key hints on the bottom line' {
     Mock Write-Frame { $script:Drawn = $footer }
-    Show-Packet ([pscustomobject]@{ Lines = @('x'); Footer = '  q quit'; Hover = '  CACHE · a: warm'; Ids = @(); BodyMap = @(); BodyY0 = 0 })
-    $script:Drawn | Should -Be '  CACHE · a: warm'
+    Show-Packet ([pscustomobject]@{ Lines = @('x'); Footer = '  q quit'; Ids = @(); BodyMap = @(); BodyY0 = 0 })
+    $script:Drawn | Should -Be '  q quit'
     $script:ShownFooter | Should -Be '  q quit'
   }
 }

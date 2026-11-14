@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.15 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.16 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.15'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.16'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -4149,8 +4149,8 @@ function Show-Help {
     '           A Cline session (VIA cline) is read from Cline''s own files instead: see CLINE below)',
     'MOUSE   (Windows; -NoMouse turns it off)  click a row to select it, click it again or double-click',
     '  to peek, wheel to move, click a footer item for its key, click in peek to close it. To select',
-    '  text in the terminal while ctop runs, hold Shift while dragging. Rest the pointer on a cell and the',
-    '  bottom line shows it whole, with what its column means (a key brings the key hints back).',
+    '  text in the terminal while ctop runs, hold Shift while dragging. Rest the pointer on a cell and a box',
+    '  under it shows the cell whole, with what its column means; a key or moving off the cell closes it.',
     '',
     '  NAME        J  session name (/rename or --name); for subagents see SUBAGENT NAMES above',
     '  COST Σ      T  second line of a session''s COST: the whole tree — the session, every subagent it',
@@ -4499,11 +4499,13 @@ function Get-ColumnMeaning([string]$name) {
   }
   return $script:ColumnMeaning[$name]
 }
-# The hover line for one cell: '  <COLUMN> · <row>: <whole value>   — <what the column means>', in $width cells.
-function Format-Hover($r, [string]$name, [int]$width) {
+# What the hover box says about one cell: its column and row, the whole value, and what the column means.
+function Get-HoverParts($r, [string]$name) {
   $inv = [Globalization.CultureInfo]::InvariantCulture
   $v = switch ($name) {
     'CACHE'       { Format-CachePeek $r._Cache $r._Act.Model }
+    'RECACHE'     { $d = Get-CacheColdDollars $r._Cache $r._Act.Model
+                    if ($null -ne $d) { '$' + $d.ToString('0.00', $inv) + " to write $([math]::Round([double]$r._Cache.RecacheTokens / 1000))K tokens back into the cache ($($r._Cache.Ttl))" } else { [string]$r.RECACHE } }
     'LAST ACTION' { if ($r._Act.LastFull) { [string]$r._Act.LastFull } else { [string]$r.$name } }
     'COST'        { $t = [string]$r.COST
                     if (-not $r._Parent -and $null -ne $r._TreeCost -and [double]$r._TreeCost -ge [double]$r._Act.Cost + 0.005) { $t += ' · whole tree Σ$' + ([double]$r._TreeCost).ToString('0.00', $inv) }
@@ -4512,20 +4514,76 @@ function Format-Hover($r, [string]$name, [int]$width) {
   }
   $v = ([string]$v -replace '\s+', ' ').Trim(); if (-not $v) { $v = '-' }
   $who = ([string]$r.NAME -replace '^\s*[│ ]*[└├] ', '').Trim()
-  $mean = Get-ColumnMeaning $name
-  $text = "  $name · ${who}: $v" + $(if ($mean) { "   — $mean" } else { '' })
-  return (Fit $text ([math]::Max(10, $width)) 'L').TrimEnd()
+  return @{ Title = "$name · $who"; Value = $v; Meaning = [string](Get-ColumnMeaning $name) }
 }
-# The hover line for this frame, or $null: the pointer over a cell of a row (not the header, a line
-# between rows, a gap between columns, or peek).
-function Get-HoverText($view, [object[]]$sorted, [int]$width) {
+# Words of $text in lines of at most $w cells, at most $max lines (the last cut with …).
+function Split-Words([string]$text, [int]$w, [int]$max) {
+  $out = [System.Collections.Generic.List[string]]::new(); $cur = ''
+  foreach ($word in ($text -split ' ')) {
+    if (-not $word) { continue }
+    while ((Get-CellWidth $word) -gt $w) {   # a word longer than a line: break it
+      if ($cur) { $out.Add($cur); $cur = '' }
+      $head = Limit-Cells $word $w; $out.Add($head); $word = $word.Substring($head.Length)
+    }
+    $try = if ($cur) { "$cur $word" } else { $word }
+    if ((Get-CellWidth $try) -le $w) { $cur = $try } else { $out.Add($cur); $cur = $word }
+  }
+  if ($cur) { $out.Add($cur) }
+  if ($out.Count -gt $max) {
+    $keep = @($out.GetRange(0, $max)); $keep[$max - 1] = (Limit-Cells $keep[$max - 1] ($w - 1)) + [char]0x2026
+    return $keep
+  }
+  return @($out)
+}
+# The hover box for this frame, or $null: with the pointer over a cell of a row (not the header, a line
+# between rows, a gap between columns, or peek), a framed box under that row (above it when there is no
+# room below), lined up with the column: @{ X; Y; Lines } in screen cells, lines already painted.
+function Get-HoverBox($view, [object[]]$sorted, [int]$width, [int]$height) {
   if ($view.PeekId -or -not $view.Hover -or -not $script:BodyMap) { return $null }
   $i = [int]$view.Hover.Y - [int]$script:BodyY0
   $map = @($script:BodyMap)
   if ($i -lt 0 -or $i -ge $map.Count -or [int]$map[$i] -lt 0 -or [int]$map[$i] -ge $sorted.Count) { return $null }
+  $ord = [int]$map[$i]
   $col = Get-ColumnAt ([int]$view.Hover.X)
   if (-not $col) { return $null }
-  return Format-Hover $sorted[[int]$map[$i]] $col $width
+  $parts = Get-HoverParts $sorted[$ord] $col
+  $inner = [math]::Max(16, [math]::Min(56, $width - 4))
+  $body = @(Split-Words $parts.Value $inner 5)
+  $mean = if ($parts.Meaning) { @(Split-Words $parts.Meaning $inner 4) } else { @() }
+  $title = Limit-Cells $parts.Title ($inner - 2)
+  $lines = [System.Collections.Generic.List[string]]::new()
+  $lines.Add('┌ ' + $title + ' ' + ('─' * [math]::Max(0, $inner - (Get-CellWidth $title))) + '┐')
+  foreach ($l in $body) { $lines.Add('│ ' + $l + (' ' * ($inner - (Get-CellWidth $l))) + ' │') }
+  foreach ($l in $mean) { $lines.Add('│ ' + (Paint ($l + (' ' * ($inner - (Get-CellWidth $l)))) 'dim') + ' │') }
+  $lines.Add('└' + ('─' * ($inner + 2)) + '┘')
+  # the hovered row's lines on screen, and the column's left edge
+  $first = [array]::IndexOf($map, $ord); $last = [array]::LastIndexOf($map, $ord)
+  $x = 0; foreach ($c in @($script:ShownCols)) { if ($c.Name -eq $col) { break }; $x += [int]$c.Width + [int]$script:ShownSep }
+  $boxW = $inner + 4
+  $x = [math]::Max(0, [math]::Min($x, $width - $boxW))
+  $below = [int]$script:BodyY0 + $last + 1
+  $y = if ($below + $lines.Count -le $height - 1) { $below } else { [math]::Max(0, [int]$script:BodyY0 + $first - $lines.Count) }
+  return @{ X = $x; Y = $y; Lines = @($lines) }
+}
+# The frame's lines with the box drawn over them: the cells left of the box keep their colors, the box
+# replaces its cells, and the text right of it is kept, plain. A row under the box loses its row styling
+# (selection, dimming) for those lines.
+function Add-HoverBox([object[]]$lines, $box) {
+  if (-not $box) { return ,$lines }
+  $out = [System.Collections.Generic.List[object]]::new(); foreach ($l in $lines) { $out.Add($l) }
+  $boxW = Get-CellWidth (Strip-Ansi $box.Lines[0])
+  for ($k = 0; $k -lt $box.Lines.Count; $k++) {
+    $y = $box.Y + $k
+    while ($out.Count -le $y) { $out.Add('') }
+    $base = $out[$y]; $text = if ($base -is [string]) { $base } else { [string]$base.Text }
+    $plain = Strip-Ansi $text; $pw = Get-CellWidth $plain
+    $left = if ($pw -ge $box.X) { Truncate-Ansi $text $box.X } else { $text + "$([char]27)[0m" }
+    $leftW = Get-CellWidth (Strip-Ansi $left)
+    $pad = ' ' * [math]::Max(0, $box.X - $leftW)
+    $right = Last-Cells $plain ([math]::Max(0, $pw - $box.X - $boxW))
+    $out[$y] = $left + $pad + $box.Lines[$k] + $right
+  }
+  return ,$out.ToArray()
 }
 
 # ---- one frame -------------------------------------------------------------------
@@ -4660,8 +4718,8 @@ function Invoke-Frame($view) {
     $frame += $head + $body
   }
   $foot = Build-Footer
-  $hover = Get-HoverText $view $sorted ((Get-WindowWidth) - 1)   # $null unless the pointer is over a cell
-  $lines = $frame; $footer = $foot
+  # the hover box: drawn over the table, under the cell the pointer rests on (Windows, mouse on)
+  $lines = Add-HoverBox $frame (Get-HoverBox $view $sorted (Get-WindowWidth) (Get-WindowHeight)); $footer = $foot
   if ($script:PeekId) {
     $pr = $sorted | Where-Object _SessionId -eq $script:PeekId | Select-Object -First 1
     if ($pr) { $lines = Build-Peek $pr; $footer = "  live peek   ↑↓ other session   esc/enter close   t path   y resume   n contact   d ID   h help" }
@@ -4680,7 +4738,7 @@ function Invoke-Frame($view) {
   if ($script:Roster.Count -and @($sorted).Count) { $script:LiveShown = $true }
   $script:LastFrameMs = [int]$frameSw.ElapsedMilliseconds
   Write-SwallowedErrors
-  return @{ Lines = @($lines); Footer = $footer; Hover = $hover; Ids = @(foreach ($r in $sorted) { [string]$r._SessionId }); SelectedId = $selectedId
+  return @{ Lines = @($lines); Footer = $footer; Ids = @(foreach ($r in $sorted) { [string]$r._SessionId }); SelectedId = $selectedId
             PeekId = $script:PeekId; PageRows = [int]$script:PageRows; BodyMap = @($script:BodyMap); BodyY0 = [int]$script:BodyY0; Copy = $copy
             PollBusy = [bool]$script:Poll; Rev = $view.Rev }
 }
@@ -4779,10 +4837,9 @@ function Copy-From([string]$what, $c) {
 function Show-Packet($packet, [string]$note = '') {
   if (-not $script:TracedRows -and @($packet.Ids).Count) { $script:TracedRows = $true; Write-Trace 'first frame with sessions drawn' }
   $foot = if ((Get-Date) -lt $script:FlashUntil) { "  ► $($script:Flash)" } elseif ($note) { $note } else { [string]$packet.Footer }
-  $script:ShownFooter = $foot   # what a click on the bottom line means, even while the hover line covers it
+  $script:ShownFooter = $foot
   $script:BodyMap = @($packet.BodyMap); $script:BodyY0 = [int]$packet.BodyY0
-  $drawn = if ($packet.Hover -and $foot -eq [string]$packet.Footer) { [string]$packet.Hover } else { $foot }
-  Write-Frame @($packet.Lines) $drawn
+  Write-Frame @($packet.Lines) $foot
 }
 # Keys and mouse waiting now, against the view; returns 'quit' or $null. Shared by both loops.
 function Read-Keys($view, $packet) {
@@ -4982,7 +5039,6 @@ function Read-WorkerFrame([string]$line) {
   if ($p.Lines -isnot [array] -or -not (& $isInt $p.Rev)) { return $null }
   foreach ($l in $p.Lines) { if ($null -ne $l -and $l -isnot [string] -and $l.GetType().FullName -ne 'System.Management.Automation.PSCustomObject') { return $null } }   # a null line draws as blank
   if ($null -ne $p.Footer -and $p.Footer -isnot [string]) { return $null }
-  if ($null -ne $p.Hover -and $p.Hover -isnot [string]) { return $null }
   if ($null -ne $p.Ids -and $p.Ids -isnot [array]) { return $null }
   return $p
 }
