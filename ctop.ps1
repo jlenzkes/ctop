@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.5 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.7 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.5'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.7'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -836,14 +836,19 @@ function Move-Over([string]$src, [string]$dst) {
   if (-not [CtopCon.Fs]::MoveOver($src, $dst)) { throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
 }
 # Files other programs write, rename and delete (transcripts, session files, chat files, git's HEAD) are
-# opened sharing Read, Write AND Delete: without Delete, a rename or delete by Claude Code, VS Code or git
-# fails for as long as ctop holds the file (Windows; from cxtop, which opens every file this way).
+# opened sharing Read, Write AND Delete (Windows; from cxtop, which opens every file this way). Measured
+# 2026-11-13 against a file held so: a delete (Node's unlinkSync too) and git's rename of HEAD.lock over HEAD
+# succeed, where without Delete they fail. Node's fs.rename and MoveFileEx with replace-existing over it
+# still fail (EPERM / access denied): Windows refuses those over any open file. ctop holds a file only for
+# the length of a read.
 function Open-Shared([string]$path) {
   [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
 }
-# Whether a line of the file holds $needle (ordinal), read line by line through Open-Shared.
+# Whether a line of the file holds $needle (ordinal), read line by line through Open-Shared. A file that is
+# gone or can't be opened holds nothing (as Select-String's suppressed error gave before).
 function Test-SharedContains([string]$path, [string]$needle) {
-  $fs = Open-Shared $path
+  $fs = $null
+  try { $fs = Open-Shared $path } catch { return $false }
   try {
     $sr = [IO.StreamReader]::new($fs)
     while ($null -ne ($line = $sr.ReadLine())) { if ($line.Contains($needle)) { return $true } }
@@ -4267,19 +4272,33 @@ namespace CtopCon {
   }
 }
 '@
+# The compiled console helper's DLL: named by a hash of the source (String.GetHashCode is randomized per
+# process in .NET Core) and by the runtime, since a DLL PowerShell 7 compiled doesn't load in Windows
+# PowerShell 5.1 ("Unable to load one or more of the requested types", measured 2026-11-13).
+function Get-ConDllPath {
+  $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:ConSrc)), 0, 4) -replace '-'
+  $ed = if ($PSVersionTable.PSEdition -eq 'Core') { 'core' } else { 'desktop' }
+  Join-Path $ConfigDir "ctop-con-$h-$ed.dll"
+}
+# Deletes the helper DLLs of other sources for this runtime, and those named before the runtime was in the
+# name. The other runtime's are left alone: deleting them would make PowerShell 7 and 5.1 recompile on every
+# switch. One still loaded by a running ctop is locked, and stays.
+function Remove-OldConDlls([string]$keep) {
+  $ed = if ($keep -match '-(core|desktop)\.dll$') { $Matches[1] } else { return }
+  Get-ChildItem -LiteralPath (Split-Path -Parent $keep) -Filter 'ctop-con-*.dll' -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -ne $keep -and $_.Name -match "^ctop-con-[0-9A-Fa-f]{8}(-$ed)?\.dll$" } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+}
 # Loads CtopCon (Windows only); $true when it is loaded. Compiled once to a DLL beside the caches: compiling
-# on every start would cost ~1 s. Named by a hash of the source (String.GetHashCode is randomized per process
-# in .NET Core); DLLs from other versions of the source are deleted (one still loaded by a running ctop stays).
+# on every start would cost ~1 s.
 function Import-ConType {
   if ('CtopCon.Con' -as [type]) { return $true }
   if (-not ($IsWindows -or $env:OS -eq 'Windows_NT')) { return $false }
   try {
-    $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:ConSrc)), 0, 4) -replace '-'
-    $dll = Join-Path $ConfigDir "ctop-con-$h.dll"
+    $dll = Get-ConDllPath
     if (-not (Test-Path -LiteralPath $dll)) {
       Add-Type -TypeDefinition $script:ConSrc -OutputAssembly $dll -OutputType Library -ErrorAction Stop
-      Get-ChildItem -LiteralPath $ConfigDir -Filter 'ctop-con-*.dll' -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -ne $dll } | Remove-Item -Force -ErrorAction SilentlyContinue
+      Remove-OldConDlls $dll
     }
     Add-Type -Path $dll -ErrorAction Stop
     return $true
