@@ -2,6 +2,15 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.12 — Sol's round 1 on PR #8
+
+- a transcript line's own fields are read where Claude Code writes them: whether it is a user or an
+  assistant entry from its message's first key, `isSidechain` from the fields before the message, the model
+  from the message's first key, and the usage from the last `"usage"` in the line (it follows the content).
+  A tool's input can hold look-alikes of all four; one used to wipe the countdown or count a turn. COST
+  reads its tokens from the same place, so a tool input holding `"input_tokens"` no longer skews it
+- the `cache` sort orders gone sessions by their cache too (they kept the newest-gone order)
+
 ## 2026.11.13.11 — Sol's round 1 on PR #7
 
 - the console helper is compiled under a name of its own and renamed into place. ctops starting at the

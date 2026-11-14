@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.11 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.12 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.11'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.12'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -962,10 +962,16 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
         if ($line -match '"customTitle":"((?:[^"\\]|\\.)*)"') { $st.Title = Unescape-Json($Matches[1]) }
         continue
       }
-      if ($line.Contains('"type":"user"')) {
+      # The entry's own shape, read where Claude Code writes it rather than anywhere in the line: a tool's
+      # input is an object inside the line and can hold "type":"user", "isSidechain":true, a "model" or a
+      # "usage" of its own (Sol, 2026-11-13). The message's first key says whose it is (an assistant's
+      # starts with its model, a user's with its role); isSidechain is among the scalars before it.
+      $shape = Get-EntryShape $line
+      $side = if ($null -ne $shape.Side) { $shape.Side } else { $line.Contains('"isSidechain":true') }
+      if ($line.Contains('"type":"user"') -and $shape.Kind -ne 'assistant') {
         # the prompt cache's request time, as the extension keeps it: the latest main-thread user entry
         # (a prompt, a tool result, a compact summary) since the last recorded call
-        if ($isSub -or -not $line.Contains('"isSidechain":true')) {
+        if ($isSub -or -not $side) {
           $uts = Get-LineTimestamp $line $tailPart; $ut = ConvertFrom-CacheTime $uts
           if ($ut -and -not ($st.CacheReqAt -and (ConvertFrom-CacheTime $st.CacheReqAt) -ge $ut)) { $st.CacheReqAt = $uts }
         }
@@ -981,7 +987,7 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
           }
           if ($line -match '"timestamp":"([^"]+)"') { try { $st.TurnStart = [datetime]$Matches[1] } catch {} }
         }
-      } elseif ($line.Contains('"type":"assistant"')) {
+      } elseif ($line.Contains('"type":"assistant"') -or $shape.Kind -eq 'assistant') {
         $st.Tools += ([regex]::Matches($line, '"type":"tool_use"')).Count
         # tool_use blocks are {"type":"tool_use","id":..,"name":"Bash","input":{..}} — name precedes input
         foreach ($m in [regex]::Matches($line, '"name":"([^"]+)","input":\{')) { $n = $m.Groups[1].Value; $st.ToolCounts[$n] = 1 + [int]$st.ToolCounts[$n] }
@@ -998,18 +1004,22 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
         # outbound SendMessage, and keeps it when later messages are sent (verified 2026-09-14 against
         # sessions that sent a re-verdict: the picker kept the original). First wins.
         if (-not $st.MsgSummary -and $line -match '"name":"SendMessage","input":\{[^}]*?"summary":"((?:[^"\\]|\\.)*)"') { $st.MsgSummary = Unescape-Json($Matches[1]) }
-        if ($line -match '"model":"([^"]+)"') { $m = $Matches[1]; if ($m -ne '<synthetic>') { $st.Model = $m } }
-        if ($line -match '"usage":\{') {
+        $model = if ($shape.Model) { $shape.Model } elseif ($line -match '"model":"([^"]+)"') { $Matches[1] } else { '' }
+        if ($model -and $model -ne '<synthetic>') { $st.Model = $model }
+        # the message's usage comes after its content (tool inputs included): the last one in the line
+        $ua = $line.LastIndexOf('"usage":{')
+        if ($ua -ge 0) {
+          $us = $line.Substring($ua)
           $id = if ($line -match '"id":"(msg_[^"]+)"') { $Matches[1] } else { '' }
-          $in  = if ($line -match '"input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $out = if ($line -match '"output_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $cr  = if ($line -match '"cache_read_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $cw  = if ($line -match '"cache_creation_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $cw1h = if ($line -match '"ephemeral_1h_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $cw5m = if ($line -match '"ephemeral_5m_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
+          $in  = if ($us -match '"input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
+          $out = if ($us -match '"output_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
+          $cr  = if ($us -match '"cache_read_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
+          $cw  = if ($us -match '"cache_creation_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
+          $cw1h = if ($us -match '"ephemeral_1h_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
+          $cw5m = if ($us -match '"ephemeral_5m_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
           # the extension records no cache frame for a synthetic entry (an API error, a session limit, an
           # interrupt) or a sidechain one in the main thread; Update-CacheAnchor drops a call with no tokens
-          if (-not $line.Contains('"model":"<synthetic>"') -and ($isSub -or -not $line.Contains('"isSidechain":true'))) {
+          if ($model -ne '<synthetic>' -and ($isSub -or -not $side)) {
             Update-CacheAnchor $st (Get-EntryTimestamp $tailPart) $id $in $cr $cw $cw1h $cw5m
           }
           $cw5 = [math]::Max(0, $cw - $cw1h)
@@ -1034,6 +1044,25 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
 # pair is the entry's: a user message's content (prompt text, tool_result strings and text blocks) holds no
 # unescaped object before it. Not for assistant lines, whose tool_use inputs are objects that can hold such
 # a pair before the entry's own: Get-EntryTimestamp reads those (their entry-level fields are short).
+# Kind: 'assistant' or 'user' from the message's first key, '' when the line has another shape. Side: the
+# entry's isSidechain from the scalar fields before its message, $null when not found there. Model: the
+# assistant message's model (its first key), '' otherwise.
+function Get-EntryShape([string]$line) {
+  $shape = @{ Kind = ''; Side = $null; Model = '' }
+  $at = $line.IndexOf('"message":{"')
+  if ($at -ge 0) {
+    if ([string]::CompareOrdinal($line, $at + 12, 'role":"user"', 0, 12) -eq 0) { $shape.Kind = 'user' }
+    elseif ([string]::CompareOrdinal($line, $at + 12, 'model":"', 0, 8) -eq 0) {
+      $shape.Kind = 'assistant'
+      $end = $line.IndexOf('"', $at + 20)
+      if ($end -gt $at + 20) { $shape.Model = $line.Substring($at + 20, $end - $at - 20) }
+    }
+  }
+  if (-not $script:EntryHeadRx) { $script:EntryHeadRx = [regex]::new('^\{(?:"[A-Za-z_]+":(?:null|true|false|-?\d+|"(?:[^"\\]|\\.)*"),)*?"isSidechain":(true|false)', 'Compiled') }
+  $m = $script:EntryHeadRx.Match($line)
+  if ($m.Success) { $shape.Side = $m.Groups[1].Value -eq 'true' }
+  return $shape
+}
 function Get-LineTimestamp([string]$line, [string]$tail) {
   if (-not $script:EntryTsRx) { $script:EntryTsRx = [regex]::new('"uuid":"[0-9a-fA-F-]{36}","timestamp":"([^"]+)"', 'Compiled') }
   $m = $script:EntryTsRx.Match($line)
@@ -3404,7 +3433,7 @@ function Sort-Rows([object[]]$rows) {
     if ($lr) { $lr._LaunchedNames = @($launchKids[$id] | ForEach-Object { ([string]$_.NAME).Trim() }) -join ', ' }
   }
   # Live sessions sort on the mode's key. Gone ones always follow them, most recently gone first (ties,
-  # which one poll's departures share: session id), or on the mode's key in cost / ctx. Gone rows get a
+  # which one poll's departures share: session id), or on the mode's key in cost / ctx / cache. Gone rows get a
   # .NET sort on a string key: Sort-Object with script-block keys was most of the sort time with a long
   # history.
   $liveP = [System.Collections.Generic.List[object]]::new(); $goneP = [System.Collections.Generic.List[object]]::new()
@@ -3415,7 +3444,7 @@ function Sort-Rows([object[]]$rows) {
   $parents = @($liveP | Sort-Object @{ e = { & $key $_ } },
                                     @{ e = { if ($_._StartedAt) { $_._StartedAt.Ticks } else { [long]::MaxValue } } },
                                     @{ e = { $_._SessionId } })
-  if ($mode -in 'cost', 'ctx') {
+  if ($mode -in 'cost', 'ctx', 'cache') {
     $parents += @($goneP | Sort-Object @{ e = { & $key $_ } }, @{ e = { -([datetime]$_._Gone).Ticks } }, @{ e = { $_._SessionId } })
   } elseif ($goneP.Count) {
     $gone = $goneP.ToArray(); $gk = [string[]]::new($gone.Count)
