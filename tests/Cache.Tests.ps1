@@ -136,3 +136,38 @@ Describe 'the CACHE column' {
     $r._Dirty | Should -BeTrue
   }
 }
+
+Describe 'Format-CachePeek' {
+  BeforeAll {
+    $script:Pricing = @(@{ Match = '^priced$'; In = 5; Out = 25; Read = 0.5; W5 = 6.25; W1h = 10 })
+    $anchor = [datetime]::new(2026, 11, 13, 14, 2, 11, [DateTimeKind]::Local)
+  }
+  It 'gives the time left and the next turn warm and cold' {
+    $s = @{ Kind = 'warm'; Ttl = '1h'; MinutesLeft = 43; RecacheTokens = 220000; Anchor = $anchor.ToUniversalTime() }
+    Format-CachePeek $s 'priced' | Should -Be 'warm, 43 min left (1h, last call 14:02:11) · next turn ≈ $0.11 warm, $2.20 cold (220K tokens)'
+  }
+  It 'prices a cold 5-minute cache at the 5-minute write price' {
+    $s = @{ Kind = 'warm'; Ttl = '5m'; MinutesLeft = 3; RecacheTokens = 220000; Anchor = $anchor.ToUniversalTime() }
+    Format-CachePeek $s 'priced' | Should -Be 'warm, 3 min left (5m, last call 14:02:11) · next turn ≈ $0.11 warm, $1.38 cold (220K tokens)'
+  }
+  It 'leaves the dollars out for a model with no price' {
+    $s = @{ Kind = 'warm'; Ttl = '1h'; MinutesLeft = 43; RecacheTokens = 220000; Anchor = $anchor.ToUniversalTime() }
+    Format-CachePeek $s 'nobody' | Should -Be 'warm, 43 min left (1h, last call 14:02:11) · next turn (220K tokens)'
+  }
+  It 'says how long it has been idle once expired' {
+    $s = @{ Kind = 'cold'; Reason = 'expired'; Ttl = '1h'; IdleMs = 72 * 60000.0; RecacheTokens = 220000 }
+    Format-CachePeek $s 'priced' | Should -Be 'likely expired (idle 1h 12m) · next turn re-caches about 220K tokens ≈ $2.20'
+  }
+  It 'formats idle like the extension: <Want>' -ForEach @(
+    @{ Ms = 59 * 60000.0; Want = 'idle 59m' }, @{ Ms = 25 * 3600000.0 + 60000; Want = 'idle 1d 1h' }
+  ) {
+    Format-CachePeek @{ Kind = 'cold'; Reason = 'expired'; Ttl = '5m'; IdleMs = $Ms; RecacheTokens = 0 } 'priced' | Should -Match ([regex]::Escape("($Want)"))
+  }
+  It 'explains a compaction' {
+    Format-CachePeek @{ Kind = 'cold'; Reason = 'compacted' } 'priced' | Should -Be "doesn't cover the compacted conversation: the next turn re-caches it"
+  }
+  It 'says when nothing is known' {
+    Format-CachePeek @{ Kind = 'unknown' } 'priced' | Should -Be 'unknown (no cache use recorded)'
+    Format-CachePeek $null 'priced' | Should -Be 'unknown (no cache use recorded)'
+  }
+}

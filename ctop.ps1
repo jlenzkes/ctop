@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.2 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.3 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.2'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.3'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -1013,6 +1013,28 @@ function Get-CacheState($act, [datetime]$now) {
 function Format-CacheCell($state) {
   if (-not $state) { return '-' }
   switch ($state.Kind) { 'warm' { return "$($state.MinutesLeft)m" } 'cold' { return 'cold' } default { return '-' } }
+}
+
+# peek's CACHE line. The next turn's cost re-reads (warm) or re-writes (cold) the last call's whole prompt,
+# at that model's cache-read or cache-write price for the TTL: an estimate without the new message itself.
+function Format-CachePeek($state, [string]$model) {
+  if (-not $state -or $state.Kind -eq 'unknown') { return 'unknown (no cache use recorded)' }
+  if ($state.Reason -eq 'compacted') { return "doesn't cover the compacted conversation: the next turn re-caches it" }
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  $tok = [long]$state.RecacheTokens
+  $tokText = "$([math]::Round($tok / 1000))K tokens"
+  $p = if ($tok -gt 0) { Get-Price $model $tok } else { $null }
+  $writePrice = if ($p) { if ($state.Ttl -eq '1h') { [double]$p.W1h } else { [double]$p.W5 } } else { 0 }
+  $cold = '$' + ($tok * $writePrice / 1e6).ToString('0.00', $inv)
+  if ($state.Kind -eq 'warm') {
+    $at = ([datetime]$state.Anchor).ToLocalTime().ToString('HH:mm:ss', $inv)
+    $cost = if ($p) { ' ≈ $' + ($tok * [double]$p.Read / 1e6).ToString('0.00', $inv) + " warm, $cold cold" } else { '' }
+    return "warm, $($state.MinutesLeft) min left ($($state.Ttl), last call $at) · next turn$cost ($tokText)"
+  }
+  $t = [math]::Max(0, [math]::Floor([double]$state.IdleMs / 60000))   # the extension's idle format
+  $idle = if ($t -lt 60) { "${t}m" } elseif ($t -lt 1440) { "$([math]::Floor($t / 60))h $($t % 60)m" } else { "$([math]::Floor($t / 1440))d $([math]::Floor($t / 60) % 24)h" }
+  $what = if ($tok -gt 0) { "about $tokText$(if ($p) { " ≈ $cold" })" } else { 'the conversation' }
+  return "likely expired (idle $idle) · next turn re-caches $what"
 }
 
 # Read the tail of the transcript and summarize the last assistant action.
@@ -3789,6 +3811,7 @@ function Build-Peek([object]$r) {
     $(if ($r._Parent) { "  PID          runs inside its session's claude process (pid $($r._SessPid))" } else { "  PID          $($r.PID)      CPU $($r.'CPU(s)')s      MEM $($r.'MEM(MB)') MB" }),
     "  STARTED      $(if ($r._StartedAt) { $r._StartedAt.ToString('yyyy-MM-dd HH:mm:ss') } else { '-' })   (age $($r.AGE))",
     "  IDLE         $($r.IDLE)      TURN $(Paint $(if ($r.TURN) { $r.TURN } else { '-' }) (Cell-Color 'TURN' $r))      TURNS $($r.TURNS)",
+    "  CACHE        $(Paint (Format-CachePeek $r._Cache $r._Act.Model) (Cell-Color 'CACHE' $r))",
     $(Peek-Block 'TOOLS' "$($r.TOOLS) calls$(if ($r._Act.ToolMix) { ':  ' + $r._Act.ToolMix })" $pw),
     "  CTX          $($r.CTX) tokens in context      MODEL $(Paint $r.MODEL (Cell-Color 'MODEL' $r))      BRANCH $($r.BRANCH)",
     "  COMPACTIONS  $(if ($r._Act.Compacts) { "$($r._Act.Compacts)   last $(Get-Since $r._Act.LastCompactAt) ago ($($r._Act.LastCompactTrigger), $([math]::Round($r._Act.LastCompactPreTokens / 1000))K tokens before it) — context now holds a summary, not the full history" } else { 'none' })",

@@ -2,6 +2,21 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.3 — prompt-cache countdown
+
+- a CACHE column shows how long each Claude Code session's prompt cache stays warm: minutes left (`43m`),
+  yellow in the last 5 minutes of a 1-hour cache or the last minute of a 5-minute one, `cold` once
+  expired or after a compaction, `-` when unknown. Subagents get their own, and a gone session keeps
+  counting down (`claude --resume` may still hit its cache: not verified). Cline and Copilot rows show `-`
+- the rule is the Claude Code extension for VS Code's own (read in `anthropic.claude-code-2.1.323`,
+  `webview/index.js`), so the two agree: anchored on the last model call; 1 hour or 5 minutes from that
+  call's cache writes, the previous length when it only read the cache, unknown when it used none
+- CACHE takes IDLE's place on the main table; IDLE is still in peek, and STATE still turns red on it
+- peek's CACHE line says what the next turn would cost with the cache warm and cold, for example
+  `next turn ≈ $0.11 warm, $2.20 cold (220K tokens)`: an estimate that leaves out the new message
+- `o` and `-Sort` gain `cache`: soonest to go cold first, then cold, then unknown
+- the scan format changes (version 5), so each transcript is read once more from the start
+
 ## 2026.11.13.2 — more from cxtop
 
 - the files ctop reads are opened so that their owners can still rename or delete them meanwhile:

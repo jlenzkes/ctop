@@ -187,7 +187,7 @@ once, with the script line it happened on, so a column stuck at `-` can be trace
 | `y`                  | Copy its `claude --resume <id>` command |
 | `n`                  | Copy its contact, to reach it from another Claude session (see [Contacts](#contacts)) |
 | `d`                  | Copy its session ID (a subagent: its agent ID) |
-| `o`                  | Cycle sort: activity, roster, start, cost, ctx |
+| `o`                  | Cycle sort: activity, roster, start, cost, ctx, cache |
 | `v`                  | Toggle layout: wrap / truncate |
 | `c`                  | Toggle compact columns |
 | `s`                  | Toggle subagent rows |
