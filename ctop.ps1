@@ -678,6 +678,8 @@ $script:PriceFrom = 'the built-in table, read 2026-10-20 (-PricingFile for your 
 # 2: titles are unescaped (\" was kept literally)
 # 3: a prompt that mentions tool_result counts as a turn (it was taken for a tool result)
 # 4: a first prompt needs three letters in a row of any script to be the title, not three ASCII letters
+# 5: the prompt-cache anchor, TTL and compaction (the CACHE column)
+# 6: the cache anchor is the request's time, and synthetic, empty and sidechain calls change nothing
 $script:ScanVer = 6
 $script:Pricing = @(
   @{ Match = 'fable-5-1|mythos-5-1'; In = 10;  W5 = 12.5;  W1h = 20;  Read = 0.25; Out = 50 }
@@ -795,6 +797,12 @@ function Load-ScanCache {
       if ([string]$e.PriceVer -cne [string]$script:PriceVer) { continue }   # costs from another price table: rescan (a file's version is text)
       if ([int]$e.ScanVer -ne $script:ScanVer) { continue }     # extracted by an older scan: rescan
       if (-not $e.ToolCounts) { $e.ToolCounts = @{} }
+      # PowerShell 7's ConvertFrom-Json reads an ISO time as a DateTime, and [string] of that drops the
+      # milliseconds: the cache times go back to the round-trip text they were saved as
+      foreach ($tf in 'CacheAnchor', 'CacheReqAt', 'CacheCompactAt') {
+        $v = $e[$tf]
+        if ($v -is [datetime]) { $e[$tf] = $(if ($v.Kind -eq 'Unspecified') { [datetime]::SpecifyKind($v, 'Utc') } else { $v.ToUniversalTime() }).ToString('o') }
+      }
       $script:ScanCache[$k] = $e
     }
   } catch {}   # unreadable cache: just scan from scratch
@@ -997,7 +1005,7 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
           # the extension records no cache frame for a synthetic entry (an API error, a session limit, an
           # interrupt) or a sidechain one in the main thread; Update-CacheAnchor drops a call with no tokens
           if (-not $line.Contains('"model":"<synthetic>"') -and ($isSub -or -not $line.Contains('"isSidechain":true'))) {
-            Update-CacheAnchor $st (Get-LineTimestamp $line $tailPart) $id $in $cr $cw $cw1h $cw5m
+            Update-CacheAnchor $st (Get-EntryTimestamp $tailPart) $id $in $cr $cw $cw1h $cw5m
           }
           $cw5 = [math]::Max(0, $cw - $cw1h)
           $price = Get-Price $st.Model ($in + $cr + $cw)
@@ -1016,16 +1024,18 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
   return $st
 }
 
-# The entry's own timestamp: the last one in the line's tail (entry-level fields follow the message body).
-# An entry's own timestamp, anywhere in the line: it follows the entry's uuid, and on a tool result a large
-# toolUseResult object can follow it, pushing it out of the last 2000 characters (seen 2026-11-13: 7.5 KB lines).
-# The first uuid-then-timestamp pair is the entry's (nested objects come after it).
+# A USER entry's own timestamp, anywhere in the line: on a tool result a large toolUseResult object follows
+# it, pushing it out of the last 2000 characters (seen 2026-11-13: 7.5 KB lines). The first uuid-then-timestamp
+# pair is the entry's: a user message's content (prompt text, tool_result strings and text blocks) holds no
+# unescaped object before it. Not for assistant lines, whose tool_use inputs are objects that can hold such
+# a pair before the entry's own: Get-EntryTimestamp reads those (their entry-level fields are short).
 function Get-LineTimestamp([string]$line, [string]$tail) {
   if (-not $script:EntryTsRx) { $script:EntryTsRx = [regex]::new('"uuid":"[0-9a-fA-F-]{36}","timestamp":"([^"]+)"', 'Compiled') }
   $m = $script:EntryTsRx.Match($line)
   if ($m.Success) { return $m.Groups[1].Value }
   return Get-EntryTimestamp $tail
 }
+# The entry's own timestamp: the last one in the line's tail (entry-level fields follow the message body).
 function Get-EntryTimestamp([string]$tail) {
   $ms = [regex]::Matches($tail, '"timestamp":"([^"]+)"')
   if ($ms.Count) { return $ms[$ms.Count - 1].Groups[1].Value }

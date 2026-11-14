@@ -21,8 +21,10 @@ Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build numbe
   `next turn ≈ $0.11 warm, $2.20 cold (220K tokens)`: an estimate that leaves out the new message
 - `o` and `-Sort` gain `cache`: soonest to go cold first, then cold, then unknown (from the time left
   now, for rows off screen too)
-- an entry's timestamp is found anywhere in its line: a tool result's large `toolUseResult` can push it
-  out of the last 2000 characters, where ctop looked (only the cache countdown uses this)
+- a user entry's timestamp is found anywhere in its line: a tool result's large `toolUseResult` can push it
+  out of the last 2000 characters, where ctop looked (only the cache countdown uses this). Cache times keep
+  their milliseconds through the scan cache on PowerShell 7 (they were cut, so a cell could read a minute
+  low, or cold, up to a second early)
 - the scan format changes (version 6), so each transcript is read once more from the start
 
 ## 2026.11.13.4 — a review of 2026.11.13.1–.2

@@ -83,7 +83,15 @@ BeforeAll {
     # whatever -x / -y say (AlmaLinux 9's 3.2a did), and a ctop started before the resize landed drew a
     # 24-row frame (Debian 12's 3.3a, once: a peek cut short). So: a placeholder, the resize, a check
     # that tmux reports the size, and only then ctop, in that same pane.
-    $made = (& tmux new-session -d -s $s -x 200 -y $height 'sleep 600' 2>&1) -join ' '
+    # "server exited unexpectedly": seen in CI 3 times (almalinux 9 twice, debian 12), the re-runs passed.
+    # Inference: new-session reached the private server just as it was exiting after its last session
+    # closed (tmux's exit-empty). A new attempt starts a fresh server.
+    for ($try = 1; $try -le 5; $try++) {
+      $made = (& tmux new-session -d -s $s -x 200 -y $height 'sleep 600' 2>&1) -join ' '
+      if ($made -notmatch 'server exited unexpectedly|lost server|no server running') { break }
+      Write-Host "    tmux new-session try $try said: $made; trying again"
+      Start-Sleep -Milliseconds 300
+    }
     & tmux resize-window -t $s -x 200 -y $height 2>$null
     $sw = [Diagnostics.Stopwatch]::StartNew()
     while ((& tmux display -p -t $s '#{pane_width}x#{pane_height}') -ne "200x$height" -and $sw.Elapsed.TotalSeconds -lt 5) { Start-Sleep -Milliseconds 50 }

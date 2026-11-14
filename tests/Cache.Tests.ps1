@@ -90,6 +90,24 @@ Describe 'Update-Scan: the cache anchor' {
     $st.CacheTtl | Should -Be '5m'
     (At $st.CacheAnchor) | Should -Be (At '2026-11-13T12:09:00.000Z')
   }
+  It 'takes a reply''s own timestamp, not a uuid/timestamp pair inside a tool_use input' {
+    $line = '{"parentUuid":"p","isSidechain":false,"message":{"id":"msg_1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"t","name":"X","input":{"uuid":"9b3b2be4-638a-44f9-a48b-55941fedac45","timestamp":"2025-01-01T00:00:00.000Z"}}],"usage":{"input_tokens":3,"cache_creation_input_tokens":200,"cache_read_input_tokens":1000,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z","cwd":"c:\x"}'
+    $st = Scan @($line)
+    (At $st.CacheAnchor) | Should -Be (At '2026-11-13T12:00:00.000Z')
+  }
+  It 'keeps the milliseconds of the cache times through a save and a load' {
+    $script:CacheDays = 2; $script:PriceVer = 2; $script:ScanVer = 6
+    $script:ScanCachePath = Join-Path $TestDrive "sc-$([guid]::NewGuid().ToString('N')).json"
+    $now = (Get-Date).ToUniversalTime()
+    $t = $now.AddMinutes(-1).ToString('yyyy-MM-ddTHH:mm:ss') + '.250Z'
+    $script:ScanCache = @{ k = @{ Path = '/a.jsonl'; Head = 'h'; Used = $now.Ticks; PriceVer = 2; ScanVer = 6; ToolCounts = @{}
+                                  CacheAnchor = $t; CacheReqAt = $t; CacheCompactAt = $t; CacheTtl = '1h' } }
+    Mock Move-Over { [IO.File]::Copy($src, $dst, $true); [IO.File]::Delete($src) }
+    Save-ScanCache
+    $script:ScanCache = @{}
+    Load-ScanCache
+    foreach ($f in 'CacheAnchor', 'CacheReqAt', 'CacheCompactAt') { (At ([string]$script:ScanCache.k[$f])) | Should -Be (At $t) -Because $f }
+  }
   It 'keeps the first anchor across lines of one message' {
     $st = Scan @((Usage '2026-11-13T12:00:00.000Z' 'msg_1'), (Usage '2026-11-13T12:00:30.000Z' 'msg_1'))
     (At $st.CacheAnchor) | Should -Be (At '2026-11-13T12:00:00.000Z')
