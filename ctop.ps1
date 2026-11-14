@@ -24,7 +24,7 @@
   parent goes away") means inf. Ignored when -Keep is given.
 
 .PARAMETER Sort
-  Initial sort mode: activity (default), roster, start, cost, ctx. Cycle at runtime with 'o'.
+  Initial sort mode: activity (default), roster, start, cost, ctx, cache. Cycle at runtime with 'o'.
 
 .PARAMETER Layout
   wrap (default): one row per session; a cell longer than its column wraps onto extra lines
@@ -55,7 +55,7 @@
   Disable ANSI colors (STATE, TURN, MODEL, sparkline, COST).
 
 .PARAMETER Compact
-  Show only the essential columns (NAME, STATE, TURN, IDLE, CTX, LAST ACTION, ACTIVITY, COST,
+  Show only the essential columns (NAME, STATE, CACHE, TURN, CTX, LAST ACTION, ACTIVITY, COST,
   BRANCH) regardless of window width. Toggle at runtime with 'c'.
 
 .PARAMETER NoSubagents
@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.11 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.14 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -120,7 +120,7 @@ param(
   [int]$SubagentWindow = 0,
   [switch]$NoSubagents,
   [switch]$Compact,
-  [ValidateSet('activity','roster','start','cost','ctx')][string]$Sort = 'activity',
+  [ValidateSet('activity','roster','start','cost','ctx','cache')][string]$Sort = 'activity',
   [ValidateSet('wrap','truncate')][string]$Layout = 'wrap',
   [int]$WrapLines = 2,
   [int]$MaxWidth = 0,
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.11'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.14'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -678,7 +678,10 @@ $script:PriceFrom = 'the built-in table, read 2026-10-20 (-PricingFile for your 
 # 2: titles are unescaped (\" was kept literally)
 # 3: a prompt that mentions tool_result counts as a turn (it was taken for a tool result)
 # 4: a first prompt needs three letters in a row of any script to be the title, not three ASCII letters
-$script:ScanVer = 4
+# 5: the prompt-cache anchor, TTL and compaction (the CACHE column)
+# 6: the cache anchor is the request's time, and synthetic, empty and sidechain calls change nothing
+# 7: an entry is read from its own fields by its JSON structure, never from look-alikes inside a tool input
+$script:ScanVer = 7
 $script:Pricing = @(
   @{ Match = 'fable-5-1|mythos-5-1'; In = 10;  W5 = 12.5;  W1h = 20;  Read = 0.25; Out = 50 }
   @{ Match = 'fable-5|mythos-5';     In = 10;  W5 = 12.5;  W1h = 20;  Read = 1;    Out = 50 }
@@ -734,15 +737,73 @@ function Get-Price([string]$model, [long]$prompt = 0) {
 
 # ---- incremental transcript scanner ------------------------------------------------
 # Reads only bytes appended since the last scan, so a large busy transcript costs one
-# small read per tick, never a full-file grep. Per line, regex extraction (no JSON parse):
-#   user line without tool_result  -> a prompt (TURNS, TurnStart)
-#   "type":"tool_use" occurrences  -> TOOLS
-#   assistant line with usage      -> tokens + cost, deduped on message id (Claude Code writes
-#                                     one line per content block, each repeating the usage)
+# small read per tick, never a full-file grep. Each line is one entry, read by its structure
+# (Get-JsonRx; no ConvertFrom-Json):
+#   user entry without a tool_result block -> a prompt (TURNS, TurnStart)
+#   tool_use blocks of an assistant entry  -> TOOLS
+#   assistant entry with usage             -> tokens + cost, deduped on message id (Claude Code writes
+#                                             one line per content block, each repeating the usage)
 # Decode a JSON string body captured by regex. Never throws: a malformed escape returns the raw text.
 function Unescape-Json([string]$t) {
   if (-not $t -or $t.IndexOf([char]92) -lt 0) { return $t }   # no backslash, nothing escaped ('\\' would be two)
   try { return (ConvertFrom-Json ('"' + $t + '"')) } catch { return $t }
+}
+# A transcript line is one entry, a JSON object. Its own fields are the members of that object, and of its
+# message, and of that message's usage; a tool's input is a value inside the message, an object that can hold
+# anything ("type":"user", "isSidechain":true, a "usage" or a "compact_boundary" of its own: Sol, 2026-11-13).
+# So a field is read only where it is. Entry matches the line as ONE object, member by member from its start
+# (\G), skipping every value whole (a string by its quotes and escapes, an object or array by balancing its
+# brackets), and captures the wanted members under their own names: the entry's, its message's (model, id,
+# content, usage; each block of the content as an "el" capture), its usage's and that usage's cache_creation's,
+# its compactMetadata's. All in one pass over the line; a member another level holds under the same name is
+# never captured. A key written twice: the last, as JSON.parse takes it. A line that is not one whole object
+# (cut short) matches nothing. Atomic groups: a value is matched once, so a malformed line fails in linear time.
+# A content block is read only up to the member wanted (First: the first member of that name in the object
+# starting at a given place; the block was matched whole already), so a long tool input is not walked again.
+# Kind: what every entry the scan reads holds; a line without it is none of them (Update-Scan reads such a
+# line only for its cwd and branch).
+function Get-JsonRx {
+  if (-not $script:JsonRx) {
+    $str = '"[^"\\]*(?:\\.[^"\\]*)*"'
+    $val = '(?>' + $str + '|[{\[](?>[^{}\[\]"]+|' + $str + '|(?<o>[{\[])|(?<-o>[}\]]))*(?(o)(?!))[}\]]|[-+.\w]+)'
+    # an object's members; $as: a pattern tried first for a wanted member's value, to capture its own members
+    $object = {
+      param([string[]]$keys, [hashtable]$as = @{})
+      $alts = foreach ($k in $keys) {
+        $v = if ($as.ContainsKey($k)) { '(?>' + $as[$k] + '|' + $val + ')' } else { $val }
+        '"' + $k + '"\s*:\s*(?<' + $k + '>' + $v + ')'
+      }
+      # each member once, then a comma or the end: written once, not as m(,m)*, a pattern holding objects inside
+      # objects doesn't double at every level (27,541 characters were 1.4 s to compile on Windows PowerShell 5.1)
+      $m = '(?>' + ((@($alts) + @($str + '\s*:\s*' + $val)) -join '|') + ')'
+      '\{\s*(?>' + $m + '\s*(?:,\s*|(?=\})))*\}'
+    }
+    $writes  = & $object 'ephemeral_1h_input_tokens', 'ephemeral_5m_input_tokens'
+    $usage   = & $object 'input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'cache_creation' @{ cache_creation = $writes }
+    $content = '\[\s*(?>(?<el>' + $val + ')\s*(?:,\s*|(?=\])))*\]'
+    $message = & $object 'model', 'id', 'content', 'usage' @{ content = $content; usage = $usage }
+    $compact = & $object 'trigger', 'preTokens'
+    $entry   = & $object 'type', 'subtype', 'isSidechain', 'isCompactSummary', 'timestamp', 'cwd', 'gitBranch', 'message', 'aiTitle', 'summary', 'customTitle', 'compactMetadata' @{ message = $message; compactMetadata = $compact }
+    $first = { param([string]$k) [regex]::new('\G\{\s*(?:(?>' + $str + '\s*:\s*' + $val + ')\s*,\s*)*?"' + $k + '"\s*:\s*(?<v>' + $val + ')', 'Compiled') }
+    $script:JsonRx = @{
+      # (a file's first line can start with a byte-order mark: Windows PowerShell 5.1's -Encoding utf8 writes one)
+      Entry = [regex]::new('\G\uFEFF?\s*' + $entry, 'Compiled')
+      Kind  = [regex]::new('"type"\s*:\s*"(?:user|assistant|system|ai-title|summary|custom-title)"', 'Compiled')
+      Type = & $first 'type'; Name = & $first 'name'; Input = & $first 'input'; Summary = & $first 'summary'
+    }
+  }
+  return $script:JsonRx
+}
+# A captured value: the text of a JSON string (unescaped), '' for any other value or none.
+function Get-JsonString($g) {
+  if (-not $g.Success -or $g.Length -lt 2 -or $g.Value[0] -ne [char]34) { return '' }
+  return (Unescape-Json $g.Value.Substring(1, $g.Length - 2))
+}
+# A captured value: a whole number, 0 for any other value or none.
+function Get-JsonLong($g) {
+  $n = 0L
+  if ($g.Success -and [long]::TryParse($g.Value, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$n)) { return $n }
+  return 0L
 }
 
 $script:ScanCache = @{}
@@ -795,6 +856,12 @@ function Load-ScanCache {
       if ([string]$e.PriceVer -cne [string]$script:PriceVer) { continue }   # costs from another price table: rescan (a file's version is text)
       if ([int]$e.ScanVer -ne $script:ScanVer) { continue }     # extracted by an older scan: rescan
       if (-not $e.ToolCounts) { $e.ToolCounts = @{} }
+      # PowerShell 7's ConvertFrom-Json reads an ISO time as a DateTime, and [string] of that drops the
+      # milliseconds: the cache times go back to the round-trip text they were saved as
+      foreach ($tf in 'CacheAnchor', 'CacheReqAt', 'CacheCompactAt') {
+        $v = $e[$tf]
+        if ($v -is [datetime]) { $e[$tf] = $(if ($v.Kind -eq 'Unspecified') { [datetime]::SpecifyKind($v, 'Utc') } else { $v.ToUniversalTime() }).ToString('o') }
+      }
       $script:ScanCache[$k] = $e
     }
   } catch {}   # unreadable cache: just scan from scratch
@@ -875,9 +942,11 @@ function New-ScanState([System.IO.FileInfo]$file) {
   @{ Path = $file.FullName; Head = (Get-HeadPrint $file.FullName)
      PriceVer = $script:PriceVer; ScanVer = $script:ScanVer; Offset = 0; Turns = 0; Tools = 0; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0;
      LastId = ''; LastCost = 0.0; LastOut = 0; Model = '-'; AiTitle = ''; Summary = ''; Title = ''; First = ''; MsgSummary = ''; Cwd = ''; GitBranch = ''; ToolCounts = @{}
-     Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; ToolLog = @() }
+     Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; ToolLog = @()
+     CacheAnchor = ''; CacheAnchorId = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = ''; CacheReqAt = '' }
 }
 function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
+  $isSub = $file.DirectoryName -match '[\\/]subagents$'   # a subagent's own transcript: all of it is sidechain
   $st = $script:ScanCache[$key]
   # first use this run of state restored from disk: is it still the same file? (one 256-byte read)
   if ($st -and -not $script:ScanVerified.ContainsKey($key)) {
@@ -918,91 +987,212 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
     $st.Offset += $lastNl + 1
     $st.Write = $write
     $text = [Text.Encoding]::UTF8.GetString($buf, 0, $lastNl)
-    foreach ($line in $text.Split("`n")) {
-      if ($line.Length -lt 20) { continue }
-      # entry-level fields are in the last few hundred chars of a line: search only there
-      $tailPart = if ($line.Length -gt 2000) { $line.Substring($line.Length - 2000) } else { $line }
-      # Entry-level fields sit AFTER the message body (verified 2026-09-14: ... entrypoint, cwd,
-      # sessionId, version, gitBranch). Anchor on the key adjacency so a "cwd" printed inside tool
-      # output can't be mistaken for the session's location. Newest entry wins, so a session that
-      # moved into a worktree (/cd, EnterWorktree) reports its new location.
-      if ($tailPart -match '"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"sessionId"\s*:') { $st.Cwd = Unescape-Json($Matches[1]) }
-      if ($tailPart -match '"version"\s*:\s*"[^"]*"\s*,\s*"gitBranch"\s*:\s*"((?:[^"\\]|\\.)*)"') { $st.GitBranch = Unescape-Json($Matches[1]) }
+    $rx = Get-JsonRx
+    $lines = $text.Split("`n")
+    # the newest entry's cwd and branch win (a session that moved into a worktree, by /cd or EnterWorktree,
+    # reports its new location): kept raw and unescaped once at the end (a Windows path has escapes, and
+    # unescaping one on every line was most of a long transcript's scan)
+    $cwdRaw = $null; $cwdAt = -1; $branchRaw = $null; $branchAt = -1
+    for ($li = 0; $li -lt $lines.Length; $li++) {
+      $line = $lines[$li]
+      if ($line.Length -lt 20 -or -not $rx.Kind.IsMatch($line)) { continue }   # none of the kinds read here
+      $e = $rx.Entry.Match($line)
+      if (-not $e.Success) { continue }   # not one whole JSON object (cut short, say): nothing is read from it
+      $g = $e.Groups
+      if ($g['cwd'].Success) { $cwdRaw = $g['cwd']; $cwdAt = $li }
+      if ($g['gitBranch'].Success) { $branchRaw = $g['gitBranch']; $branchAt = $li }
+      $type = $g['type'].Value            # the raw value, quotes included
+      $tg = $g['timestamp']               # read here, not by Get-JsonString: a call per line costs
+      $ts = if ($tg.Length -gt 1 -and $line[$tg.Index] -eq '"') { $tg.Value.Substring(1, $tg.Length - 2) } else { '' }
+      if ($ts.IndexOf([char]92) -ge 0) { $ts = Unescape-Json $ts }
       # Compaction: {"type":"system","subtype":"compact_boundary","compactMetadata":{trigger,preTokens}}
       # followed by a user entry with isCompactSummary:true (the summary that replaces the history)
-      if ($line.Contains('"subtype":"compact_boundary"')) {
+      if ($type -ceq '"system"') {
+        if ($g['subtype'].Value -cne '"compact_boundary"') { continue }
         $st.Compacts++
-        if ($line -match '"timestamp":"([^"]+)"') { try { $st.LastCompactAt = [datetime]$Matches[1] } catch {} }
-        if ($line -match '"trigger":"([^"]+)"') { $st.LastCompactTrigger = $Matches[1] }
-        if ($line -match '"preTokens":(\d+)') { $st.LastCompactPreTokens = [long]$Matches[1] }
+        if ($ts) { try { $st.LastCompactAt = [datetime]$ts } catch {}; $st.CacheCompactAt = $ts }
+        if ($g['trigger'].Success) { $st.LastCompactTrigger = Get-JsonString $g['trigger'] }
+        if ($g['preTokens'].Success) { $st.LastCompactPreTokens = Get-JsonLong $g['preTokens'] }
         continue
       }
-      if ($line.Contains('"type":"ai-title"')) {
-        # the VS Code picker's name: {"type":"ai-title","sessionId":"...","aiTitle":"..."}  (verified 2026-09-09)
-        if ($line -match '"aiTitle":"((?:[^"\\]|\\.)*)"') { $st.AiTitle = Unescape-Json($Matches[1]) }
-        continue
-      }
-      if ($line.Contains('"type":"summary"')) {
-        if ($line -match '"summary":"((?:[^"\\]|\\.)*)"') { $st.Summary = Unescape-Json($Matches[1]) }
-        continue
-      }
-      if ($line.Contains('"type":"custom-title"')) {
-        if ($line -match '"customTitle":"((?:[^"\\]|\\.)*)"') { $st.Title = Unescape-Json($Matches[1]) }
-        continue
-      }
-      if ($line.Contains('"type":"user"')) {
-        if ($line.Contains('"isCompactSummary":true')) { continue }   # machine-written summary, not a human turn
-        # a tool_result content block, not the word: a prompt may well mention "tool_result" (inside a
-        # JSON string its quotes are escaped, so this pattern only matches the structure)
-        if (-not $line.Contains('"type":"tool_result"')) {
-          $st.Turns++
-          if (-not $st.First -and $line -match '"content":"((?:[^"\\]|\\.)*)"') {
-            $f = ((Unescape-Json($Matches[1]) -replace '<[^>]+>', '') -replace '\s+', ' ').Trim()
-            # only accept something that reads like a human prompt
-            if ($f.Length -ge 4 -and $f -notmatch '^[\[<{]' -and $f -notmatch 'toolu_|hook feedback|^Caveat:|^This session is being continued|^Another Claude session|^\[Request interrupted' -and $f -match '\p{L}{3}') { $st.First = $f }   # three letters in a row, any script ([a-zA-Z] left Hebrew, Chinese, Russian... untitled; marks between letters, as in Hindi, still break the run)
-          }
-          if ($line -match '"timestamp":"([^"]+)"') { try { $st.TurnStart = [datetime]$Matches[1] } catch {} }
+      # the VS Code picker's name: {"type":"ai-title","sessionId":"...","aiTitle":"..."}  (verified 2026-09-09)
+      if ($type -ceq '"ai-title"') { if ($g['aiTitle'].Success) { $st.AiTitle = Get-JsonString $g['aiTitle'] }; continue }
+      if ($type -ceq '"summary"') { if ($g['summary'].Success) { $st.Summary = Get-JsonString $g['summary'] }; continue }
+      if ($type -ceq '"custom-title"') { if ($g['customTitle'].Success) { $st.Title = Get-JsonString $g['customTitle'] }; continue }
+      $isUser = $type -ceq '"user"'
+      if (-not $isUser -and $type -cne '"assistant"') { continue }
+      $side = $g['isSidechain'].Value -ceq 'true'
+      # the message's content blocks (none unless the message is an object and its content an array)
+      $blocks = $g['el'].Captures
+      if ($isUser) {
+        # the prompt cache's request time, as the extension keeps it: the latest main-thread user entry
+        # (a prompt, a tool result, a compact summary) since the last recorded call
+        if ($isSub -or -not $side) {
+          $ut = ConvertFrom-CacheTime $ts
+          if ($ut -and -not ($st.CacheReqAt -and (ConvertFrom-CacheTime $st.CacheReqAt) -ge $ut)) { $st.CacheReqAt = $ts }
         }
-      } elseif ($line.Contains('"type":"assistant"')) {
-        $st.Tools += ([regex]::Matches($line, '"type":"tool_use"')).Count
-        # tool_use blocks are {"type":"tool_use","id":..,"name":"Bash","input":{..}} — name precedes input
-        foreach ($m in [regex]::Matches($line, '"name":"([^"]+)","input":\{')) { $n = $m.Groups[1].Value; $st.ToolCounts[$n] = 1 + [int]$st.ToolCounts[$n] }
+        if ($g['isCompactSummary'].Value -ceq 'true') { continue }   # machine-written summary, not a human turn
+        # a tool_result content block, not the word: a prompt may well mention tool_result
+        $isResult = $false
+        foreach ($b in $blocks) { if ($line[$b.Index] -eq '{' -and $rx.Type.Match($line, $b.Index).Groups['v'].Value -ceq '"tool_result"') { $isResult = $true; break } }
+        if ($isResult) { continue }
+        $st.Turns++
+        $content = $g['content']
+        if (-not $st.First -and $content.Success -and $line[$content.Index] -eq '"') {
+          # Tags are kept, so a prompt that starts with one (a slash command, a task notification, a caveat) is not
+          # the title. Builds before 2026.11.13.14 read as if they stripped tags first, but that -replace went to
+          # Unescape-Json as an argument and did nothing; stripping them would retitle most sessions "/model ...".
+          $f = ((Get-JsonString $content) -replace '\s+', ' ').Trim()
+          # only accept something that reads like a human prompt
+          if ($f.Length -ge 4 -and $f -notmatch '^[\[<{]' -and $f -notmatch 'toolu_|hook feedback|^Caveat:|^This session is being continued|^Another Claude session|^\[Request interrupted' -and $f -match '\p{L}{3}') { $st.First = $f }   # three letters in a row, any script ([a-zA-Z] left Hebrew, Chinese, Russian... untitled; marks between letters, as in Hindi, still break the run)
+        }
+        if ($ts) { try { $st.TurnStart = [datetime]$ts } catch {} }
+        continue
+      }
+      # an assistant entry: its tool calls are the tool_use blocks of its message
+      foreach ($b in $blocks) {
+        if ($line[$b.Index] -ne '{' -or $rx.Type.Match($line, $b.Index).Groups['v'].Value -cne '"tool_use"') { continue }
+        $st.Tools++
+        $n = Get-JsonString $rx.Name.Match($line, $b.Index).Groups['v']
+        if (-not $n) { continue }
+        $st.ToolCounts[$n] = 1 + [int]$st.ToolCounts[$n]
         # when this agent made each Bash / PowerShell call: used to tell which agent a running job belongs to
-        if ($line.Contains('"name":"Bash"') -or $line.Contains('"name":"PowerShell"')) {
-          $ts = if ($tailPart -match '"timestamp":"([^"]+)"') { $Matches[1] } elseif ($line -match '"timestamp":"([^"]+)"') { $Matches[1] } else { $null }
-          if ($ts) {
-            foreach ($m in [regex]::Matches($line, '"name":"(Bash|PowerShell)","input":\{')) {
-              $st.ToolLog = @(@($st.ToolLog) + @(@{ Tool = $m.Groups[1].Value; At = $ts }) | Select-Object -Last 40)
-            }
-          }
-        }
+        if (($n -ceq 'Bash' -or $n -ceq 'PowerShell') -and $ts) { $st.ToolLog = @(@($st.ToolLog) + @(@{ Tool = $n; At = $ts }) | Select-Object -Last 40) }
         # The VS Code picker titles an otherwise-untitled session by the "summary" of its FIRST
         # outbound SendMessage, and keeps it when later messages are sent (verified 2026-09-14 against
         # sessions that sent a re-verdict: the picker kept the original). First wins.
-        if (-not $st.MsgSummary -and $line -match '"name":"SendMessage","input":\{[^}]*?"summary":"((?:[^"\\]|\\.)*)"') { $st.MsgSummary = Unescape-Json($Matches[1]) }
-        if ($line -match '"model":"([^"]+)"') { $m = $Matches[1]; if ($m -ne '<synthetic>') { $st.Model = $m } }
-        if ($line -match '"usage":\{') {
-          $id = if ($line -match '"id":"(msg_[^"]+)"') { $Matches[1] } else { '' }
-          $in  = if ($line -match '"input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $out = if ($line -match '"output_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $cr  = if ($line -match '"cache_read_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $cw  = if ($line -match '"cache_creation_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $cw1h = if ($line -match '"ephemeral_1h_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $cw5 = [math]::Max(0, $cw - $cw1h)
-          $price = Get-Price $st.Model ($in + $cr + $cw)
-          $c = if ($price) { ($in * $price.In + $out * $price.Out + $cr * $price.Read + $cw5 * $price.W5 + $cw1h * $price.W1h) / 1e6 } else { 0.0 }
-          if ($id -and $id -eq $st.LastId) {
-            # same message: replace, don't add (later lines carry the final output_tokens)
-            $st.Cost -= $st.LastCost; $st.OutTok -= $st.LastOut
-          } else {
-            $st.InTok += $in; $st.CacheR += $cr; $st.CacheW += $cw
-          }
-          $st.Cost += $c; $st.OutTok += $out; $st.LastId = $id; $st.LastCost = $c; $st.LastOut = $out
+        if ($n -ceq 'SendMessage' -and -not $st.MsgSummary) {
+          $inp = $rx.Input.Match($line, $b.Index).Groups['v']
+          if ($inp.Success -and $line[$inp.Index] -eq '{') { $st.MsgSummary = Get-JsonString $rx.Summary.Match($line, $inp.Index).Groups['v'] }
         }
       }
+      $model = Get-JsonString $g['model']
+      if ($model -and $model -ne '<synthetic>') { $st.Model = $model }
+      if (-not ($g['usage'].Success -and $line[$g['usage'].Index] -eq '{')) { continue }   # no usage object
+      $id = Get-JsonString $g['id']
+      $in  = Get-JsonLong $g['input_tokens']
+      $out = Get-JsonLong $g['output_tokens']
+      $cr  = Get-JsonLong $g['cache_read_input_tokens']
+      $cw  = Get-JsonLong $g['cache_creation_input_tokens']
+      $cw1h = Get-JsonLong $g['ephemeral_1h_input_tokens']
+      $cw5m = Get-JsonLong $g['ephemeral_5m_input_tokens']
+      # the extension records no cache frame for a synthetic entry (an API error, a session limit, an
+      # interrupt) or a sidechain one in the main thread; Update-CacheAnchor drops a call with no tokens
+      if ($model -ne '<synthetic>' -and ($isSub -or -not $side)) {
+        Update-CacheAnchor $st $ts $id $in $cr $cw $cw1h $cw5m
+      }
+      $cw5 = [math]::Max(0, $cw - $cw1h)
+      $price = Get-Price $st.Model ($in + $cr + $cw)
+      $c = if ($price) { ($in * $price.In + $out * $price.Out + $cr * $price.Read + $cw5 * $price.W5 + $cw1h * $price.W1h) / 1e6 } else { 0.0 }
+      if ($id -and $id -eq $st.LastId) {
+        # same message: replace, don't add (later lines carry the final output_tokens)
+        $st.Cost -= $st.LastCost; $st.OutTok -= $st.LastOut
+      } else {
+        $st.InTok += $in; $st.CacheR += $cr; $st.CacheW += $cw
+      }
+      $st.Cost += $c; $st.OutTok += $out; $st.LastId = $id; $st.LastCost = $c; $st.LastOut = $out
     }
+    # a line of another kind can be the newest with a cwd or a branch: look back over those after the last read one
+    for ($li = $lines.Length - 1; $li -gt $cwdAt -or $li -gt $branchAt; $li--) {
+      $line = $lines[$li]
+      if ($line.Length -lt 20 -or $rx.Kind.IsMatch($line)) { continue }   # too short, or read above
+      $e = $rx.Entry.Match($line)
+      if (-not $e.Success) { continue }
+      if ($li -gt $cwdAt -and $e.Groups['cwd'].Success) { $cwdRaw = $e.Groups['cwd']; $cwdAt = $li }
+      if ($li -gt $branchAt -and $e.Groups['gitBranch'].Success) { $branchRaw = $e.Groups['gitBranch']; $branchAt = $li }
+    }
+    if ($null -ne $cwdRaw) { $st.Cwd = Get-JsonString $cwdRaw }
+    if ($null -ne $branchRaw) { $st.GitBranch = Get-JsonString $branchRaw }
   } catch {} finally { if ($fs) { $fs.Dispose() } }
   return $st
+}
+
+# The prompt cache, by the rule of the Claude Code extension for VS Code (anthropic.claude-code-2.1.323,
+# webview/index.js, read 2026-11-13): anchored on the last model call (lines of one message keep the first
+# one's time); 1h or 5m from that call's cache writes, the previous TTL when it only read the cache, unknown
+# when it used none; a compaction makes it cold until a later call.
+function Update-CacheAnchor($st, [string]$ts, [string]$id, [long]$in, [long]$cr, [long]$cw, [long]$w1h, [long]$w5m) {
+  if ($in + $cr + $cw -le 0) { return }   # the extension's recacheTokens is undefined: no frame, nothing changes
+  $same = $id -and $id -ceq $st.CacheAnchorId
+  if (-not ($same -and $st.CacheAnchor)) {
+    # anchored on the request when it came no later than the reply (the extension's eqt), else the reply
+    $req = ConvertFrom-CacheTime ([string]$st.CacheReqAt); $t = ConvertFrom-CacheTime $ts
+    if ($req -and (-not $t -or $req -le $t)) { $st.CacheAnchor = [string]$st.CacheReqAt } elseif ($ts) { $st.CacheAnchor = $ts }
+  }
+  if (-not $same) { $st.CacheReqAt = '' }   # a new call: later user entries are the next request
+  $st.CacheAnchorId = $id
+  if ($cr + $cw -gt 0) { if ($w1h -gt 0) { $st.CacheTtl = '1h' } elseif ($w5m -gt 0) { $st.CacheTtl = '5m' } }
+  else { $st.CacheTtl = '' }
+  $st.RecacheTok = $in + $cr + $cw
+  if ($st.CacheCompactAt -and -not $same) {
+    $t = ConvertFrom-CacheTime $ts; $c = ConvertFrom-CacheTime $st.CacheCompactAt
+    if ($t -and $c -and $t -gt $c) { $st.CacheCompactAt = '' }
+  }
+}
+function ConvertFrom-CacheTime([string]$ts) {
+  if (-not $ts) { return $null }
+  $d = [DateTimeOffset]::MinValue
+  if ([DateTimeOffset]::TryParse($ts, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$d)) { return $d.UtcDateTime }
+  return $null
+}
+# warm / cold / unknown at $now, as the extension decides it. $act: anything with the Cache* fields.
+function Get-CacheState($act, [datetime]$now) {
+  if (-not $act) { return @{ Kind = 'unknown' } }
+  $now = $now.ToUniversalTime()
+  $tok = [long]$act.RecacheTok
+  $c = ConvertFrom-CacheTime ([string]$act.CacheCompactAt)
+  if ($c) { return @{ Kind = 'cold'; Reason = 'compacted'; IdleMs = [math]::Max(0.0, ($now - $c).TotalMilliseconds); RecacheTokens = 0 } }
+  $a = ConvertFrom-CacheTime ([string]$act.CacheAnchor)
+  $ttl = [string]$act.CacheTtl
+  if (-not $a -or $ttl -notin '1h', '5m') { return @{ Kind = 'unknown' } }
+  $len = if ($ttl -eq '1h') { 3600000.0 } else { 300000.0 }
+  $left = [math]::Min($len, $len - ($now - $a).TotalMilliseconds)
+  if ($left -gt 0) { return @{ Kind = 'warm'; Ttl = $ttl; MsLeft = $left; MinutesLeft = [math]::Ceiling($left / 60000); RecacheTokens = $tok; Anchor = $a } }
+  return @{ Kind = 'cold'; Reason = 'expired'; Ttl = $ttl; IdleMs = ($now - $a).TotalMilliseconds; RecacheTokens = $tok; Anchor = $a }
+}
+function Format-CacheCell($state) {
+  if (-not $state) { return '-' }
+  switch ($state.Kind) { 'warm' { return "$($state.MinutesLeft)m" } 'cold' { return 'cold' } default { return '-' } }
+}
+
+# peek's CACHE line. The next turn's cost re-reads (warm) or re-writes (cold) the last call's whole prompt,
+# at that model's cache-read or cache-write price for the TTL: an estimate without the new message itself.
+# What the next turn pays to write the whole context back into the cache once it is cold: the last call's
+# input + cache tokens at the TTL's write price. $null when unknown (no cache, compacted, unpriced model).
+function Get-CacheColdDollars($state, [string]$model) {
+  if (-not $state -or $state.Kind -eq 'unknown' -or $state.Reason -eq 'compacted') { return $null }
+  $tok = [long]$state.RecacheTokens
+  if ($tok -le 0) { return $null }
+  $p = Get-Price $model $tok
+  if (-not $p) { return $null }
+  return $tok * $(if ($state.Ttl -eq '1h') { [double]$p.W1h } else { [double]$p.W5 }) / 1e6
+}
+# The cold cost as CACHE's second line, in its 5 cells: $6.03, or whole dollars from $10 ($15, $120).
+function Format-CacheCost($state, [string]$model) {
+  $d = Get-CacheColdDollars $state $model
+  if ($null -eq $d) { return '' }
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  if ($d -lt 9.995) { return '$' + $d.ToString('0.00', $inv) }
+  return '$' + [math]::Round($d).ToString('0', $inv)
+}
+function Format-CachePeek($state, [string]$model) {
+  if (-not $state -or $state.Kind -eq 'unknown') { return 'unknown (no cache use recorded)' }
+  if ($state.Reason -eq 'compacted') { return "doesn't cover the compacted conversation: the next turn re-caches it" }
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  $tok = [long]$state.RecacheTokens
+  $tokText = "$([math]::Round($tok / 1000))K tokens"
+  $p = if ($tok -gt 0) { Get-Price $model $tok } else { $null }
+  $cd = Get-CacheColdDollars $state $model
+  $cold = '$' + $(if ($null -ne $cd) { $cd } else { 0.0 }).ToString('0.00', $inv)
+  if ($state.Kind -eq 'warm') {
+    $at = ([datetime]$state.Anchor).ToLocalTime().ToString('HH:mm:ss', $inv)
+    $cost = if ($p) { ' ≈ $' + ($tok * [double]$p.Read / 1e6).ToString('0.00', $inv) + " warm, $cold cold" } else { '' }
+    return "warm, $($state.MinutesLeft) min left ($($state.Ttl), last call $at) · next turn$cost ($tokText)"
+  }
+  $t = [math]::Max(0, [math]::Floor([double]$state.IdleMs / 60000))   # the extension's idle format
+  $idle = if ($t -lt 60) { "${t}m" } elseif ($t -lt 1440) { "$([math]::Floor($t / 60))h $($t % 60)m" } else { "$([math]::Floor($t / 1440))d $([math]::Floor($t / 60) % 24)h" }
+  $what = if ($tok -gt 0) { "about $tokText$(if ($p) { " ≈ $cold" })" } else { 'the conversation' }
+  return "likely expired (idle $idle) · next turn re-caches $what"
 }
 
 # Read the tail of the transcript and summarize the last assistant action.
@@ -1026,7 +1216,7 @@ function Read-TailLines([string]$path, [int]$bytes) {
 }
 
 function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
-  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $null; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0 }
+  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $null; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; CacheAnchor = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = '' }
   if (-not $file) { return $out }
   $stamp = $script:TailCache[$sessionId]
   # the same file, unchanged: a session's transcript can become another file (it follows the cwd)
@@ -1197,6 +1387,7 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
   $out.ToolLog = @($sc.ToolLog)
   $out.GitBranch = $sc.GitBranch
   $out.Compacts = $sc.Compacts; $out.LastCompactAt = $sc.LastCompactAt; $out.LastCompactTrigger = $sc.LastCompactTrigger; $out.LastCompactPreTokens = $sc.LastCompactPreTokens
+  $out.CacheAnchor = $sc.CacheAnchor; $out.CacheTtl = $sc.CacheTtl; $out.RecacheTok = $sc.RecacheTok; $out.CacheCompactAt = $sc.CacheCompactAt
   $out.ToolMix = ($sc.ToolCounts.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ' · '
   # newest message was synthetic: its zero usage must not mask the context size; take CTX from
   # the newest real assistant entry in the tail
@@ -1771,7 +1962,7 @@ function Read-ClineManifests([string]$dir, [int]$budgetMs = [int]::MaxValue) {
 $script:ClineMsgCache = @{}   # path -> @{ Length; Write; Result }
 # -CachedOnly: no read; the last result (even of an older version of the file), or $null if there is none.
 function Read-ClineMessages([string]$path, [switch]$CachedOnly) {
-  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0 }
+  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; CacheAnchor = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = '' }
   if (-not $path) { return $out }
   $f = $null; try { $f = [IO.FileInfo]::new($path) } catch { return $out }
   if (-not $f.Exists) { return $out }
@@ -1919,6 +2110,8 @@ function New-ClineRow($e, [bool]$sample) {
     'MEM(MB)'= '-'
     AGE      = if ($startMs) { Get-Age $startMs } else { '-' }
     IDLE     = Get-Since $e.LastWrite
+    CACHE    = '-'
+    _Cache   = $null
     TURN     = if ($act.TurnStart -and $active) { Get-Since $act.TurnStart } else { '' }
     TURNS    = $act.Turns
     TOOLS    = $act.Tools
@@ -2454,6 +2647,8 @@ function New-CopilotRow($e, [bool]$sample) {
     'MEM(MB)'= '-'
     AGE      = Get-Age $startMs
     IDLE     = Get-Since $e.Written
+    CACHE    = '-'
+    _Cache   = $null
     TURN     = if ($act.TurnStart -and $state -in 'working', 'waiting') { Get-Since $act.TurnStart } else { '' }
     TURNS    = $act.Turns
     TOOLS    = $act.Tools
@@ -2954,6 +3149,8 @@ function Update-GoneRow($r) {
   $r.STATE    = Resolve-State $s $r._Act $r._Gone ([bool]$r._Cleared)
   $r.AGE      = if ($s.startedAt) { Get-Age $s.startedAt } else { '-' }
   $r.IDLE     = if ($file) { Get-Since $file.LastWriteTime } else { '-' }
+  $r._Cache   = Get-CacheState $r._Act (Get-Date)
+  $r.CACHE    = Format-CacheCell $r._Cache
   $r.RATE     = Format-Rate ([double]$r._Act.Cost) $r._StartedAt (Get-Date)
   $r.ACTIVITY = $script:History[$r._SessionId]
   $r._Dirty   = $true   # Render-Table re-formats it
@@ -3052,6 +3249,8 @@ function Build-Rows {
           'MEM(MB)'= '-'
           AGE      = Get-Since $sf.CreationTime
           IDLE     = Get-Since $sf.LastWriteTime
+          _Cache   = ($scache = Get-CacheState $sact (Get-Date))
+          CACHE    = Format-CacheCell $scache
           TURN     = if ($sact.TurnStart -and $sst0 -in 'working','thinking') { Get-Since $sact.TurnStart } else { '' }
           TURNS    = '-'
           TOOLS    = $sact.Tools
@@ -3136,6 +3335,8 @@ function Build-Rows {
       'MEM(MB)'= if ($proc) { [math]::Round($proc.WorkingSet64 / 1MB) } else { '-' }
       AGE      = if ($s.startedAt) { Get-Age $s.startedAt } else { '-' }
       IDLE     = if ($file) { Get-Since $file.LastWriteTime } else { '-' }
+      _Cache   = ($cache = Get-CacheState $act (Get-Date))
+      CACHE    = Format-CacheCell $cache
       TURN     = if ($act.TurnStart -and $active) { Get-Since $act.TurnStart } else { '' }
       TURNS    = $act.Turns
       TOOLS    = $act.Tools
@@ -3222,7 +3423,7 @@ function Build-Rows {
 # Deterministic: every mode ends with startedAt (numeric) then sessionId as tiebreaks, so a
 # row never moves without a real change. 'activity' ranks working and thinking together, so
 # a session cycling through tool calls doesn't hop; only active<->idle transitions move it.
-$script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx')
+$script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx', 'cache')
 $script:SortMode  = [array]::IndexOf($script:SortModes, $Sort)
 function Sort-Rows([object[]]$rows) {
   # The fields filled in below. Build-Rows creates rows with them, so filling them is a plain assignment
@@ -3233,12 +3434,24 @@ function Sort-Rows([object[]]$rows) {
     foreach ($n in '_Group', '_TreeCost', '_LaunchCost', '_LaunchN', '_Launcher', '_LaunchedNames', '_TreeLast') { if (-not $r.PSObject.Properties[$n]) { $r.PSObject.Properties.Add([psnoteproperty]::new($n, $null)) } }
   }
   $mode = $script:SortModes[$script:SortMode]
+  # one clock reading for the whole sort: rows with the same cache deadline get the same key, and the tiebreaks
+  # decide between them (a reading per row gave them different keys, so they swapped places from frame to
+  # frame: Sol, 2026-11-13)
+  $nowUtc = [datetime]::UtcNow
+  # the mode's key of each row given, in order (one call for many rows: a call per row was most of a long
+  # history's sort)
   $key = switch ($mode) {
-    'activity' { { param($r) if ($r._Gone) { 3 } elseif ($r.STATE -like 'waiting*') { 0 } elseif ($r.STATE -in 'working','thinking' -or $r.STATE -like 'awaiting*' -or $r.STATE -eq 'polling') { 1 } elseif ($r.STATE -eq 'idle') { 2 } else { 2 } } }
-    'roster'   { { param($r) [int]$r._Order } }   # exactly as claude agents --json lists them
-    'start'    { { param($r) 0 } }
-    'cost'     { { param($r) -[double]$r._Act.Cost } }
-    'ctx'      { { param($r) if ($r._Act.Ctx -ne '-') { -[double]$r._Act.Ctx } else { 0 } } }
+    'activity' { { param($rs) foreach ($r in $rs) { if ($r._Gone) { 3 } elseif ($r.STATE -like 'waiting*') { 0 } elseif ($r.STATE -in 'working','thinking' -or $r.STATE -like 'awaiting*' -or $r.STATE -eq 'polling') { 1 } elseif ($r.STATE -eq 'idle') { 2 } else { 2 } } } }
+    'roster'   { { param($rs) foreach ($r in $rs) { [int]$r._Order } } }   # exactly as claude agents --json lists them
+    'start'    { { param($rs) foreach ($r in $rs) { 0 } } }
+    'cost'     { { param($rs) foreach ($r in $rs) { -[double]$r._Act.Cost } } }
+    'ctx'      { { param($rs) foreach ($r in $rs) { if ($r._Act.Ctx -ne '-') { -[double]$r._Act.Ctx } else { 0 } } } }
+    'cache'    { { param($rs) foreach ($r in $rs) { $c = $r._Cache
+                   # from the anchor, not MsLeft: a row off screen keeps the _Cache it was last drawn with
+                   if ($c -and $c.Anchor -and $c.Ttl) {
+                     $left = ($c.Anchor.AddMilliseconds($(if ($c.Ttl -eq '1h') { 3600000 } else { 300000 })) - $nowUtc).TotalMilliseconds
+                     if ($left -gt 0) { $left } else { 1e12 }
+                   } elseif ($c -and $c.Kind -eq 'warm') { [double]$c.MsLeft } elseif ($c -and $c.Kind -eq 'cold') { 1e12 } else { 2e12 } } } }   # soonest cold first
   }
   # Sessions launched by another listed session's job (a script running claude -p, say) are drawn
   # under that session, after its own subagents. They stay sessions: own row, own subagents.
@@ -3258,9 +3471,10 @@ function Sort-Rows([object[]]$rows) {
     if ($lr) { $lr._LaunchedNames = @($launchKids[$id] | ForEach-Object { ([string]$_.NAME).Trim() }) -join ', ' }
   }
   # Live sessions sort on the mode's key. Gone ones always follow them, most recently gone first (ties,
-  # which one poll's departures share: session id), or on the mode's key in cost / ctx. Gone rows get a
-  # .NET sort on a string key: Sort-Object with script-block keys was most of the sort time with a long
-  # history.
+  # which one poll's departures share: session id); in cost / ctx / cache, on the mode's key first, then those. Gone
+  # rows get a .NET sort on a string key, the mode's key computed once per row: Sort-Object with script-block
+  # keys was most of the sort time with a long history (in cache mode, 52 -> 88 ms a frame at 1,000 gone rows:
+  # Sol, 2026-11-13).
   $liveP = [System.Collections.Generic.List[object]]::new(); $goneP = [System.Collections.Generic.List[object]]::new()
   foreach ($r in $rows) {
     if ($r._Parent -or $isLaunched.ContainsKey($r._SessionId)) { continue }
@@ -3269,12 +3483,21 @@ function Sort-Rows([object[]]$rows) {
   $parents = @($liveP | Sort-Object @{ e = { & $key $_ } },
                                     @{ e = { if ($_._StartedAt) { $_._StartedAt.Ticks } else { [long]::MaxValue } } },
                                     @{ e = { $_._SessionId } })
-  if ($mode -in 'cost', 'ctx') {
-    $parents += @($goneP | Sort-Object @{ e = { & $key $_ } }, @{ e = { -([datetime]$_._Gone).Ticks } }, @{ e = { $_._SessionId } })
-  } elseif ($goneP.Count) {
+  if ($goneP.Count) {
     $gone = $goneP.ToArray(); $gk = [string[]]::new($gone.Count)
     $max = [datetime]::MaxValue.Ticks
-    for ($i = 0; $i -lt $gone.Count; $i++) { $gk[$i] = '{0:D19}|{1}' -f ($max - ([datetime]$gone[$i]._Gone).Ticks), $gone[$i]._SessionId }
+    $byKey = $mode -in 'cost', 'ctx', 'cache'
+    $gks = if ($byKey) { @(& $key $gone) }
+    for ($i = 0; $i -lt $gone.Count; $i++) {
+      $pre = ''
+      if ($byKey) {
+        # the mode's key as text that sorts as the number does: the double's bits, the sign bit flipped for
+        # 0 and up and every bit for below 0 (+ 0.0 turns -0 into 0, which it equals)
+        $b = [BitConverter]::DoubleToInt64Bits([double]$gks[$i] + 0.0)
+        $pre = '{0:X16}|' -f $(if ($b -lt 0) { -bnot $b } else { $b -bor [long]::MinValue })
+      }
+      $gk[$i] = $pre + ('{0:D19}|{1}' -f ($max - ([datetime]$gone[$i]._Gone).Ticks), $gone[$i]._SessionId)
+    }
     [Array]::Sort([Array]$gk, [Array]$gone, [Collections.IComparer][StringComparer]::Ordinal)   # in place; see Get-KeptDeparted
     $parents += $gone
   }
@@ -3380,6 +3603,11 @@ function Cell-Color([string]$col, $r) {
     'KIND'     { if ($r.KIND -like 'subagent*') { 'cyan' } else { '' } }
     'CWD'      { if ($r._LaunchCwd -and -not [string]::Equals($r._LaunchCwd, $r.CWD, [StringComparison]::OrdinalIgnoreCase)) { 'cyan' } else { '' } }
     'COST'     { if ([double]($r._Act.Cost) -ge 100) { 'yellow' } else { '' } }
+    'CACHE'    { $c = $r._Cache
+                 if (-not $c) { '' }
+                 elseif ($c.Kind -eq 'cold') { 'dim' }
+                 elseif ($c.Kind -eq 'warm' -and [double]$c.MsLeft -le $(if ($c.Ttl -eq '1h') { 300000 } else { 60000 })) { 'yellow' }
+                 else { '' } }
     default    { '' }
   }
 }
@@ -3409,8 +3637,8 @@ $script:Columns = @(
   @{ Name = 'NAME';        Fixed = 0;  Min = 12; Flex = 2; Align = 'L'; Priority = 100 }
   @{ Name = 'TITLE';       Fixed = 0;  Min = 12; Flex = 3; Align = 'L'; Priority = 95 }   # picker's friendly name
   @{ Name = 'STATE';       Fixed = 8;  Auto = $true; Align = 'L'; Priority = 100 }
+  @{ Name = 'CACHE';       Fixed = 5;  Align = 'R'; Priority = 85 }   # prompt cache: minutes left; IDLE is in peek
   @{ Name = 'TURN';        Fixed = 5;  Align = 'R'; Priority = 90 }   # time on current turn
-  @{ Name = 'IDLE';        Fixed = 5;  Align = 'R'; Priority = 85 }
   @{ Name = 'CTX';         Fixed = 5;  Align = 'R'; Priority = 80 }   # "123K"
   @{ Name = 'CMP';         Fixed = 3;  Align = 'R'; Priority = 79 }   # compactions so far
   @{ Name = 'LAST ACTION'; Fixed = 0;  Min = 16; Flex = 4; Align = 'L'; Priority = 75 }
@@ -3598,6 +3826,10 @@ function Format-Row([object[]]$cols, $r, [string]$sep, [int]$maxLines) {
       $sig = if ($t -ge 1000) { 'Σ${0:N0}k' -f ($t / 1000) } elseif ($t -ge 100) { 'Σ${0:N0}' -f $t } else { 'Σ${0:N2}' -f $t }
       $pieces = @(((Fit $v $c.Width $c.Align)).TrimEnd(), ((Fit $sig $c.Width $c.Align)).TrimEnd())
     }
+    elseif ($c.Name -eq 'CACHE' -and $maxLines -gt 1 -and ($cc = Format-CacheCost $r._Cache $r._Act.Model)) {
+      # what letting it go cold costs, under the time left (the way COST carries the tree's Σ)
+      $pieces = @(((Fit $v $c.Width $c.Align)).TrimEnd(), ((Fit $cc $c.Width $c.Align)).TrimEnd())
+    }
     elseif ($c.Name -eq 'STATE' -and $r._LiveKids -gt 0) {
       $pieces = ,@(((Fit "$v +$($r._LiveKids)" $c.Width $c.Align)).TrimEnd())
     }
@@ -3639,7 +3871,7 @@ function Row-Key([object[]]$cols, $r, [string]$sig) {
   $jc = 0; foreach ($x in @($r._Jobs)) { if ($x) { $jc++ } }
   $cmpRecent = $false
   if ($r._Act -and $r._Act.LastCompactAt) { try { $cmpRecent = ((Get-Date) - [datetime]$r._Act.LastCompactAt).TotalMinutes -lt 10 } catch {} }
-  [void]$sb.Append([char]30).Append("$([bool]$r._Gone)|$($r._LaunchCwd)|$cmpRecent|$jc|$($r._LiveKids)|$($r._TreeLast)|$($r._Depth)|$($r._Done)|$($r._Orphaned)|$($r._Parent -ne $null)|$([math]::Round([double]$r._TreeCost, 2))")
+  [void]$sb.Append([char]30).Append("$([bool]$r._Gone)|$(if ($r._Cache) { "$($r._Cache.Ttl)/$($r._Cache.RecacheTokens)" })|$($r._Act.Model)|$((Minutes $r.IDLE) -ge 2)|$($r._LaunchCwd)|$cmpRecent|$jc|$($r._LiveKids)|$($r._TreeLast)|$($r._Depth)|$($r._Done)|$($r._Orphaned)|$($r._Parent -ne $null)|$([math]::Round([double]$r._TreeCost, 2))")
   return $sb.ToString()
 }
 function Get-RowLines([object[]]$cols, $r, [string]$sep, [int]$maxLines, [string]$sig) {
@@ -3762,6 +3994,7 @@ function Build-Peek([object]$r) {
     $(if ($r._Parent) { "  PID          runs inside its session's claude process (pid $($r._SessPid))" } else { "  PID          $($r.PID)      CPU $($r.'CPU(s)')s      MEM $($r.'MEM(MB)') MB" }),
     "  STARTED      $(if ($r._StartedAt) { $r._StartedAt.ToString('yyyy-MM-dd HH:mm:ss') } else { '-' })   (age $($r.AGE))",
     "  IDLE         $($r.IDLE)      TURN $(Paint $(if ($r.TURN) { $r.TURN } else { '-' }) (Cell-Color 'TURN' $r))      TURNS $($r.TURNS)",
+    "  CACHE        $(Paint (Format-CachePeek $r._Cache $r._Act.Model) (Cell-Color 'CACHE' $r))",
     $(Peek-Block 'TOOLS' "$($r.TOOLS) calls$(if ($r._Act.ToolMix) { ':  ' + $r._Act.ToolMix })" $pw),
     "  CTX          $($r.CTX) tokens in context      MODEL $(Paint $r.MODEL (Cell-Color 'MODEL' $r))      BRANCH $($r.BRANCH)",
     "  COMPACTIONS  $(if ($r._Act.Compacts) { "$($r._Act.Compacts)   last $(Get-Since $r._Act.LastCompactAt) ago ($($r._Act.LastCompactTrigger), $([math]::Round($r._Act.LastCompactPreTokens / 1000))K tokens before it) — context now holds a summary, not the full history" } else { 'none' })",
@@ -3956,9 +4189,12 @@ function Show-Help {
     '  VIA         R  what the session runs in: cli, vscode (the Claude Code extension), sdk (the Claude',
     '                 Agent SDK: VS Code''s own Claude agent, or another program built on it), remote,',
     '                 cline (a Cline session), copilot (a GitHub Copilot chat in VS Code)',
+    '  CACHE       T  prompt cache: minutes left while warm (yellow near the end), cold once expired, - unknown;',
+    '                 the rule of the Claude Code extension for VS Code. Second line: what the next turn costs once',
+    '                 the cache is cold (the whole context written back). In peek: the next turn warm and cold',
     '  TURN        T  time since your last prompt — how long Claude has been on this turn (blank when idle).',
     '                 Yellow >= 10 min, red >= 30 min',
-    '  IDLE        T  time since the transcript was last written to',
+    '  IDLE        T  (peek) time since the transcript was last written to',
     '  CTX         T  context size in K tokens (input + cache tokens on the newest assistant entry)',
     '  CMP         T  compactions so far. Magenta = one in the last 10 min, yellow = older. Each replaces',
     '                 the history with a summary; peek shows when / why / how big',
@@ -4000,7 +4236,7 @@ function Show-Help {
     '         that session (Claude Code''s own messaging, by name; ctop sends nothing). A subagent''s contact',
     '         points at its parent session.   d copy the session ID (a subagent: its agent ID)',
     '       o sort: activity (active above idle, oldest first) | roster (as claude agents lists them) |',
-    '         start (never moves) | cost | ctx.   v layout: wrap (long cells continue on the next line',
+    '         start (never moves) | cost | ctx | cache.   v layout: wrap (long cells continue on the next line',
     '         of their column) | truncate.   c compact (essential columns only)',
     '       s subagent rows   g gone/cleared rows   (a toggle that is ON is lit in the footer)',
     '       x closed-sessions log: everything that left the roster, newest first, with title and resume',

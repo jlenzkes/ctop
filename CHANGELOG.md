@@ -2,6 +2,34 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.14 — Sol's round 2 on PR #8
+
+- a transcript line is read by its JSON structure: the entry's own type, `isSidechain`, timestamp, cwd and
+  branch; its message's model, id and usage; its tool calls, the `tool_use` blocks of its message. Build .12
+  still searched the line, so a tool's input could pass for any of these: count a turn, fake a compaction,
+  blank the CACHE countdown, set a title, or add a tool call. All 22 of Sol's test lines are tests now, byte
+  for byte (one of them, a message starting with its `id`, still failed in .12). A line that is not one whole
+  JSON object is skipped
+- checked on the 4,104 transcripts on this machine against build .12: the same turns, tools, cost, tokens,
+  model, compactions, cache countdown, titles, cwd and branch for all of them, but one: a hand-written
+  `{"type": "ai-title", ...}` line (with spaces) now names its session, as it does in the picker. Sol's 160
+  frozen transcripts and 22 cache cases still agree with the extension's rule, on 5.1 and PowerShell 7
+- the same speed: a fresh scan of a 43.5 MB transcript took a median of 1,040 ms on PowerShell 7 (1,157 in
+  .12) and 4,427 ms on Windows PowerShell 5.1 (4,475 in .12), five runs each
+- the `cache` sort reads the clock once per sort: two sessions whose cache ran out at the same moment
+  swapped places from frame to frame (Sol). Gone sessions sort on keys computed once: with 1,000 of them,
+  sorting took a median of 17 ms in `cache` and 10 ms in `cost` on PowerShell 7 (42 and 36 in .12; 16 and
+  11 on 5.1, against 70 and 60)
+
+## 2026.11.13.12 — Sol's round 1 on PR #8
+
+- a transcript line's own fields are read where Claude Code writes them: whether it is a user or an
+  assistant entry from its message's first key, `isSidechain` from the fields before the message, the model
+  from the message's first key, and the usage from the last `"usage"` in the line (it follows the content).
+  A tool's input can hold look-alikes of all four; one used to wipe the countdown or count a turn. COST
+  reads its tokens from the same place, so a tool input holding `"input_tokens"` no longer skews it
+- the `cache` sort orders gone sessions by their cache too (they kept the newest-gone order)
+
 ## 2026.11.13.11 — Sol's round 1 on PR #7
 
 - the console helper is compiled under a name of its own and renamed into place. ctops starting at the
@@ -10,6 +38,42 @@ Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build numbe
   with Sol's own test, 15 of 32 before this build and 0 of 32 after). A compile killed before its rename
   leaves a `ctop-con-tmp-*.dll`, deleted after 10 minutes. Numbered .11: builds .7 to .10 are on PRs #8–#9
 
+## 2026.11.13.9 — what going cold costs, under CACHE
+
+- CACHE has a second line: what the next turn costs once the cache is cold, the whole context written back
+  at the cache-write price (`$6.03`; whole dollars from $10). It is what makes two `4m` rows unequal: on
+  Opus 5.5 at 754K tokens, about $6 cold against $0.15 warm. Shown while warm and once expired; not after a
+  compaction, for an unpriced model, or with one line per row (`-Layout truncate`)
+
+## 2026.11.13.8 — CACHE before TURN
+
+- CACHE now stands right after STATE, before TURN (the user's choice). Which hides first on a narrow window
+  is unchanged: CACHE before TURN
+
+## 2026.11.13.7 — prompt-cache countdown
+
+- a CACHE column shows how long each Claude Code session's prompt cache stays warm: minutes left (`43m`),
+  yellow in the last 5 minutes of a 1-hour cache or the last minute of a 5-minute one, `cold` once
+  expired or after a compaction, `-` when unknown. Subagents get their own, and a gone session keeps
+  counting down (`claude --resume` may still hit its cache: not verified). Cline and Copilot rows show `-`
+- the rule is the Claude Code extension for VS Code's own (read in `anthropic.claude-code-2.1.323`,
+  `webview/index.js`), so the two agree: anchored on the request of the last model call (the latest
+  prompt or tool result before it, or the call itself when none came first); 1 hour or 5 minutes from
+  that call's cache writes, the previous length when it only read the cache, unknown when it used none.
+  Synthetic entries (an API error, a session limit, an interrupt), calls with no tokens, and sidechain
+  entries in a main transcript change nothing, as in the extension. On 80 recent real transcripts (40
+  sessions, 40 subagents), ctop's anchor, TTL, compaction and token count matched a re-implementation of
+  the extension's rule in all 80 (the re-implementation is a reviewer's, from the extension's code)
+- CACHE takes IDLE's place on the main table; IDLE is still in peek, and STATE still turns red on it
+- peek's CACHE line says what the next turn would cost with the cache warm and cold, for example
+  `next turn ≈ $0.11 warm, $2.20 cold (220K tokens)`: an estimate that leaves out the new message
+- `o` and `-Sort` gain `cache`: soonest to go cold first, then cold, then unknown (from the time left
+  now, for rows off screen too)
+- a user entry's timestamp is found anywhere in its line: a tool result's large `toolUseResult` can push it
+  out of the last 2000 characters, where ctop looked (only the cache countdown uses this). Cache times keep
+  their milliseconds through the scan cache on PowerShell 7 (they were cut, so a cell could read a minute
+  low, or cold, up to a second early)
+- the scan format changes (version 6), so each transcript is read once more from the start
 ## 2026.11.13.6 — a second review of 2026.11.13.1–.2
 
 - correction to 2026.11.13.2 and .4: sharing delete lets another program delete a file while ctop reads it

@@ -19,6 +19,12 @@
 - PRs go through Sol's audit, as PR #2 did. PRs #3 and #4 were merged without one (a miss); Sol audited them afterwards, and the fixes are in PR #5.
 - **`main` is protected (2026-11-13):** every change goes through a PR, admins included; no force-push, no deletion; no approving review required. **Not yet: requiring CI to pass before a merge.** User, 2026-11-13: "Not right now. But later? FOR SURE." When it is turned on, a PR whose last commit is `[skip ci]` cannot merge until a commit without it is pushed.
 
+## In flight: PRs #7 and #8 (2026-11-13)
+
+- **PR #7** (`claude/input-hardening`, build 2026.11.13.6): fixes taken from cxtop (lone modifier keys and Alt/Ctrl chords, files opened sharing delete, startup checks of `-HighlightModel`/`-SelectBg`, a one-step scan-cache rename). **PR #8** (`claude/cache-countdown`, build 2026.11.13.7, built on #7): the CACHE column, using the Claude Code extension's own rule (read in `anthropic.claude-code-2.1.323` `webview/index.js`).
+- Before Sol, independent Claude reviewers audited each PR in three one-pass rounds; both were accepted (findings and fixes are in each PR's "Pre-audit" section). The brief for Sol was handed to the user on 2026-11-13 (`SOL_BRIEF_PR7_PR8.md`). Sol's audit is pending; #7 merges first.
+- The PR #8 branch takes #7's fixes by merge, not rebase: a force-push was refused by the permission check.
+
 ## Pending work: sessions from other agents
 
 **Decision (user, 2026-11-01): ctop supports exactly three agents:**
@@ -65,7 +71,7 @@ Each step gets its own PR. Step 1 shared one with the probe and these notes.
 
 ## Deferred bugs
 
-Known problems left in place on purpose, each with where it came from, where it is, and what would fix it: `docs/deferred.md` (D1–D14, plus what is not yet checked). Add to it when a problem is found and not fixed.
+Known problems left in place on purpose, each with where it came from, where it is, and what would fix it: `docs/deferred.md` (D1–D15, plus what is not yet checked). Add to it when a problem is found and not fixed.
 
 ## Flaky tests seen in CI (2026-11-01: PR #2, push run 41330600708 for c144eb6)
 
@@ -76,5 +82,7 @@ Same code passed in the other run, so these are flakes, not a code problem; the 
 - **2026-11-02, local (this container), `Integration.Tests.ps1` 'cost about what ASCII titles do':** Chinese median 41 ms against a limit of 38, set from an ASCII median of 23 ms, the lowest seen here (26–38 ms in earlier runs). It passed on both reruns straight after. The title-width code was not changed. Inference: a limit taken from one fast ASCII median is noisy. **Seen again 2026-11-10, CI run 89 (`db802b2`), rockylinux 9:** Hebrew 36 ms against a limit of 34 (ASCII 19). Fixed in build 2026.11.10.1's branch: the margin is now ASCII + 40 ms (the bug it guards gave ~150 ms). Not re-checked red against that bug.
 - **2026-11-10, CI run 97 (`bf6085f`), debian 12, `Integration.Tests.ps1` 'carries on in one process when the worker dies':** the worker was killed mid-frame, so ctop said "worker sent an unreadable frame; running in one process" rather than "worker stopped …"; the test accepted only the second. ctop behaved correctly. Fixed: the test accepts either message.
 - **2026-11-10, Sol's local Windows PowerShell 5.1 run at `336485d`, `Process.Tests.ps1` 'ends a hung parent and its child together':** the parent was still alive after the test's 500 ms wait; the same file passed all 5 tests on an isolated rerun. Cause not known; process-cleanup code unchanged in this PR. Not yet fixed (seen once).
+- **2026-11-13, local PowerShell 7, `Cline.Tests.ps1` 'counts a changed ended conversation as still to read when there is no time for it, and reads it on a later call':** expected 2, got 1; failed once in 3 runs of the file on code without the cache work and once in a full-suite run with it, passing otherwise. Inference: the test's time budget is tight on a loaded machine. Not yet fixed.
+- **2026-11-13, local Windows PowerShell 5.1, `Copilot.Tests.ps1` 'lists the chats VS Code has open lately as live, with their state':** COST `-` instead of `$1.50`; seen three times that day (two reviewers' runs, one of mine, once at the base commit `4975673`), each time passing on rerun (3 of 3). Not yet fixed.
 - **CI cost:** don't run CI on a push whose code is already known to build (e.g. notes only): put `[skip ci]` in the commit message, check that no run started, cancel one that did.
 

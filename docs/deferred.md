@@ -115,6 +115,17 @@ Flaky tests are listed separately in `CLAUDE.md` ("Flaky tests seen in CI").
 - **Why deferred:** Sol judged these display limits within the chosen F3 scope.
 - **Possible fix:** count each file version once, by path, length and write time, and leave failed reads out of the done count.
 
+### D15. The CACHE countdown can differ from the extension's by about a second
+
+- **Source:** the pre-audit of the cache countdown, round 2 (2026-11-13), reading the extension's `webview/index.js` (2.1.323).
+- **Where:** `Update-Scan` (compact boundary, user and assistant lines) and `Get-CacheState`.
+- **What happens:**
+  - The extension also marks compaction from a user entry with `isCompactSummary`; ctop only from the `compact_boundary` entry. Claude Code writes both together, about a second apart.
+  - While a session is live, the extension times each call by when its window received it; ctop has only the transcript's timestamps.
+  - Either can move a minute boundary or the moment the cache goes cold by about a second.
+- **Why deferred:** a second is below what the minute cell can show. 80 of 80 real transcripts agreed on anchor, TTL, compaction and tokens with a re-implementation of the extension's rule.
+- **Possible fix:** take the compaction time from whichever of the two entries comes first. The live receive time can't be read from disk.
+
 ## Not yet checked (not bugs)
 
 - **Cline's `cost`:** that it is in dollars is inference. Whether it equals the manifest's `metadata.totalCost` is unverified. A probe run that prints both would settle it.
