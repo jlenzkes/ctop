@@ -134,6 +134,26 @@ Describe 'Update-Scan: the cache anchor' {
     $st = Scan @((Usage '2026-11-13T12:00:00.000Z' 'msg_1'), $boundary, (Usage '2026-11-13T12:06:00.000Z' 'msg_2'))
     (Get-CacheState $st (At '2026-11-13T12:07:00Z')).Kind | Should -Be 'warm'
   }
+  It 'keeps the size of the compacted conversation (postTokens) and the TTL before it, for RECACHE' {
+    # a real boundary, as Claude Code writes it (seen in ~/.claude/projects on 2026-11-13)
+    $boundary = '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":280717,"postTokens":51232,"cumulativeDroppedTokens":229485,"durationMs":1060},"timestamp":"2026-11-13T12:05:00.000Z"}'
+    $st = Scan @((Usage '2026-11-13T12:00:00.000Z' 'msg_1'), $boundary)
+    $st.LastCompactPreTokens | Should -Be 280717
+    $st.LastCompactPostTokens | Should -Be 51232
+    $s = Get-CacheState $st (At '2026-11-13T12:06:00Z')
+    $s.Reason | Should -Be 'compacted'
+    $s.RecacheTokens | Should -Be 51232
+    $s.Ttl | Should -Be '1h'
+  }
+  It 'carries postTokens from the scan to the session''s action (Get-LastAction)' {
+    $script:TailCache = @{}
+    $boundary = '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":280717,"postTokens":51232},"timestamp":"2026-11-13T12:05:00.000Z"}'
+    $f = Join-Path $TestDrive "la-$([guid]::NewGuid().ToString('N')).jsonl"
+    [IO.File]::WriteAllText($f, (((Usage '2026-11-13T12:00:00.000Z' 'msg_1'), $boundary) -join "`n") + "`n")
+    $a = Get-LastAction (Get-Item -LiteralPath $f) ([guid]::NewGuid().ToString())
+    $a.LastCompactPostTokens | Should -Be 51232
+    (Get-CacheState $a (At '2026-11-13T12:06:00Z')).RecacheTokens | Should -Be 51232
+  }
 }
 
 Describe 'Get-CacheState' {
@@ -264,16 +284,17 @@ Describe 'the CACHE column' {
   }
 }
 
-Describe 'the cold cost under CACHE' {
+Describe 'RECACHE: what the next turn costs once the cache is cold' {
   BeforeAll {
     $script:Pricing = @(@{ Match = '^priced$'; In = 5; Out = 25; Read = 0.5; W5 = 6.25; W1h = 10 })
     $script:Color = $false
-    $cols = @([pscustomobject]@{ Name = 'CACHE'; Width = 5; Align = 'R'; Fixed = 5 })
+    $cols = @([pscustomobject]@{ Name = 'CACHE'; Width = 5; Align = 'R'; Fixed = 5 }, [pscustomobject]@{ Name = 'RECACHE'; Width = 7; Align = 'R'; Fixed = 7 })
+    $src = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'ctop.ps1')
   }
   It 'is <Want> for <Tok> tokens of a <Ttl> cache' -ForEach @(
     @{ Tok = 220000;  Ttl = '1h'; Want = '$2.20' }    # 220K x $10/MTok
     @{ Tok = 220000;  Ttl = '5m'; Want = '$1.38' }    # 220K x $6.25/MTok
-    @{ Tok = 1500000; Ttl = '1h'; Want = '$15' }      # 5 cells: no cents from $10
+    @{ Tok = 1500000; Ttl = '1h'; Want = '$15' }      # no cents from $10
     @{ Tok = 12000000; Ttl = '1h'; Want = '$120' }
   ) {
     Format-CacheCost @{ Kind = 'warm'; Ttl = $Ttl; RecacheTokens = $Tok } 'priced' | Should -Be $Want
@@ -281,28 +302,55 @@ Describe 'the cold cost under CACHE' {
   It 'is the next turn''s cost once expired too' {
     Format-CacheCost @{ Kind = 'cold'; Reason = 'expired'; Ttl = '1h'; RecacheTokens = 220000 } 'priced' | Should -Be '$2.20'
   }
+  It 'prices the compacted conversation at the write price of the TTL before the compaction: <Ttl>' -ForEach @(
+    @{ Ttl = '1h'; Want = '$0.51' }    # 51,232 x $10/MTok
+    @{ Ttl = '5m'; Want = '$0.32' }    # 51,232 x $6.25/MTok
+  ) {
+    $act = @{ CacheTtl = $Ttl; CacheAnchor = '2026-11-13T12:00:00.000Z'; RecacheTok = 280000; CacheCompactAt = '2026-11-13T12:05:00.000Z'; LastCompactPostTokens = 51232 }
+    Format-CacheCost (Get-CacheState $act (At '2026-11-13T12:06:00Z')) 'priced' | Should -Be $Want
+  }
   It 'is empty when it can''t be priced or isn''t known: <Name>' -ForEach @(
     @{ Name = 'unpriced model'; State = @{ Kind = 'warm'; Ttl = '1h'; RecacheTokens = 220000 }; Model = 'nobody' }
-    @{ Name = 'compacted';      State = @{ Kind = 'cold'; Reason = 'compacted' };               Model = 'priced' }
+    @{ Name = 'compacted, no size recorded'; State = @{ Kind = 'cold'; Reason = 'compacted'; Ttl = '1h' }; Model = 'priced' }
+    @{ Name = 'compacted, no TTL before it'; State = @{ Kind = 'cold'; Reason = 'compacted'; RecacheTokens = 51232 }; Model = 'priced' }
     @{ Name = 'unknown';        State = @{ Kind = 'unknown' };                                  Model = 'priced' }
     @{ Name = 'no tokens';      State = @{ Kind = 'warm'; Ttl = '1h'; RecacheTokens = 0 };      Model = 'priced' }
   ) {
     Format-CacheCost $State $Model | Should -Be ''
   }
-  It 'is drawn as the cell''s second line when rows have two' {
-    $r = [pscustomobject]@{ CACHE = '43m'; _Cache = @{ Kind = 'warm'; Ttl = '1h'; RecacheTokens = 220000; MsLeft = 2580000.0 }; _Act = @{ Model = 'priced' }; _Gone = $null }
-    $lines = Format-Row $cols $r '  ' 2   # returns its lines as one array (return ,$lines)
-    $lines.Count | Should -Be 2
-    (Strip-Ansi $lines[0]).Trim() | Should -Be '43m'
-    (Strip-Ansi $lines[1]).Trim() | Should -Be '$2.20'
-    $one = Format-Row $cols $r '  ' 1
-    @($one).Count | Should -Be 1
+  It 'is a column of its own right after CACHE, 7 wide, right-aligned, hidden just before CACHE' {
+    $at = @('CACHE', 'RECACHE', 'TURN' | ForEach-Object { $src.IndexOf("@{ Name = '$_';") })
+    $at[1] | Should -BeGreaterThan $at[0]
+    $at[1] | Should -BeLessThan $at[2]
+    $src | Should -Match "@\{ Name = 'RECACHE';\s+Fixed = 7;\s+Align = 'R'; Priority = 84 \}"
   }
-  It 'redraws the row when the tokens or the model change' {
-    $r = [pscustomobject]@{ CACHE = '43m'; _Cache = @{ Kind = 'warm'; Ttl = '1h'; RecacheTokens = 220000 }; _Act = @{ Model = 'priced' }; _Gone = $null; _Jobs = @(); IDLE = '1m' }
+  It 'leaves CACHE one line: the figure is in RECACHE, not under the minutes' {
+    $r = [pscustomobject]@{ CACHE = '43m'; RECACHE = '$2.20'; _Cache = @{ Kind = 'warm'; Ttl = '1h'; RecacheTokens = 220000; MsLeft = 2580000.0 }; _Act = @{ Model = 'priced' }; _Gone = $null }
+    $lines = Format-Row $cols $r '  ' 2   # returns its lines as one array (return ,$lines)
+    @($lines).Count | Should -Be 1
+    (Strip-Ansi $lines[0]) | Should -Be '  43m    $2.20'
+  }
+  It 'redraws the row when RECACHE changes' {
+    $r = [pscustomobject]@{ CACHE = '43m'; RECACHE = '$2.20'; _Cache = @{ Kind = 'warm'; Ttl = '1h'; RecacheTokens = 220000 }; _Act = @{ Model = 'priced' }; _Gone = $null; _Jobs = @(); IDLE = '1m' }
     $k1 = Row-Key $cols $r 'sig'
-    $r._Cache.RecacheTokens = 230000
+    $r.RECACHE = '$2.30'
     Row-Key $cols $r 'sig' | Should -Not -Be $k1
+  }
+  It 'is set on a gone row as its clock moves' {
+    $script:TranscriptIndex = @{}; $script:History = @{}
+    $started = [DateTimeOffset]::UtcNow.AddHours(-3)
+    $anchor = [DateTimeOffset]::UtcNow.AddMinutes(-20).ToString('o')
+    $r = [pscustomobject]@{ _SessionId = 'g1'; _Gone = (Get-Date).AddMinutes(-7); _Cleared = $false
+                            _Act = @{ Cost = 6.0; Model = 'priced'; CacheAnchor = $anchor; CacheTtl = '1h'; RecacheTok = 220000; CacheCompactAt = '' }
+                            _StartedAt = $started.LocalDateTime; _Src = [pscustomobject]@{ sessionId = 'g1'; startedAt = $started.ToUnixTimeMilliseconds() }
+                            STATE = 'stale'; AGE = 'stale'; IDLE = 'stale'; RATE = 'stale'; ACTIVITY = 'stale'; CACHE = 'stale'; RECACHE = 'stale'; _Cache = $null; _Dirty = $false }
+    Update-GoneRow $r
+    $r.RECACHE | Should -Be '$2.20'
+  }
+  It 'is described in the help (the hover line reads it there), and CACHE no longer speaks of a second line' {
+    $script:ColumnMeaning = $null
+    Get-ColumnMeaning 'RECACHE' | Should -Match 'next turn'
+    Get-ColumnMeaning 'CACHE' | Should -Not -Match 'Second line'
   }
 }
 

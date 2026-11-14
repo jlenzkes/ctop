@@ -2,6 +2,23 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.15 — RECACHE gets its own column; BRANCH at most 14 wide
+
+- RECACHE, a new column right after CACHE: what the next turn costs once the prompt cache is cold (the
+  whole context written back at the cache-write price of its TTL), e.g. `$6.45`, whole dollars from $10.
+  It was CACHE's second line, which read as confusing; CACHE is one line again. After a compaction it
+  shows what caching the compacted conversation costs: the size Claude Code records for it
+  (`postTokens` on the compaction entry) at the write price of the TTL used before the compaction; blank
+  when no TTL was known then, or for a compaction written without that size. RECACHE hides just before
+  CACHE in a narrow window and stays in compact mode. Peek's CACHE line is unchanged. Transcripts are
+  rescanned once, to pick up the size
+- BRANCH is at most 14 wide (narrower when every name is shorter). A longer name goes on to the row's
+  second line; past 28 characters, or in the truncate layout, it keeps its end. The hover line still
+  shows it whole
+- LAST ACTION gets the larger share of the width (its weight is 6, was 4), and width another flexible
+  column can't use goes to LAST ACTION first (it went to NAME and TITLE first). In a snapshot of live
+  sessions 199 wide (`-Snapshot -MaxWidth 198`): LAST ACTION 25 (was 22), BRANCH 14 (was 21), RECACHE 7,
+  TITLE 13 (was 16), CWD 14 (was 16)
 ## 2026.11.13.13 — the hover line
 
 - with the mouse on (Windows), resting the pointer on a cell shows it on the bottom line, whole, with what

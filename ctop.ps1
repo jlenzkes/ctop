@@ -55,8 +55,8 @@
   Disable ANSI colors (STATE, TURN, MODEL, sparkline, COST).
 
 .PARAMETER Compact
-  Show only the essential columns (NAME, STATE, CACHE, TURN, CTX, LAST ACTION, ACTIVITY, COST,
-  BRANCH) regardless of window width. Toggle at runtime with 'c'.
+  Show only the essential columns (NAME, STATE, CACHE, RECACHE, TURN, CTX, LAST ACTION, ACTIVITY,
+  COST, BRANCH) regardless of window width. Toggle at runtime with 'c'.
 
 .PARAMETER NoSubagents
   Don't scan for or show subagent rows. Toggle at runtime with 's'.
@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.13 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.15 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.13'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.15'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -680,7 +680,8 @@ $script:PriceFrom = 'the built-in table, read 2026-10-20 (-PricingFile for your 
 # 4: a first prompt needs three letters in a row of any script to be the title, not three ASCII letters
 # 5: the prompt-cache anchor, TTL and compaction (the CACHE column)
 # 6: the cache anchor is the request's time, and synthetic, empty and sidechain calls change nothing
-$script:ScanVer = 6
+# 7: a compaction's postTokens (the size of the compacted conversation: RECACHE prices it)
+$script:ScanVer = 7
 $script:Pricing = @(
   @{ Match = 'fable-5-1|mythos-5-1'; In = 10;  W5 = 12.5;  W1h = 20;  Read = 0.25; Out = 50 }
   @{ Match = 'fable-5|mythos-5';     In = 10;  W5 = 12.5;  W1h = 20;  Read = 1;    Out = 50 }
@@ -883,7 +884,7 @@ function New-ScanState([System.IO.FileInfo]$file) {
   @{ Path = $file.FullName; Head = (Get-HeadPrint $file.FullName)
      PriceVer = $script:PriceVer; ScanVer = $script:ScanVer; Offset = 0; Turns = 0; Tools = 0; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0;
      LastId = ''; LastCost = 0.0; LastOut = 0; Model = '-'; AiTitle = ''; Summary = ''; Title = ''; First = ''; MsgSummary = ''; Cwd = ''; GitBranch = ''; ToolCounts = @{}
-     Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; ToolLog = @()
+     Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; LastCompactPostTokens = 0; ToolLog = @()
      CacheAnchor = ''; CacheAnchorId = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = ''; CacheReqAt = '' }
 }
 function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
@@ -945,6 +946,7 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
         if ($line -match '"timestamp":"([^"]+)"') { try { $st.LastCompactAt = [datetime]$Matches[1] } catch {} }
         if ($line -match '"trigger":"([^"]+)"') { $st.LastCompactTrigger = $Matches[1] }
         if ($line -match '"preTokens":(\d+)') { $st.LastCompactPreTokens = [long]$Matches[1] }
+        $st.LastCompactPostTokens = if ($line -match '"postTokens":(\d+)') { [long]$Matches[1] } else { 0 }   # older Claude Code: not written
         $cts = Get-EntryTimestamp $tailPart
         if ($cts) { $st.CacheCompactAt = $cts }
         continue
@@ -1109,9 +1111,14 @@ function Get-CacheState($act, [datetime]$now) {
   $now = $now.ToUniversalTime()
   $tok = [long]$act.RecacheTok
   $c = ConvertFrom-CacheTime ([string]$act.CacheCompactAt)
-  if ($c) { return @{ Kind = 'cold'; Reason = 'compacted'; IdleMs = [math]::Max(0.0, ($now - $c).TotalMilliseconds); RecacheTokens = 0 } }
-  $a = ConvertFrom-CacheTime ([string]$act.CacheAnchor)
   $ttl = [string]$act.CacheTtl
+  if ($c) {
+    # the next turn caches the compacted conversation (the boundary's postTokens), at the TTL the last call before it used
+    $cold = @{ Kind = 'cold'; Reason = 'compacted'; IdleMs = [math]::Max(0.0, ($now - $c).TotalMilliseconds); RecacheTokens = [long]$act.LastCompactPostTokens }
+    if ($ttl -in '1h', '5m') { $cold.Ttl = $ttl }
+    return $cold
+  }
+  $a = ConvertFrom-CacheTime ([string]$act.CacheAnchor)
   if (-not $a -or $ttl -notin '1h', '5m') { return @{ Kind = 'unknown' } }
   $len = if ($ttl -eq '1h') { 3600000.0 } else { 300000.0 }
   $left = [math]::Min($len, $len - ($now - $a).TotalMilliseconds)
@@ -1126,16 +1133,17 @@ function Format-CacheCell($state) {
 # peek's CACHE line. The next turn's cost re-reads (warm) or re-writes (cold) the last call's whole prompt,
 # at that model's cache-read or cache-write price for the TTL: an estimate without the new message itself.
 # What the next turn pays to write the whole context back into the cache once it is cold: the last call's
-# input + cache tokens at the TTL's write price. $null when unknown (no cache, compacted, unpriced model).
+# input + cache tokens at the TTL's write price; after a compaction, the compacted conversation (postTokens)
+# at the write price of the TTL before it. $null when unknown (no cache, no TTL, no size recorded, unpriced model).
 function Get-CacheColdDollars($state, [string]$model) {
-  if (-not $state -or $state.Kind -eq 'unknown' -or $state.Reason -eq 'compacted') { return $null }
+  if (-not $state -or $state.Kind -eq 'unknown' -or $state.Ttl -notin '1h', '5m') { return $null }
   $tok = [long]$state.RecacheTokens
   if ($tok -le 0) { return $null }
   $p = Get-Price $model $tok
   if (-not $p) { return $null }
   return $tok * $(if ($state.Ttl -eq '1h') { [double]$p.W1h } else { [double]$p.W5 }) / 1e6
 }
-# The cold cost as CACHE's second line, in its 5 cells: $6.03, or whole dollars from $10 ($15, $120).
+# The cold cost, the RECACHE column: $6.03, or whole dollars from $10 ($15, $120).
 function Format-CacheCost($state, [string]$model) {
   $d = Get-CacheColdDollars $state $model
   if ($null -eq $d) { return '' }
@@ -1184,7 +1192,7 @@ function Read-TailLines([string]$path, [int]$bytes) {
 }
 
 function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
-  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $null; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; CacheAnchor = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = '' }
+  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $null; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; CacheAnchor = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = ''; LastCompactPostTokens = 0 }
   if (-not $file) { return $out }
   $stamp = $script:TailCache[$sessionId]
   # the same file, unchanged: a session's transcript can become another file (it follows the cwd)
@@ -1355,7 +1363,7 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
   $out.ToolLog = @($sc.ToolLog)
   $out.GitBranch = $sc.GitBranch
   $out.Compacts = $sc.Compacts; $out.LastCompactAt = $sc.LastCompactAt; $out.LastCompactTrigger = $sc.LastCompactTrigger; $out.LastCompactPreTokens = $sc.LastCompactPreTokens
-  $out.CacheAnchor = $sc.CacheAnchor; $out.CacheTtl = $sc.CacheTtl; $out.RecacheTok = $sc.RecacheTok; $out.CacheCompactAt = $sc.CacheCompactAt
+  $out.CacheAnchor = $sc.CacheAnchor; $out.CacheTtl = $sc.CacheTtl; $out.RecacheTok = $sc.RecacheTok; $out.CacheCompactAt = $sc.CacheCompactAt; $out.LastCompactPostTokens = $sc.LastCompactPostTokens
   $out.ToolMix = ($sc.ToolCounts.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ' · '
   # newest message was synthetic: its zero usage must not mask the context size; take CTX from
   # the newest real assistant entry in the tail
@@ -1930,7 +1938,7 @@ function Read-ClineManifests([string]$dir, [int]$budgetMs = [int]::MaxValue) {
 $script:ClineMsgCache = @{}   # path -> @{ Length; Write; Result }
 # -CachedOnly: no read; the last result (even of an older version of the file), or $null if there is none.
 function Read-ClineMessages([string]$path, [switch]$CachedOnly) {
-  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; CacheAnchor = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = '' }
+  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; CacheAnchor = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = ''; LastCompactPostTokens = 0 }
   if (-not $path) { return $out }
   $f = $null; try { $f = [IO.FileInfo]::new($path) } catch { return $out }
   if (-not $f.Exists) { return $out }
@@ -2079,6 +2087,7 @@ function New-ClineRow($e, [bool]$sample) {
     AGE      = if ($startMs) { Get-Age $startMs } else { '-' }
     IDLE     = Get-Since $e.LastWrite
     CACHE    = '-'
+    RECACHE  = '-'
     _Cache   = $null
     TURN     = if ($act.TurnStart -and $active) { Get-Since $act.TurnStart } else { '' }
     TURNS    = $act.Turns
@@ -2616,6 +2625,7 @@ function New-CopilotRow($e, [bool]$sample) {
     AGE      = Get-Age $startMs
     IDLE     = Get-Since $e.Written
     CACHE    = '-'
+    RECACHE  = '-'
     _Cache   = $null
     TURN     = if ($act.TurnStart -and $state -in 'working', 'waiting') { Get-Since $act.TurnStart } else { '' }
     TURNS    = $act.Turns
@@ -3119,6 +3129,7 @@ function Update-GoneRow($r) {
   $r.IDLE     = if ($file) { Get-Since $file.LastWriteTime } else { '-' }
   $r._Cache   = Get-CacheState $r._Act (Get-Date)
   $r.CACHE    = Format-CacheCell $r._Cache
+  $r | Add-Member -NotePropertyName RECACHE -NotePropertyValue (Format-CacheCost $r._Cache $r._Act.Model) -Force   # Add-Member: a row made without the column has no such property to set
   $r.RATE     = Format-Rate ([double]$r._Act.Cost) $r._StartedAt (Get-Date)
   $r.ACTIVITY = $script:History[$r._SessionId]
   $r._Dirty   = $true   # Render-Table re-formats it
@@ -3219,6 +3230,7 @@ function Build-Rows {
           IDLE     = Get-Since $sf.LastWriteTime
           _Cache   = ($scache = Get-CacheState $sact (Get-Date))
           CACHE    = Format-CacheCell $scache
+          RECACHE  = Format-CacheCost $scache $sact.Model
           TURN     = if ($sact.TurnStart -and $sst0 -in 'working','thinking') { Get-Since $sact.TurnStart } else { '' }
           TURNS    = '-'
           TOOLS    = $sact.Tools
@@ -3305,6 +3317,7 @@ function Build-Rows {
       IDLE     = if ($file) { Get-Since $file.LastWriteTime } else { '-' }
       _Cache   = ($cache = Get-CacheState $act (Get-Date))
       CACHE    = Format-CacheCell $cache
+      RECACHE  = Format-CacheCost $cache $act.Model
       TURN     = if ($act.TurnStart -and $active) { Get-Since $act.TurnStart } else { '' }
       TURNS    = $act.Turns
       TOOLS    = $act.Tools
@@ -3584,18 +3597,19 @@ function Paint-Spark([string]$sp) {
 # Instead: bounded columns get a fixed width sized to their longest possible value;
 # unbounded ones (NAME, LAST ACTION, CWD) use a high-water mark that only ever grows.
 # Priority: lower numbers are hidden first when the window is too narrow. Flex columns
-# share the leftover width in proportion to Flex, never below Min.
+# share the leftover width in proportion to Flex, never below Min. Max caps an Auto column.
 $script:Columns = @(
   @{ Name = 'NAME';        Fixed = 0;  Min = 12; Flex = 2; Align = 'L'; Priority = 100 }
   @{ Name = 'TITLE';       Fixed = 0;  Min = 12; Flex = 3; Align = 'L'; Priority = 95 }   # picker's friendly name
   @{ Name = 'STATE';       Fixed = 8;  Auto = $true; Align = 'L'; Priority = 100 }
   @{ Name = 'CACHE';       Fixed = 5;  Align = 'R'; Priority = 85 }   # prompt cache: minutes left; IDLE is in peek
+  @{ Name = 'RECACHE';     Fixed = 7;  Align = 'R'; Priority = 84 }   # what the next turn costs once the cache is cold
   @{ Name = 'TURN';        Fixed = 5;  Align = 'R'; Priority = 90 }   # time on current turn
   @{ Name = 'CTX';         Fixed = 5;  Align = 'R'; Priority = 80 }   # "123K"
   @{ Name = 'CMP';         Fixed = 3;  Align = 'R'; Priority = 79 }   # compactions so far
-  @{ Name = 'LAST ACTION'; Fixed = 0;  Min = 16; Flex = 4; Align = 'L'; Priority = 75 }
+  @{ Name = 'LAST ACTION'; Fixed = 0;  Min = 16; Flex = 6; Align = 'L'; Priority = 75 }   # the widest share (user, 2026-11-13)
   @{ Name = 'ACTIVITY';    Fixed = 20; Align = 'L'; Priority = 70 }   # sparkline, 1 col = 2 s
-  @{ Name = 'BRANCH';      Fixed = 6;  Auto = $true; Align = 'L'; Priority = 60 }
+  @{ Name = 'BRANCH';      Fixed = 6;  Auto = $true; Max = 14; Align = 'L'; Priority = 60 }   # longer: on the second line
   @{ Name = 'AGE';         Fixed = 7;  Align = 'R'; Priority = 55 }
   @{ Name = 'CWD';         Fixed = 0;  Min = 14; Flex = 3; Align = 'L'; Priority = 50 }
   @{ Name = 'PID';         Fixed = 6;  Align = 'R'; Priority = 38 }
@@ -3662,7 +3676,7 @@ function Auto-Width([string]$name, [int]$floor, [object[]]$rows) {
 
 function Layout-Columns([object[]]$candidates, [object[]]$rows, [int]$avail, [string]$sep) {
   foreach ($c in $candidates) {
-    if ($c.Auto) { $c.Fixed = Auto-Width $c.Name $c.Floor $rows; $c.Natural = $c.Fixed; continue }
+    if ($c.Auto) { $c.Fixed = Auto-Width $c.Name $c.Floor $rows; if ($c.Max) { $c.Fixed = [math]::Min($c.Fixed, $c.Max) }; $c.Natural = $c.Fixed; continue }
     if ($c.Fixed -gt 0) { $c.Natural = $c.Fixed; continue }
     $seen = $c.Min
     foreach ($r in $rows) {
@@ -3704,7 +3718,8 @@ function Layout-Columns([object[]]$candidates, [object[]]$rows, [int]$avail, [st
     $c.Width--; $over--
   }
   $used = ($flex | ForEach-Object Width | Measure-Object -Sum).Sum
-  foreach ($n in 'NAME','TITLE','LAST ACTION','CWD') {
+  # width a column could not use (its text is shorter than its share) goes to LAST ACTION first
+  foreach ($n in 'LAST ACTION','NAME','TITLE','CWD') {
     $c = $flex | Where-Object Name -eq $n
     if ($c -and $left - $used -gt 0 -and $c.Width -lt $c.Natural) { $add = [math]::Min($left - $used, $c.Natural - $c.Width); $c.Width += $add; $used += $add }
   }
@@ -3778,9 +3793,13 @@ function Format-Row([object[]]$cols, $r, [string]$sep, [int]$maxLines) {
       $sig = if ($t -ge 1000) { 'Σ${0:N0}k' -f ($t / 1000) } elseif ($t -ge 100) { 'Σ${0:N0}' -f $t } else { 'Σ${0:N2}' -f $t }
       $pieces = @(((Fit $v $c.Width $c.Align)).TrimEnd(), ((Fit $sig $c.Width $c.Align)).TrimEnd())
     }
-    elseif ($c.Name -eq 'CACHE' -and $maxLines -gt 1 -and ($cc = Format-CacheCost $r._Cache $r._Act.Model)) {
-      # what letting it go cold costs, under the time left (the way COST carries the tree's Σ)
-      $pieces = @(((Fit $v $c.Width $c.Align)).TrimEnd(), ((Fit $cc $c.Width $c.Align)).TrimEnd())
+    elseif ($c.Name -eq 'BRANCH') {
+      # a longer name continues on the next line; past the row's lines, or in one line, it keeps its end
+      # (a branch's last part names it, as a path's tail does)
+      $t = Clean $v
+      $pieces = if ($maxLines -gt 1) { Wrap-Cell $t $c.Width $maxLines $true }
+                elseif ((Get-CellWidth $t) -gt $c.Width) { ,@([string][char]0x2026 + (Last-Cells $t ($c.Width - 1))) }
+                else { ,@($t) }
     }
     elseif ($c.Name -eq 'STATE' -and $r._LiveKids -gt 0) {
       $pieces = ,@(((Fit "$v +$($r._LiveKids)" $c.Width $c.Align)).TrimEnd())
@@ -3823,7 +3842,7 @@ function Row-Key([object[]]$cols, $r, [string]$sig) {
   $jc = 0; foreach ($x in @($r._Jobs)) { if ($x) { $jc++ } }
   $cmpRecent = $false
   if ($r._Act -and $r._Act.LastCompactAt) { try { $cmpRecent = ((Get-Date) - [datetime]$r._Act.LastCompactAt).TotalMinutes -lt 10 } catch {} }
-  [void]$sb.Append([char]30).Append("$([bool]$r._Gone)|$(if ($r._Cache) { "$($r._Cache.Ttl)/$($r._Cache.RecacheTokens)" })|$($r._Act.Model)|$((Minutes $r.IDLE) -ge 2)|$($r._LaunchCwd)|$cmpRecent|$jc|$($r._LiveKids)|$($r._TreeLast)|$($r._Depth)|$($r._Done)|$($r._Orphaned)|$($r._Parent -ne $null)|$([math]::Round([double]$r._TreeCost, 2))")
+  [void]$sb.Append([char]30).Append("$([bool]$r._Gone)|$(if ($r._Cache) { $r._Cache.Ttl })|$((Minutes $r.IDLE) -ge 2)|$($r._LaunchCwd)|$cmpRecent|$jc|$($r._LiveKids)|$($r._TreeLast)|$($r._Depth)|$($r._Done)|$($r._Orphaned)|$($r._Parent -ne $null)|$([math]::Round([double]$r._TreeCost, 2))")
   return $sb.ToString()
 }
 function Get-RowLines([object[]]$cols, $r, [string]$sep, [int]$maxLines, [string]$sig) {
@@ -4144,8 +4163,10 @@ function Show-Help {
     '                 Agent SDK: VS Code''s own Claude agent, or another program built on it), remote,',
     '                 cline (a Cline session), copilot (a GitHub Copilot chat in VS Code)',
     '  CACHE       T  prompt cache: minutes left while warm (yellow near the end), cold once expired, - unknown;',
-    '                 the rule of the Claude Code extension for VS Code. Second line: what the next turn costs once',
-    '                 the cache is cold (the whole context written back). In peek: the next turn warm and cold',
+    '                 the rule of the Claude Code extension for VS Code. In peek: the next turn warm and cold',
+    '  RECACHE     T  what the next turn costs once the cache is cold: the whole context written back at the',
+    '                 cache-write price of its TTL (5m or 1h). After a compaction: the compacted conversation,',
+    '                 at the TTL used before it. Blank when unknown (no cache use, or a model with no price)',
     '  TURN        T  time since your last prompt — how long Claude has been on this turn (blank when idle).',
     '                 Yellow >= 10 min, red >= 30 min',
     '  IDLE        T  (peek) time since the transcript was last written to',
@@ -4160,7 +4181,8 @@ function Show-Help {
     '                 ▁ (red) waiting on you: a permission',
     '                 prompt or a question. No tokens are consumed while waiting',
     '  BRANCH      T  the gitBranch Claude Code stamps on entries (falls back to .git/HEAD).',
-    '                 wt: prefix = CWD is a linked git worktree',
+    '                 wt: prefix = CWD is a linked git worktree. At most 14 wide: a longer name goes on',
+    '                 to the second line, and keeps its end when even that is too short',
     '  AGE         J  time since the session (or agent) started',
     '  CWD         T  where the session is NOW (newest cwd in its transcript). Cyan = it moved since launch',
     '  PID, CPU(s), MEM(MB)   O  the claude process; subagents run inside the parent (no PID)',
@@ -4200,8 +4222,9 @@ function Show-Help {
     '         and in the footer). Gone sessions from earlier runs come from the closed log',
     '       r poll the roster now   [ / ] tick   h this help   q quit',
     '',
-    'LAYOUT   the table fills the window (cap with -MaxWidth). Extra width widens TITLE / LAST ACTION / CWD',
-    '  toward their full text; MODEL / BRANCH / KIND / STATE size to content (shrink is delayed ~5 s).',
+    'LAYOUT   the table fills the window (cap with -MaxWidth). Extra width widens LAST ACTION first, then',
+    '  TITLE / CWD, toward their full text; MODEL / BRANCH (up to 14) / KIND / STATE size to content',
+    '  (shrink is delayed ~5 s).',
     '  Column widths are sticky within a run so nothing jitters. Rows: one process = one row; after',
     '  /clear the old id may linger in the roster, ctop keeps the entry with the freshest transcript.',
     '',

@@ -65,4 +65,30 @@ Describe 'Build-Rows: a gone row''s cache' {
     $script:appended | Should -BeTrue
     [double](Row)._AgentCost | Should -Be 2 -Because 'the next check must see the agent file changed since that scan'
   }
+
+  It 'fills RECACHE where it fills CACHE: the session and its subagent' {
+    Reset-State (Join-Path $TestDrive 'recache')
+    # a live session this time (a gone one lists no subagents), with no process to look up
+    $script:Roster = @([pscustomobject]@{ sessionId = $sid; cwd = '/w'; kind = 'interactive'; name = 'g-one'; startedAt = 1793400000000 })
+    $script:Departed = @{}; $script:KeptGone = @(); $script:ShowSubagents = $true; $script:KeepMin = 15
+    $script:MetaCache = @{}; $script:MetaWrite = @{}; $script:MetaMiss = @{}
+    $script:Pricing = @(@{ Match = '^m$'; In = 5; W5 = 6.25; W1h = 10; Read = 0.5; Out = 25 })
+    $ts = [DateTimeOffset]::UtcNow.AddMinutes(-10).ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    function Cached([string]$id, [long]$cr) {   # a call that read $cr tokens from a 1-hour cache and wrote 20,000
+      '{"type":"assistant","sessionId":"' + $sid + '","timestamp":"' + $ts + '","message":{"id":"' + $id + '","model":"m","usage":{"input_tokens":0,' +
+        '"cache_creation_input_tokens":20000,"cache_read_input_tokens":' + $cr + ',"cache_creation":{"ephemeral_1h_input_tokens":20000,"ephemeral_5m_input_tokens":0},"output_tokens":5}}}'
+    }
+    $t = Join-Path $script:ProjectsDir "-w/$sid.jsonl"
+    $agent = Join-Path $script:ProjectsDir "-w/$sid/subagents/agent-a1.jsonl"
+    New-Item -ItemType Directory -Force -Path (Split-Path $agent) | Out-Null
+    [IO.File]::WriteAllText($t, (Cached 'msg_1' 200000) + "`n")       # 220,000 x $10/MTok
+    [IO.File]::WriteAllText($agent, (Cached 'msg_2' 80000) + "`n")    # 100,000 x $10/MTok
+    $script:TranscriptIndex = @{ $sid = Get-Item -LiteralPath $t }
+    $rows = @(Build-Rows)
+    $own = $rows | Where-Object { $_._SessionId -eq $sid -and -not $_._Parent } | Select-Object -First 1
+    $kid = $rows | Where-Object { $_._Parent -eq $sid } | Select-Object -First 1
+    $own.RECACHE | Should -Be '$2.20'
+    $kid | Should -Not -BeNullOrEmpty
+    $kid.RECACHE | Should -Be '$1.00'
+  }
 }

@@ -370,3 +370,70 @@ Describe 'moving the cursor after the window shrank (a resize while a frame is d
     { Set-ConsoleCursor 0 50 } | Should -Not -Throw
   }
 }
+
+Describe 'BRANCH: at most 14 wide, a longer name on the row''s second line; LAST ACTION gets the room' {
+  BeforeAll {
+    # the real column table, from ctop.ps1 itself (Import-Ctop defines only the functions)
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path -Parent $PSScriptRoot) 'ctop.ps1'), [ref]$null, [ref]$null)
+    $script:ColumnsText = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$script:Columns' }, $true).Right.Extent.Text
+    function Columns { $cs = & ([scriptblock]::Create($script:ColumnsText)); foreach ($c in $cs) { if ($c.Auto) { $c.Floor = $c.Fixed } }; $cs }
+    function Lay([object[]]$rows, [int]$avail, [string[]]$only) {
+      foreach ($r in $rows) { foreach ($f in '_Widths', '_Dirty') { if (-not $r.PSObject.Properties[$f]) { $r | Add-Member $f $null } } }   # ctop's rows carry these
+      $cands = @(Columns); if ($only) { $cands = @($cands | Where-Object { $_.Name -in $only }) }
+      $out = @{}; foreach ($c in (Layout-Columns $cands $rows $avail '  ')) { $out[$c.Name] = [int]$c.Width }; $out
+    }
+    $script:Color = $false
+    $one = @([pscustomobject]@{ Name = 'BRANCH'; Width = 14; Align = 'L'; Fixed = 14 })
+  }
+  BeforeEach {
+    $script:HighWater = @{}; $script:AutoWidth = @{}; $script:HiddenCols = @(); $script:ShrinkAfter = 20
+    $script:Layouts = @('wrap', 'truncate'); $script:LayoutMode = 0; $script:Compact = $false
+  }
+  It 'is <Want> wide for <Names>' -ForEach @(
+    @{ Names = @('claude/display-polish', 'main'); Want = 14 }
+    @{ Names = @('feature/x1', 'main');            Want = 10 }
+    @{ Names = @('main', 'master');                Want = 6 }    # the header's own width
+  ) {
+    $rows = @($Names | ForEach-Object { [pscustomobject]@{ NAME = 'n'; BRANCH = $_ } })
+    (Lay $rows 400)['BRANCH'] | Should -Be $Want
+  }
+  It 'continues a longer name on the second line' {
+    $lines = Format-Row $one ([pscustomobject]@{ BRANCH = 'claude/display-columns' }) '  ' 2
+    @($lines | ForEach-Object { (Strip-Ansi $_).TrimEnd() }) | Should -Be @('claude/display', '-columns')
+  }
+  It 'keeps the end of a name over 28 characters, in two lines' {
+    $v = 'wt:claude/a-really-long-branch-name-x'
+    $lines = Format-Row $one ([pscustomobject]@{ BRANCH = $v }) '  ' 2
+    $lines = @($lines | ForEach-Object { (Strip-Ansi $_).TrimEnd() })
+    $lines.Count | Should -Be 2
+    -join $lines | Should -BeExactly ([string][char]0x2026 + $v.Substring($v.Length - 27))
+  }
+  It 'keeps the end in one line (truncate layout)' {
+    $v = 'claude/display-columns'
+    $lines = @(Format-Row $one ([pscustomobject]@{ BRANCH = $v }) '  ' 1)
+    $lines.Count | Should -Be 1
+    (Strip-Ansi $lines[0]).TrimEnd() | Should -BeExactly ([string][char]0x2026 + $v.Substring($v.Length - 13))
+  }
+  It 'gives LAST ACTION the widest share in a 199-wide window (user, 2026-11-13: BRANCH 21 vs LAST ACTION 25)' {
+    $long = 'Bash cd c:/dev/src/genai-mil-s7-repairs && python -m pytest tests/test_reader.py -k fallback -q 2>&1 | tail -20'
+    $rows = @(
+      [pscustomobject]@{ NAME = '  ├ general-purpose (a1b2c3d4)'; TITLE = 'Build step 7 row 3.6 repair the trusted text path'; STATE = 'awaiting 3 jobs'
+                         CACHE = '60m'; RECACHE = '$3.37'; TURN = '40m'; CTX = '421K'; CMP = '3'; 'LAST ACTION' = $long; ACTIVITY = ('▒' * 20)
+                         BRANCH = 'claude/display-polish'; AGE = '11h57m'; CWD = 'c:\dev\src\genai-mil'; MODEL = 'fable-5-2'; VIA = 'vscode'; COST = '$185.79'
+                         PID = '12345'; TURNS = '12'; TOOLS = '345'; KIND = 'interactive'; 'CPU(s)' = '12.3'; 'MEM(MB)' = '512'; RATE = '$15.10' }
+    )
+    $w = Lay $rows 197
+    $w['BRANCH'] | Should -Be 14
+    $w['RECACHE'] | Should -Be 7
+    $w['LAST ACTION'] | Should -BeGreaterOrEqual 25
+    foreach ($n in 'NAME', 'TITLE', 'CWD') { $w['LAST ACTION'] | Should -BeGreaterThan $w[$n] -Because "$n is $($w[$n])" }
+  }
+  It 'gives width another flexible column can''t use to LAST ACTION before TITLE' {
+    $rows = @([pscustomobject]@{ NAME = 'short-name12'; TITLE = ('T' * 80); 'LAST ACTION' = ('L' * 120); CWD = 'c:\x\abcdefghi' })
+    $w = Lay $rows 106 @('NAME', 'TITLE', 'LAST ACTION', 'CWD')   # 100 cells for the four, after 3 gaps
+    $w['NAME'] | Should -Be 12
+    $w['CWD'] | Should -Be 14
+    $w['TITLE'] | Should -Be 21          # its share: 100 x 3/14
+    $w['LAST ACTION'] | Should -Be 53    # its share (42) and the 11 cells NAME and CWD left
+  }
+}
