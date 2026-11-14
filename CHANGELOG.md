@@ -2,6 +2,15 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.10 — the hover line
+
+- with the mouse on (Windows), resting the pointer on a cell shows it on the bottom line, whole, with what
+  its column means in the help screen's words: `CACHE · ctop-cc: warm, 43 min left (1h, last call
+  14:02:11) · next turn ≈ $0.15 warm, $6.45 cold   — prompt cache: minutes left while warm…`. LAST
+  ACTION, BRANCH, TITLE and CWD show in full where their cells are cut. Any key brings the key hints back;
+  a click on the bottom line still does what the key hints say. A console has no tooltips; this is the
+  nearest. Not checked in Windows Terminal, only in tests
+
 ## 2026.11.13.9 — what going cold costs, under CACHE
 
 - CACHE has a second line: what the next turn costs once the cache is cold, the whole context written back

@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.9 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.10 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.9'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.10'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -3825,6 +3825,7 @@ function Render-Table([object[]]$rows, [string]$selectedId) {
   if ($script:Compact) { $cands = @($cands | Where-Object { $_.Priority -ge 60 }) }
   $maxLines = if ($script:Layouts[$script:LayoutMode] -eq 'wrap') { [math]::Max(1, $WrapLines) } else { 1 }
   $cols = Layout-Columns $cands $rows $avail $sep
+  $script:ShownCols = @(foreach ($c in $cols) { @{ Name = $c.Name; Width = [int]$c.Width } }); $script:ShownSep = $sep.Length   # hover
   $out = [System.Collections.Generic.List[object]]::new()   # a List: += on an array copies it every time
   $out.Add((($cols | ForEach-Object { Fit $_.Name $_.Width $_.Align }) -join $sep))
   $out.Add((($cols | ForEach-Object { '-' * $_.Width }) -join $sep))
@@ -4100,7 +4101,8 @@ function Show-Help {
     '           A Cline session (VIA cline) is read from Cline''s own files instead: see CLINE below)',
     'MOUSE   (Windows; -NoMouse turns it off)  click a row to select it, click it again or double-click',
     '  to peek, wheel to move, click a footer item for its key, click in peek to close it. To select',
-    '  text in the terminal while ctop runs, hold Shift while dragging.',
+    '  text in the terminal while ctop runs, hold Shift while dragging. Rest the pointer on a cell and the',
+    '  bottom line shows it whole, with what its column means (a key brings the key hints back).',
     '',
     '  NAME        J  session name (/rename or --name); for subagents see SUBAGENT NAMES above',
     '  COST Σ      T  second line of a session''s COST: the whole tree — the session, every subagent it',
@@ -4406,6 +4408,64 @@ function Resolve-Mouse($e, [string]$footer, [bool]$inPeek, [int]$selOrd) {
   return @{ Select = $ord }
 }
 
+# ---- the hover line ----------------------------------------------------------------
+# With the mouse on (Windows), the console reports pointer moves. The footer then shows the cell under the
+# pointer in full, and what its column means, in the help screen's own words: a tooltip, in a console.
+# The column under screen column $x in the last table drawn; $null on a gap between columns or past the end.
+function Get-ColumnAt([int]$x) {
+  $at = 0
+  foreach ($c in @($script:ShownCols)) {
+    if ($x -ge $at -and $x -lt $at + [int]$c.Width) { return $c.Name }
+    $at += [int]$c.Width + [int]$script:ShownSep
+  }
+  return $null
+}
+# A column's description from the help screen's COLUMNS section (read from Show-Help itself, so the two
+# can't drift): the line '  <NAME, 11 wide> <source>  <text>' and its continuation lines, joined.
+function Get-ColumnMeaning([string]$name) {
+  if (-not $script:ColumnMeaning) {
+    $m = @{}; $cur = $null
+    foreach ($n in ${function:Show-Help}.Ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)) {
+      $t = [string]$n.Value
+      if ($t.Length -gt 17 -and $t.StartsWith('  ') -and $t[2] -ne ' ' -and $t[14] -in 'T', 'J', 'R' -and $t.Substring(15, 2) -eq '  ' -and $t.Substring(2, 12).Trim() -cmatch '^[A-Z]') {
+        $cur = $t.Substring(2, 12).Trim(); $m[$cur] = $t.Substring(17).Trim()
+      }
+      elseif ($cur -and $t -match '^ {17}(\S.*)$') { $m[$cur] += ' ' + $Matches[1].Trim() }
+      else { $cur = $null }
+    }
+    $script:ColumnMeaning = $m
+  }
+  return $script:ColumnMeaning[$name]
+}
+# The hover line for one cell: '  <COLUMN> · <row>: <whole value>   — <what the column means>', in $width cells.
+function Format-Hover($r, [string]$name, [int]$width) {
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  $v = switch ($name) {
+    'CACHE'       { Format-CachePeek $r._Cache $r._Act.Model }
+    'LAST ACTION' { if ($r._Act.LastFull) { [string]$r._Act.LastFull } else { [string]$r.$name } }
+    'COST'        { $t = [string]$r.COST
+                    if (-not $r._Parent -and $null -ne $r._TreeCost -and [double]$r._TreeCost -ge [double]$r._Act.Cost + 0.005) { $t += ' · whole tree Σ$' + ([double]$r._TreeCost).ToString('0.00', $inv) }
+                    $t }
+    default       { [string]$r.$name }
+  }
+  $v = ([string]$v -replace '\s+', ' ').Trim(); if (-not $v) { $v = '-' }
+  $who = ([string]$r.NAME -replace '^\s*[│ ]*[└├] ', '').Trim()
+  $mean = Get-ColumnMeaning $name
+  $text = "  $name · ${who}: $v" + $(if ($mean) { "   — $mean" } else { '' })
+  return (Fit $text ([math]::Max(10, $width)) 'L').TrimEnd()
+}
+# The hover line for this frame, or $null: the pointer over a cell of a row (not the header, a line
+# between rows, a gap between columns, or peek).
+function Get-HoverText($view, [object[]]$sorted, [int]$width) {
+  if ($view.PeekId -or -not $view.Hover -or -not $script:BodyMap) { return $null }
+  $i = [int]$view.Hover.Y - [int]$script:BodyY0
+  $map = @($script:BodyMap)
+  if ($i -lt 0 -or $i -ge $map.Count -or [int]$map[$i] -lt 0 -or [int]$map[$i] -ge $sorted.Count) { return $null }
+  $col = Get-ColumnAt ([int]$view.Hover.X)
+  if (-not $col) { return $null }
+  return Format-Hover $sorted[[int]$map[$i]] $col $width
+}
+
 # ---- one frame -------------------------------------------------------------------
 # Everything a frame needs from the outside world (roster, transcripts, processes) and everything it
 # draws, for one view: selection, peek, toggles, window size. The in-process loop calls it every tick;
@@ -4538,6 +4598,7 @@ function Invoke-Frame($view) {
     $frame += $head + $body
   }
   $foot = Build-Footer
+  $hover = Get-HoverText $view $sorted ((Get-WindowWidth) - 1)   # $null unless the pointer is over a cell
   $lines = $frame; $footer = $foot
   if ($script:PeekId) {
     $pr = $sorted | Where-Object _SessionId -eq $script:PeekId | Select-Object -First 1
@@ -4557,7 +4618,7 @@ function Invoke-Frame($view) {
   if ($script:Roster.Count -and @($sorted).Count) { $script:LiveShown = $true }
   $script:LastFrameMs = [int]$frameSw.ElapsedMilliseconds
   Write-SwallowedErrors
-  return @{ Lines = @($lines); Footer = $footer; Ids = @(foreach ($r in $sorted) { [string]$r._SessionId }); SelectedId = $selectedId
+  return @{ Lines = @($lines); Footer = $footer; Hover = $hover; Ids = @(foreach ($r in $sorted) { [string]$r._SessionId }); SelectedId = $selectedId
             PeekId = $script:PeekId; PageRows = [int]$script:PageRows; BodyMap = @($script:BodyMap); BodyY0 = [int]$script:BodyY0; Copy = $copy
             PollBusy = [bool]$script:Poll; Rev = $view.Rev }
 }
@@ -4568,7 +4629,8 @@ function Invoke-Frame($view) {
 function New-View {
   [pscustomobject]@{ Rev = 0; SelectedId = $null; PeekId = $null; Tick = [math]::Max(50, $Tick); KeepMin = $script:KeepMin
                      ShowSubagents = [bool]$script:ShowSubagents; Compact = [bool]$script:Compact; SortMode = [int]$script:SortMode
-                     LayoutMode = [int]$script:LayoutMode; ShowGone = [bool]$script:ShowGone; Actions = @(); PendingCopies = @(); CopyFor = $null }
+                     LayoutMode = [int]$script:LayoutMode; ShowGone = [bool]$script:ShowGone; Actions = @(); PendingCopies = @(); CopyFor = $null
+                     Hover = $null }   # the pointer, in window cells (the hover line); not a reason to redraw at once
 }
 # One key against the view and the last frame drawn (its row ids, page size). Returns what the loop must
 # do beyond redrawing: quit, help, closed (the log), poll, or copy-<t|y|n|d>; $null for nothing more.
@@ -4655,9 +4717,10 @@ function Copy-From([string]$what, $c) {
 function Show-Packet($packet, [string]$note = '') {
   if (-not $script:TracedRows -and @($packet.Ids).Count) { $script:TracedRows = $true; Write-Trace 'first frame with sessions drawn' }
   $foot = if ((Get-Date) -lt $script:FlashUntil) { "  ► $($script:Flash)" } elseif ($note) { $note } else { [string]$packet.Footer }
-  $script:ShownFooter = $foot
+  $script:ShownFooter = $foot   # what a click on the bottom line means, even while the hover line covers it
   $script:BodyMap = @($packet.BodyMap); $script:BodyY0 = [int]$packet.BodyY0
-  Write-Frame @($packet.Lines) $foot
+  $drawn = if ($packet.Hover -and $foot -eq [string]$packet.Footer) { [string]$packet.Hover } else { $foot }
+  Write-Frame @($packet.Lines) $drawn
 }
 # Keys and mouse waiting now, against the view; returns 'quit' or $null. Shared by both loops.
 function Read-Keys($view, $packet) {
@@ -4665,6 +4728,13 @@ function Read-Keys($view, $packet) {
   while ($null -ne ($inp = Next-Input)) {
     $any = $true
     $k = $inp
+    if ($inp -isnot [ConsoleKeyInfo] -and ($inp.Flags -band 1) -and -not ($inp.Buttons -band 0xFFFF)) {
+      # a pointer move: the next frame (at most a tick away) shows the hover line; no Rev++, or every move
+      # would ask the worker for a frame
+      $view.Hover = [pscustomobject]@{ X = [int]$inp.X; Y = [int]$inp.Y - $(try { [Console]::WindowTop } catch { 0 }) }
+      continue
+    }
+    if ($inp -is [ConsoleKeyInfo]) { $view.Hover = $null }   # typing: the footer's key hints come back
     if ($inp -isnot [ConsoleKeyInfo]) {   # a mouse event
       $ids = @($packet.Ids)
       $act = Resolve-Mouse $inp $script:ShownFooter ([bool]$view.PeekId) ([array]::IndexOf($ids, [string]$view.SelectedId))
@@ -4850,6 +4920,7 @@ function Read-WorkerFrame([string]$line) {
   if ($p.Lines -isnot [array] -or -not (& $isInt $p.Rev)) { return $null }
   foreach ($l in $p.Lines) { if ($null -ne $l -and $l -isnot [string] -and $l.GetType().FullName -ne 'System.Management.Automation.PSCustomObject') { return $null } }   # a null line draws as blank
   if ($null -ne $p.Footer -and $p.Footer -isnot [string]) { return $null }
+  if ($null -ne $p.Hover -and $p.Hover -isnot [string]) { return $null }
   if ($null -ne $p.Ids -and $p.Ids -isnot [array]) { return $null }
   return $p
 }
