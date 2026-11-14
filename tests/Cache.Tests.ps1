@@ -8,8 +8,17 @@ BeforeAll {
       ',"cache_creation_input_tokens":' + $cw + ',"cache_read_input_tokens":' + $cr + ',"cache_creation":{"ephemeral_1h_input_tokens":' + $w1h +
       ',"ephemeral_5m_input_tokens":' + $w5 + '},"output_tokens":5}}}'
   }
-  function Scan([string[]]$lines) {
-    $f = Join-Path $TestDrive "t-$([guid]::NewGuid().ToString('N')).jsonl"
+  # a main-thread user entry: a prompt or a tool result, which the extension takes as the request time
+  function User([string]$ts, [bool]$side = $false) {
+    '{"parentUuid":"p","isSidechain":' + $(if ($side) { 'true' } else { 'false' }) + ',"type":"user","message":{"role":"user","content":[{"tool_use_id":"t","type":"tool_result","content":"x"}]},"uuid":"u","timestamp":"' + $ts + '"}'
+  }
+  function Synthetic([string]$ts) {
+    '{"type":"assistant","timestamp":"' + $ts + '","message":{"id":"msg_syn","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}'
+  }
+  function Scan([string[]]$lines, [switch]$Subagent) {
+    $dir = if ($Subagent) { Join-Path $TestDrive "s-$([guid]::NewGuid().ToString('N'))/subagents" } else { $TestDrive }
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $f = Join-Path $dir "t-$([guid]::NewGuid().ToString('N')).jsonl"
     [IO.File]::WriteAllText($f, (($lines -join "`n") + "`n"))
     Update-Scan (Get-Item -LiteralPath $f) ([IO.Path]::GetFileNameWithoutExtension($f))
   }
@@ -36,9 +45,50 @@ Describe 'Update-Scan: the cache anchor' {
     (At $st.CacheAnchor) | Should -Be (At '2026-11-13T12:01:00.000Z')
   }
   It 'forgets the TTL after a call with no cache use' {
-    $st = Scan @((Usage '2026-11-13T12:00:00.000Z' 'msg_1'), (Usage '2026-11-13T12:01:00.000Z' 'msg_2' -in 0 -cr 0 -cw 0 -w1h 0))
+    $st = Scan @((Usage '2026-11-13T12:00:00.000Z' 'msg_1'), (Usage '2026-11-13T12:01:00.000Z' 'msg_2' -cr 0 -cw 0 -w1h 0))
     $st.CacheTtl | Should -Be ''
     (Get-CacheState $st (At '2026-11-13T12:02:00Z')).Kind | Should -Be 'unknown'
+  }
+  It 'ignores a <Name> after a 1-hour call (the extension records no frame for it)' -ForEach @(
+    @{ Name = 'synthetic entry (an API error, a session limit)'; Line = 'syn' }
+    @{ Name = 'call with no tokens at all'; Line = 'zero' }
+  ) {
+    $second = if ($Line -eq 'syn') { Synthetic '2026-11-13T12:02:00.000Z' } else { Usage '2026-11-13T12:02:00.000Z' 'msg_2' -in 0 -cr 0 -cw 0 -w1h 0 }
+    $st = Scan @((Usage '2026-11-13T12:00:00.000Z' 'msg_1'), $second)
+    $s = Get-CacheState $st (At '2026-11-13T12:03:00Z')
+    $s.Kind | Should -Be 'warm'
+    $s.MinutesLeft | Should -Be 57
+  }
+  It 'stays cold after a compaction followed by a synthetic entry' {
+    $boundary = '{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":150000},"timestamp":"2026-11-13T12:05:00.000Z"}'
+    $st = Scan @((Usage '2026-11-13T12:00:00.000Z' 'msg_1'), $boundary, (Synthetic '2026-11-13T12:06:00.000Z'))
+    (Get-CacheState $st (At '2026-11-13T12:07:00Z')).Kind | Should -Be 'cold'
+  }
+  It 'anchors on the request (the latest user entry before the reply), not the reply' {
+    $st = Scan @((User '2026-11-13T12:00:00.000Z'), (Usage '2026-11-13T12:03:00.000Z' 'msg_1'))
+    (Get-CacheState $st (At '2026-11-13T12:30:30Z')).MinutesLeft | Should -Be 30
+    $st = Scan @((User '2026-11-13T12:00:00.000Z'), (Usage '2026-11-13T12:00:50.000Z' 'msg_1' -w1h 0 -w5 200))
+    (Get-CacheState $st (At '2026-11-13T12:04:30Z')).MinutesLeft | Should -Be 1
+  }
+  It 'finds a tool result''s timestamp when a large toolUseResult follows it' {
+    $big = '{"parentUuid":"p","isSidechain":false,"type":"user","message":{"role":"user","content":[{"tool_use_id":"t","type":"tool_result","content":"x"}]},"uuid":"9b3b2be4-638a-44f9-a48b-55941fedac45","timestamp":"2026-11-13T12:00:00.000Z","toolUseResult":{"stdout":"' + ('y' * 5000) + '"},"cwd":"c:\x"}'
+    $st = Scan @($big, (Usage '2026-11-13T12:03:00.000Z' 'msg_1'))
+    (At $st.CacheAnchor) | Should -Be (At '2026-11-13T12:00:00.000Z')
+  }
+  It 'takes the latest of several user entries, and forgets them once a reply is recorded' {
+    $st = Scan @((User '2026-11-13T12:00:00.000Z'), (User '2026-11-13T12:02:00.000Z'), (Usage '2026-11-13T12:03:00.000Z' 'msg_1'))
+    (At $st.CacheAnchor) | Should -Be (At '2026-11-13T12:02:00.000Z')
+    $st = Scan @((User '2026-11-13T12:00:00.000Z'), (Usage '2026-11-13T12:01:00.000Z' 'msg_1'), (Usage '2026-11-13T12:10:00.000Z' 'msg_2'))
+    (At $st.CacheAnchor) | Should -Be (At '2026-11-13T12:10:00.000Z')
+  }
+  It 'ignores sidechain entries in a main transcript, and counts them in a subagent''s own' {
+    $side = (Usage '2026-11-13T12:10:00.000Z' 'msg_s' -w1h 0 -w5 200) -replace '^\{', '{"isSidechain":true,'
+    $st = Scan @((Usage '2026-11-13T12:00:00.000Z' 'msg_1'), (User '2026-11-13T12:09:00.000Z' $true), $side)
+    $st.CacheTtl | Should -Be '1h'
+    (At $st.CacheAnchor) | Should -Be (At '2026-11-13T12:00:00.000Z')
+    $st = Scan -Subagent @((User '2026-11-13T12:09:00.000Z' $true), $side)
+    $st.CacheTtl | Should -Be '5m'
+    (At $st.CacheAnchor) | Should -Be (At '2026-11-13T12:09:00.000Z')
   }
   It 'keeps the first anchor across lines of one message' {
     $st = Scan @((Usage '2026-11-13T12:00:00.000Z' 'msg_1'), (Usage '2026-11-13T12:00:30.000Z' 'msg_1'))
@@ -111,6 +161,29 @@ Describe 'the CACHE column' {
       (Row 'cold' @{ Kind = 'cold'; Reason = 'expired' }), (Row 'w2' @{ Kind = 'warm'; MsLeft = 120000.0 })
     )
     @(Sort-Rows $rows | ForEach-Object { $_._SessionId }) | Should -Be @('w2', 'w10', 'cold', 'unknown')
+  }
+  It 'sorts by the time left now, not when the row was built' {
+    $script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx', 'cache')
+    $script:SortMode = 5
+    function Row([string]$id, $cache) {
+      [pscustomobject]@{ _SessionId = $id; _Gone = $null; _StartedAt = [datetime]'2026-11-13T10:00:00'; STATE = 'idle'
+                         NAME = $id; PID = '-'; _Parent = $null; _LaunchedBy = $null; _Spawner = ''; _Order = 0; _Depth = 0
+                         _Act = @{ Cost = 0.0; Ctx = '-' }; _AgentCost = 0.0; _Cache = $cache }
+    }
+    $now = [datetime]::UtcNow
+    $rows = @(
+      (Row 'stale' @{ Kind = 'warm'; Ttl = '1h'; MsLeft = 60000.0; Anchor = $now.AddHours(-2) })   # built when 1 min was left
+      (Row 'w30' @{ Kind = 'warm'; Ttl = '1h'; MsLeft = 1800000.0; Anchor = $now.AddMinutes(-30) })
+      (Row 'unknown' @{ Kind = 'unknown' })
+    )
+    @(Sort-Rows $rows | ForEach-Object { $_._SessionId }) | Should -Be @('w30', 'stale', 'unknown')
+  }
+  It 'redraws a working row once IDLE passes 2 minutes (STATE turns red), with no other cell changed' {
+    $cols = @(@{ Name = 'NAME' }, @{ Name = 'STATE' }, @{ Name = 'CACHE' })
+    $r = [pscustomobject]@{ NAME = 'a'; STATE = 'working'; CACHE = '40m'; IDLE = '1m'; _Jobs = @(); _Cache = @{ Ttl = '1h' }; _Gone = $null; _Act = @{} }
+    $k1 = Row-Key $cols $r 'sig'
+    $r.IDLE = '2m'
+    Row-Key $cols $r 'sig' | Should -Not -Be $k1
   }
   It 'colours <Name>' -ForEach @(
     @{ Name = '4 min left of 1h yellow';  State = @{ Kind = 'warm'; Ttl = '1h'; MsLeft = 240000.0 }; Want = 'yellow' }

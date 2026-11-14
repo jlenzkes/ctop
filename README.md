@@ -152,7 +152,7 @@ them. `Get-Help ./ctop.ps1 -Full` prints the parameter reference. Release notes 
 | `-RosterInterval` | `2`                | Seconds between `claude agents --json` polls. The poll is asynchronous and never blocks the display. A poll still running after max(5 s, 5 × this) is stopped and counted as failed; the last roster stays on screen. |
 | `-NoSubagents`    |                    | Don't scan for or show subagent rows. Toggle with `s`. |
 | `-Compact`        |                    | Essential columns only, whatever the window width. Toggle with `c`. |
-| `-Sort`           | `activity`         | `activity`, `roster`, `start`, `cost` or `ctx`. Cycle with `o`. |
+| `-Sort`           | `activity`         | `activity`, `roster`, `start`, `cost`, `ctx` or `cache` (soonest to go cold first). Cycle with `o`. |
 | `-Layout`         | `wrap`             | `wrap` (long cells wrap inside their column) or `truncate`. Toggle with `v`. |
 | `-WrapLines`      | `2`                | Maximum lines a wrapped cell may use. |
 | `-MaxWidth`       | `0`                | Cap the table width in columns. `0` = the whole window. |

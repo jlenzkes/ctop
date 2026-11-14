@@ -678,7 +678,7 @@ $script:PriceFrom = 'the built-in table, read 2026-10-20 (-PricingFile for your 
 # 2: titles are unescaped (\" was kept literally)
 # 3: a prompt that mentions tool_result counts as a turn (it was taken for a tool result)
 # 4: a first prompt needs three letters in a row of any script to be the title, not three ASCII letters
-$script:ScanVer = 5
+$script:ScanVer = 6
 $script:Pricing = @(
   @{ Match = 'fable-5-1|mythos-5-1'; In = 10;  W5 = 12.5;  W1h = 20;  Read = 0.25; Out = 50 }
   @{ Match = 'fable-5|mythos-5';     In = 10;  W5 = 12.5;  W1h = 20;  Read = 1;    Out = 50 }
@@ -871,9 +871,10 @@ function New-ScanState([System.IO.FileInfo]$file) {
      PriceVer = $script:PriceVer; ScanVer = $script:ScanVer; Offset = 0; Turns = 0; Tools = 0; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0;
      LastId = ''; LastCost = 0.0; LastOut = 0; Model = '-'; AiTitle = ''; Summary = ''; Title = ''; First = ''; MsgSummary = ''; Cwd = ''; GitBranch = ''; ToolCounts = @{}
      Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; ToolLog = @()
-     CacheAnchor = ''; CacheAnchorId = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = '' }
+     CacheAnchor = ''; CacheAnchorId = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = ''; CacheReqAt = '' }
 }
 function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
+  $isSub = $file.DirectoryName -match '[\\/]subagents$'   # a subagent's own transcript: all of it is sidechain
   $st = $script:ScanCache[$key]
   # first use this run of state restored from disk: is it still the same file? (one 256-byte read)
   if ($st -and -not $script:ScanVerified.ContainsKey($key)) {
@@ -949,6 +950,12 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
         continue
       }
       if ($line.Contains('"type":"user"')) {
+        # the prompt cache's request time, as the extension keeps it: the latest main-thread user entry
+        # (a prompt, a tool result, a compact summary) since the last recorded call
+        if ($isSub -or -not $line.Contains('"isSidechain":true')) {
+          $uts = Get-LineTimestamp $line $tailPart; $ut = ConvertFrom-CacheTime $uts
+          if ($ut -and -not ($st.CacheReqAt -and (ConvertFrom-CacheTime $st.CacheReqAt) -ge $ut)) { $st.CacheReqAt = $uts }
+        }
         if ($line.Contains('"isCompactSummary":true')) { continue }   # machine-written summary, not a human turn
         # a tool_result content block, not the word: a prompt may well mention "tool_result" (inside a
         # JSON string its quotes are escaped, so this pattern only matches the structure)
@@ -987,7 +994,11 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
           $cw  = if ($line -match '"cache_creation_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
           $cw1h = if ($line -match '"ephemeral_1h_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
           $cw5m = if ($line -match '"ephemeral_5m_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          Update-CacheAnchor $st (Get-EntryTimestamp $tailPart) $id $in $cr $cw $cw1h $cw5m
+          # the extension records no cache frame for a synthetic entry (an API error, a session limit, an
+          # interrupt) or a sidechain one in the main thread; Update-CacheAnchor drops a call with no tokens
+          if (-not $line.Contains('"model":"<synthetic>"') -and ($isSub -or -not $line.Contains('"isSidechain":true'))) {
+            Update-CacheAnchor $st (Get-LineTimestamp $line $tailPart) $id $in $cr $cw $cw1h $cw5m
+          }
           $cw5 = [math]::Max(0, $cw - $cw1h)
           $price = Get-Price $st.Model ($in + $cr + $cw)
           $c = if ($price) { ($in * $price.In + $out * $price.Out + $cr * $price.Read + $cw5 * $price.W5 + $cw1h * $price.W1h) / 1e6 } else { 0.0 }
@@ -1006,6 +1017,15 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
 }
 
 # The entry's own timestamp: the last one in the line's tail (entry-level fields follow the message body).
+# An entry's own timestamp, anywhere in the line: it follows the entry's uuid, and on a tool result a large
+# toolUseResult object can follow it, pushing it out of the last 2000 characters (seen 2026-11-13: 7.5 KB lines).
+# The first uuid-then-timestamp pair is the entry's (nested objects come after it).
+function Get-LineTimestamp([string]$line, [string]$tail) {
+  if (-not $script:EntryTsRx) { $script:EntryTsRx = [regex]::new('"uuid":"[0-9a-fA-F-]{36}","timestamp":"([^"]+)"', 'Compiled') }
+  $m = $script:EntryTsRx.Match($line)
+  if ($m.Success) { return $m.Groups[1].Value }
+  return Get-EntryTimestamp $tail
+}
 function Get-EntryTimestamp([string]$tail) {
   $ms = [regex]::Matches($tail, '"timestamp":"([^"]+)"')
   if ($ms.Count) { return $ms[$ms.Count - 1].Groups[1].Value }
@@ -1016,8 +1036,14 @@ function Get-EntryTimestamp([string]$tail) {
 # one's time); 1h or 5m from that call's cache writes, the previous TTL when it only read the cache, unknown
 # when it used none; a compaction makes it cold until a later call.
 function Update-CacheAnchor($st, [string]$ts, [string]$id, [long]$in, [long]$cr, [long]$cw, [long]$w1h, [long]$w5m) {
+  if ($in + $cr + $cw -le 0) { return }   # the extension's recacheTokens is undefined: no frame, nothing changes
   $same = $id -and $id -ceq $st.CacheAnchorId
-  if (-not ($same -and $st.CacheAnchor) -and $ts) { $st.CacheAnchor = $ts }
+  if (-not ($same -and $st.CacheAnchor)) {
+    # anchored on the request when it came no later than the reply (the extension's eqt), else the reply
+    $req = ConvertFrom-CacheTime ([string]$st.CacheReqAt); $t = ConvertFrom-CacheTime $ts
+    if ($req -and (-not $t -or $req -le $t)) { $st.CacheAnchor = [string]$st.CacheReqAt } elseif ($ts) { $st.CacheAnchor = $ts }
+  }
+  if (-not $same) { $st.CacheReqAt = '' }   # a new call: later user entries are the next request
   $st.CacheAnchorId = $id
   if ($cr + $cw -gt 0) { if ($w1h -gt 0) { $st.CacheTtl = '1h' } elseif ($w5m -gt 0) { $st.CacheTtl = '5m' } }
   else { $st.CacheTtl = '' }
@@ -3320,7 +3346,12 @@ function Sort-Rows([object[]]$rows) {
     'start'    { { param($r) 0 } }
     'cost'     { { param($r) -[double]$r._Act.Cost } }
     'ctx'      { { param($r) if ($r._Act.Ctx -ne '-') { -[double]$r._Act.Ctx } else { 0 } } }
-    'cache'    { { param($r) $c = $r._Cache; if ($c -and $c.Kind -eq 'warm') { [double]$c.MsLeft } elseif ($c -and $c.Kind -eq 'cold') { 1e12 } else { 2e12 } } }   # soonest cold first
+    'cache'    { { param($r) $c = $r._Cache
+                   # from the anchor, not MsLeft: a row off screen keeps the _Cache it was last drawn with
+                   if ($c -and $c.Anchor -and $c.Ttl) {
+                     $left = ($c.Anchor.AddMilliseconds($(if ($c.Ttl -eq '1h') { 3600000 } else { 300000 })) - [datetime]::UtcNow).TotalMilliseconds
+                     if ($left -gt 0) { $left } else { 1e12 }
+                   } elseif ($c -and $c.Kind -eq 'warm') { [double]$c.MsLeft } elseif ($c -and $c.Kind -eq 'cold') { 1e12 } else { 2e12 } } }   # soonest cold first
   }
   # Sessions launched by another listed session's job (a script running claude -p, say) are drawn
   # under that session, after its own subagents. They stay sessions: own row, own subagents.
@@ -3726,7 +3757,7 @@ function Row-Key([object[]]$cols, $r, [string]$sig) {
   $jc = 0; foreach ($x in @($r._Jobs)) { if ($x) { $jc++ } }
   $cmpRecent = $false
   if ($r._Act -and $r._Act.LastCompactAt) { try { $cmpRecent = ((Get-Date) - [datetime]$r._Act.LastCompactAt).TotalMinutes -lt 10 } catch {} }
-  [void]$sb.Append([char]30).Append("$([bool]$r._Gone)|$(if ($r._Cache) { $r._Cache.Ttl })|$($r._LaunchCwd)|$cmpRecent|$jc|$($r._LiveKids)|$($r._TreeLast)|$($r._Depth)|$($r._Done)|$($r._Orphaned)|$($r._Parent -ne $null)|$([math]::Round([double]$r._TreeCost, 2))")
+  [void]$sb.Append([char]30).Append("$([bool]$r._Gone)|$(if ($r._Cache) { $r._Cache.Ttl })|$((Minutes $r.IDLE) -ge 2)|$($r._LaunchCwd)|$cmpRecent|$jc|$($r._LiveKids)|$($r._TreeLast)|$($r._Depth)|$($r._Done)|$($r._Orphaned)|$($r._Parent -ne $null)|$([math]::Round([double]$r._TreeCost, 2))")
   return $sb.ToString()
 }
 function Get-RowLines([object[]]$cols, $r, [string]$sep, [int]$maxLines, [string]$sig) {
@@ -4090,7 +4121,7 @@ function Show-Help {
     '         that session (Claude Code''s own messaging, by name; ctop sends nothing). A subagent''s contact',
     '         points at its parent session.   d copy the session ID (a subagent: its agent ID)',
     '       o sort: activity (active above idle, oldest first) | roster (as claude agents lists them) |',
-    '         start (never moves) | cost | ctx.   v layout: wrap (long cells continue on the next line',
+    '         start (never moves) | cost | ctx | cache.   v layout: wrap (long cells continue on the next line',
     '         of their column) | truncate.   c compact (essential columns only)',
     '       s subagent rows   g gone/cleared rows   (a toggle that is ON is lit in the footer)',
     '       x closed-sessions log: everything that left the roster, newest first, with title and resume',

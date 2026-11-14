@@ -9,13 +9,21 @@ Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build numbe
   expired or after a compaction, `-` when unknown. Subagents get their own, and a gone session keeps
   counting down (`claude --resume` may still hit its cache: not verified). Cline and Copilot rows show `-`
 - the rule is the Claude Code extension for VS Code's own (read in `anthropic.claude-code-2.1.323`,
-  `webview/index.js`), so the two agree: anchored on the last model call; 1 hour or 5 minutes from that
-  call's cache writes, the previous length when it only read the cache, unknown when it used none
+  `webview/index.js`), so the two agree: anchored on the request of the last model call (the latest
+  prompt or tool result before it, or the call itself when none came first); 1 hour or 5 minutes from
+  that call's cache writes, the previous length when it only read the cache, unknown when it used none.
+  Synthetic entries (an API error, a session limit, an interrupt), calls with no tokens, and sidechain
+  entries in a main transcript change nothing, as in the extension. On 80 recent real transcripts (40
+  sessions, 40 subagents), ctop's anchor, TTL, compaction and token count matched a re-implementation of
+  the extension's rule in all 80 (the re-implementation is a reviewer's, from the extension's code)
 - CACHE takes IDLE's place on the main table; IDLE is still in peek, and STATE still turns red on it
 - peek's CACHE line says what the next turn would cost with the cache warm and cold, for example
   `next turn ≈ $0.11 warm, $2.20 cold (220K tokens)`: an estimate that leaves out the new message
-- `o` and `-Sort` gain `cache`: soonest to go cold first, then cold, then unknown
-- the scan format changes (version 5), so each transcript is read once more from the start
+- `o` and `-Sort` gain `cache`: soonest to go cold first, then cold, then unknown (from the time left
+  now, for rows off screen too)
+- an entry's timestamp is found anywhere in its line: a tool result's large `toolUseResult` can push it
+  out of the last 2000 characters, where ctop looked (only the cache countdown uses this)
+- the scan format changes (version 6), so each transcript is read once more from the start
 
 ## 2026.11.13.4 — a review of 2026.11.13.1–.2
 
