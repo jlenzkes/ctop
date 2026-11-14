@@ -19,6 +19,12 @@
 - PRs go through Sol's audit, as PR #2 did. PRs #3 and #4 were merged without one (a miss); Sol audited them afterwards, and the fixes are in PR #5.
 - **`main` is protected (2026-11-13):** every change goes through a PR, admins included; no force-push, no deletion; no approving review required. **Not yet: requiring CI to pass before a merge.** User, 2026-11-13: "Not right now. But later? FOR SURE." When it is turned on, a PR whose last commit is `[skip ci]` cannot merge until a commit without it is pushed.
 
+## In flight: PRs #7 and #8 (2026-11-13)
+
+- **PR #7** (`claude/input-hardening`, build 2026.11.13.6): fixes taken from cxtop (lone modifier keys and Alt/Ctrl chords, files opened sharing delete, startup checks of `-HighlightModel`/`-SelectBg`, a one-step scan-cache rename). **PR #8** (`claude/cache-countdown`, build 2026.11.13.7, built on #7): the CACHE column, using the Claude Code extension's own rule (read in `anthropic.claude-code-2.1.323` `webview/index.js`).
+- Before Sol, independent Claude reviewers audited each PR in three one-pass rounds; both were accepted (findings and fixes are in each PR's "Pre-audit" section). The brief for Sol was handed to the user on 2026-11-13 (`SOL_BRIEF_PR7_PR8.md`). Sol's audit is pending; #7 merges first.
+- The PR #8 branch takes #7's fixes by merge, not rebase: a force-push was refused by the permission check.
+
 ## Pending work: sessions from other agents
 
 **Decision (user, 2026-11-01): ctop supports exactly three agents:**
