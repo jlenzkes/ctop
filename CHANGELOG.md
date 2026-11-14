@@ -2,6 +2,14 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.11 — Sol's round 1 on PR #7
+
+- the console helper is compiled under a name of its own and renamed into place. ctops starting at the
+  same time used to compile into the shared DLL at once; the losers found no helper and saved their scan
+  cache through `File.Replace` (Sol measured 2 to 7 of 8 Windows PowerShell 5.1 processes started together;
+  with Sol's own test, 15 of 32 before this build and 0 of 32 after). A compile killed before its rename
+  leaves a `ctop-con-tmp-*.dll`, deleted after 10 minutes. Numbered .11: builds .7 to .10 are on PRs #8–#9
+
 ## 2026.11.13.9 — what going cold costs, under CACHE
 
 - CACHE has a second line: what the next turn costs once the cache is cold, the whole context written back

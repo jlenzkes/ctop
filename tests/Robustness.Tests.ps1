@@ -9,6 +9,22 @@ BeforeAll {
   New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 }
 
+# First in the file: once CtopCon is loaded (Move-Over loads it on 5.1), Import-ConType returns before compiling.
+Describe 'compiling the console helper' {
+  It 'is compiled under a name of its own and renamed into place, never written straight into the shared DLL (Windows)' -Skip:(-not ($IsWindows -or $env:OS -eq 'Windows_NT')) {
+    if ('CtopCon.Con' -as [type]) { Set-ItResult -Skipped -Because 'CtopCon is already loaded in this process'; return }
+    $keep = $script:ConfigDir; $script:ConfigDir = Join-Path $TestDrive "cfg-$([guid]::NewGuid().ToString('N'))"; $ConfigDir = $script:ConfigDir
+    New-Item -ItemType Directory -Path $ConfigDir | Out-Null
+    try {
+      Mock Add-Type { $script:CompiledTo = $OutputAssembly; throw 'no compiler here' } -ParameterFilter { $OutputAssembly }
+      Mock Add-Type { throw 'nothing to load' } -ParameterFilter { $Path }
+      Import-ConType | Should -BeFalse
+      $script:CompiledTo | Should -Not -Be (Get-ConDllPath)
+      Split-Path -Leaf $script:CompiledTo | Should -BeLike 'ctop-con-tmp-*.dll'
+    } finally { $script:ConfigDir = $keep; $ConfigDir = $keep }
+  }
+}
+
 Describe 'files other programs write are opened sharing delete' {
   BeforeEach { $script:f = Join-Path $TestDrive "f-$([guid]::NewGuid().ToString('N')).json"; [IO.File]::WriteAllText($script:f, "ref: refs/heads/main`nmore") }
   It 'lets another program delete a file ctop holds open' {
@@ -106,11 +122,13 @@ Describe 'the console helper DLL' {
   }
   It 'deletes the old DLLs of this runtime, and leaves the other runtime''s' {
     $d = Join-Path $TestDrive "dll-$([guid]::NewGuid().ToString('N'))"; New-Item -ItemType Directory -Path $d | Out-Null
-    foreach ($n in 'ctop-con-AAAAAAAA-core.dll', 'ctop-con-BBBBBBBB-core.dll', 'ctop-con-CCCCCCCC-desktop.dll', 'ctop-con-DDDDDDDD.dll', 'other.dll') {
+    foreach ($n in 'ctop-con-AAAAAAAA-core.dll', 'ctop-con-BBBBBBBB-core.dll', 'ctop-con-CCCCCCCC-desktop.dll', 'ctop-con-DDDDDDDD.dll', 'other.dll',
+                   'ctop-con-tmp-1-old.dll', 'ctop-con-tmp-2-new.dll') {
       [IO.File]::WriteAllText((Join-Path $d $n), 'x')
     }
+    (Get-Item -LiteralPath (Join-Path $d 'ctop-con-tmp-1-old.dll')).LastWriteTimeUtc = [datetime]::UtcNow.AddHours(-1)   # a killed compile
     Remove-OldConDlls (Join-Path $d 'ctop-con-AAAAAAAA-core.dll')
-    @(Get-ChildItem -LiteralPath $d -Name | Sort-Object) | Should -Be @('ctop-con-AAAAAAAA-core.dll', 'ctop-con-CCCCCCCC-desktop.dll', 'other.dll')
+    @(Get-ChildItem -LiteralPath $d -Name | Sort-Object) | Should -Be @('ctop-con-AAAAAAAA-core.dll', 'ctop-con-CCCCCCCC-desktop.dll', 'ctop-con-tmp-2-new.dll', 'other.dll')
   }
   It 'loads on this runtime, so Move-Over renames in one step rather than falling back (Windows)' -Skip:(-not ($IsWindows -or $env:OS -eq 'Windows_NT')) {
     Import-ConType | Should -BeTrue

@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.9 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.11 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.9'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.11'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -4308,24 +4308,34 @@ function Get-ConDllPath {
 # switch. One still loaded by a running ctop is locked, and stays.
 function Remove-OldConDlls([string]$keep) {
   $ed = if ($keep -match '-(core|desktop)\.dll$') { $Matches[1] } else { return }
+  $old = [datetime]::UtcNow.AddMinutes(-10)
   Get-ChildItem -LiteralPath (Split-Path -Parent $keep) -Filter 'ctop-con-*.dll' -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -ne $keep -and $_.Name -match "^ctop-con-[0-9A-Fa-f]{8}(-$ed)?\.dll$" } |
+    Where-Object { $_.FullName -ne $keep -and ($_.Name -match "^ctop-con-[0-9A-Fa-f]{8}(-$ed)?\.dll$" -or
+                   ($_.Name -like 'ctop-con-tmp-*.dll' -and $_.LastWriteTimeUtc -lt $old)) } |   # a compile killed before its rename
     Remove-Item -Force -ErrorAction SilentlyContinue
 }
 # Loads CtopCon (Windows only); $true when it is loaded. Compiled once to a DLL beside the caches: compiling
-# on every start would cost ~1 s.
+# on every start would cost ~1 s. Compiled under a name of its own, then renamed into place, so ctops starting
+# together never write the shared DLL at once: one that did lost, found no helper, and saved its cache through
+# File.Replace (Sol, 2026-11-13: in 2 to 7 of 8 Windows PowerShell 5.1 processes started at once). A ctop that
+# loses the rename loads the winner's DLL, which a rename only ever shows whole.
 function Import-ConType {
   if ('CtopCon.Con' -as [type]) { return $true }
   if (-not ($IsWindows -or $env:OS -eq 'Windows_NT')) { return $false }
-  try {
-    $dll = Get-ConDllPath
+  $dll = $null
+  try { $dll = Get-ConDllPath } catch { return $false }
+  for ($try = 0; $try -lt 3; $try++) {
     if (-not (Test-Path -LiteralPath $dll)) {
-      Add-Type -TypeDefinition $script:ConSrc -OutputAssembly $dll -OutputType Library -ErrorAction Stop
-      Remove-OldConDlls $dll
+      $tmp = Join-Path (Split-Path -Parent $dll) ("ctop-con-tmp-$PID-" + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.dll')
+      try {
+        Add-Type -TypeDefinition $script:ConSrc -OutputAssembly $tmp -OutputType Library -ErrorAction Stop
+        try { [IO.File]::Move($tmp, $dll); Remove-OldConDlls $dll } catch { }   # lost the race: the winner's DLL is there
+      } catch { }
+      finally { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }
     }
-    Add-Type -Path $dll -ErrorAction Stop
-    return $true
-  } catch { return $false }
+    try { Add-Type -Path $dll -ErrorAction Stop; return $true } catch { Start-Sleep -Milliseconds (50 * ($try + 1)) }
+  }
+  return [bool]('CtopCon.Con' -as [type])
 }
 function Enable-Mouse {
   if ($NoMouse -or -not ($IsWindows -or $env:OS -eq 'Windows_NT')) { return }
