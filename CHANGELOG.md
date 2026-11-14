@@ -2,6 +2,55 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.18 — PR #8's structural reader, merged
+
+- PR #9 takes PR #8's fixes from Sol's round 2 (build 2026.11.13.14: every transcript line read by its
+  JSON structure; a stable cache sort). The compaction's `postTokens`, which RECACHE prices, is now read
+  by the same structural reader (scan cache version 8: cached scans are redone once).
+
+
+
+## 2026.11.13.17 — the auto-compact ceiling under CTX
+
+- CTX's second line shows where Claude Code compacts, as `/967K` under the context size (the user's
+  choice, 2026-11-13). The rule is the documented one (code.claude.com/docs/en/model-config, read
+  2026-11-13): with no window set, a model with a native 1M window (Fable, Sonnet 5 and later, Haiku 5.5,
+  Opus 4.7 and later) compacts at about 967K; Opus and Sonnet 4.6 without `[1m]`, or any model with
+  `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, at 200K (a 4.6 session past 200K is taken as its `[1m]` variant). A
+  window you set wins: `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, then the highest-precedence settings file that
+  sets one (managed, the project's local, the project's, yours), a model's own
+  `modelSettings.<model>.autoCompactWindow` over the top-level `autoCompactWindow`; `"auto"` is the
+  default; any window is capped at the model's context window. The hover box says which one applied.
+- not seen by ctop: a window passed with `--autocompact` for one launch, a subagent's own window, idle
+  compaction, and the environment Claude Code was started in (ctop reads its own). Claude Code rows only.
+
+## 2026.11.13.16 — the hover box
+
+- the hover line becomes a box: rest the pointer on a cell and a framed box opens right under it (above it
+  near the bottom of the screen), lined up with the column, up to 56 characters wide: the column and row
+  in its title, the cell's whole value, then what the column means, dimmed. It closes when the pointer
+  leaves the cell or a key is pressed. The bottom line keeps the key hints (the user, 2026-11-13: the
+  bottom line was not obviously a tooltip, and one line was too few for long values).
+- tests: the box's geometry (under or above the row, at the column's edge, inside the window, every line
+  the same width), the overlay (cells left and right of the box kept), word wrapping with a cut ….
+
+## 2026.11.13.15 — RECACHE gets its own column; BRANCH at most 14 wide
+
+- RECACHE, a new column right after CACHE: what the next turn costs once the prompt cache is cold (the
+  whole context written back at the cache-write price of its TTL), e.g. `$6.45`, whole dollars from $10.
+  It was CACHE's second line, which read as confusing; CACHE is one line again. After a compaction it
+  shows what caching the compacted conversation costs: the size Claude Code records for it
+  (`postTokens` on the compaction entry) at the write price of the TTL used before the compaction; blank
+  when no TTL was known then, or for a compaction written without that size. RECACHE hides just before
+  CACHE in a narrow window and stays in compact mode. Peek's CACHE line is unchanged. Transcripts are
+  rescanned once, to pick up the size
+- BRANCH is at most 14 wide (narrower when every name is shorter). A longer name goes on to the row's
+  second line; past 28 characters, or in the truncate layout, it keeps its end. The hover line still
+  shows it whole
+- LAST ACTION gets the larger share of the width (its weight is 6, was 4), and width another flexible
+  column can't use goes to LAST ACTION first (it went to NAME and TITLE first). In a snapshot of live
+  sessions 199 wide (`-Snapshot -MaxWidth 198`): LAST ACTION 25 (was 22), BRANCH 14 (was 21), RECACHE 7,
+  TITLE 13 (was 16), CWD 14 (was 16)
 ## 2026.11.13.14 — Sol's round 2 on PR #8
 
 - a transcript line is read by its JSON structure: the entry's own type, `isSidechain`, timestamp, cwd and
@@ -20,6 +69,15 @@ Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build numbe
   swapped places from frame to frame (Sol). Gone sessions sort on keys computed once: with 1,000 of them,
   sorting took a median of 17 ms in `cache` and 10 ms in `cost` on PowerShell 7 (42 and 36 in .12; 16 and
   11 on 5.1, against 70 and 60)
+
+## 2026.11.13.13 — the hover line
+
+- with the mouse on (Windows), resting the pointer on a cell shows it on the bottom line, whole, with what
+  its column means in the help screen's words: `CACHE · ctop-cc: warm, 43 min left (1h, last call
+  14:02:11) · next turn ≈ $0.15 warm, $6.45 cold   — prompt cache: minutes left while warm…`. LAST
+  ACTION, BRANCH, TITLE and CWD show in full where their cells are cut. Any key brings the key hints back;
+  a click on the bottom line still does what the key hints say. A console has no tooltips; this is the
+  nearest. Not checked in Windows Terminal, only in tests
 
 ## 2026.11.13.12 — Sol's round 1 on PR #8
 

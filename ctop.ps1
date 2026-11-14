@@ -55,8 +55,8 @@
   Disable ANSI colors (STATE, TURN, MODEL, sparkline, COST).
 
 .PARAMETER Compact
-  Show only the essential columns (NAME, STATE, CACHE, TURN, CTX, LAST ACTION, ACTIVITY, COST,
-  BRANCH) regardless of window width. Toggle at runtime with 'c'.
+  Show only the essential columns (NAME, STATE, CACHE, RECACHE, TURN, CTX, LAST ACTION, ACTIVITY,
+  COST, BRANCH) regardless of window width. Toggle at runtime with 'c'.
 
 .PARAMETER NoSubagents
   Don't scan for or show subagent rows. Toggle at runtime with 's'.
@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.14 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.18 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.14'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.18'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -681,7 +681,8 @@ $script:PriceFrom = 'the built-in table, read 2026-10-20 (-PricingFile for your 
 # 5: the prompt-cache anchor, TTL and compaction (the CACHE column)
 # 6: the cache anchor is the request's time, and synthetic, empty and sidechain calls change nothing
 # 7: an entry is read from its own fields by its JSON structure, never from look-alikes inside a tool input
-$script:ScanVer = 7
+# 8: a compaction's postTokens (the size of the compacted conversation: RECACHE prices it)
+$script:ScanVer = 8
 $script:Pricing = @(
   @{ Match = 'fable-5-1|mythos-5-1'; In = 10;  W5 = 12.5;  W1h = 20;  Read = 0.25; Out = 50 }
   @{ Match = 'fable-5|mythos-5';     In = 10;  W5 = 12.5;  W1h = 20;  Read = 1;    Out = 50 }
@@ -782,7 +783,7 @@ function Get-JsonRx {
     $usage   = & $object 'input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'cache_creation' @{ cache_creation = $writes }
     $content = '\[\s*(?>(?<el>' + $val + ')\s*(?:,\s*|(?=\])))*\]'
     $message = & $object 'model', 'id', 'content', 'usage' @{ content = $content; usage = $usage }
-    $compact = & $object 'trigger', 'preTokens'
+    $compact = & $object 'trigger', 'preTokens', 'postTokens'
     $entry   = & $object 'type', 'subtype', 'isSidechain', 'isCompactSummary', 'timestamp', 'cwd', 'gitBranch', 'message', 'aiTitle', 'summary', 'customTitle', 'compactMetadata' @{ message = $message; compactMetadata = $compact }
     $first = { param([string]$k) [regex]::new('\G\{\s*(?:(?>' + $str + '\s*:\s*' + $val + ')\s*,\s*)*?"' + $k + '"\s*:\s*(?<v>' + $val + ')', 'Compiled') }
     $script:JsonRx = @{
@@ -942,7 +943,7 @@ function New-ScanState([System.IO.FileInfo]$file) {
   @{ Path = $file.FullName; Head = (Get-HeadPrint $file.FullName)
      PriceVer = $script:PriceVer; ScanVer = $script:ScanVer; Offset = 0; Turns = 0; Tools = 0; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0;
      LastId = ''; LastCost = 0.0; LastOut = 0; Model = '-'; AiTitle = ''; Summary = ''; Title = ''; First = ''; MsgSummary = ''; Cwd = ''; GitBranch = ''; ToolCounts = @{}
-     Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; ToolLog = @()
+     Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; LastCompactPostTokens = 0; ToolLog = @()
      CacheAnchor = ''; CacheAnchorId = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = ''; CacheReqAt = '' }
 }
 function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
@@ -1005,7 +1006,7 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
       $tg = $g['timestamp']               # read here, not by Get-JsonString: a call per line costs
       $ts = if ($tg.Length -gt 1 -and $line[$tg.Index] -eq '"') { $tg.Value.Substring(1, $tg.Length - 2) } else { '' }
       if ($ts.IndexOf([char]92) -ge 0) { $ts = Unescape-Json $ts }
-      # Compaction: {"type":"system","subtype":"compact_boundary","compactMetadata":{trigger,preTokens}}
+      # Compaction: {"type":"system","subtype":"compact_boundary","compactMetadata":{trigger,preTokens,postTokens}}
       # followed by a user entry with isCompactSummary:true (the summary that replaces the history)
       if ($type -ceq '"system"') {
         if ($g['subtype'].Value -cne '"compact_boundary"') { continue }
@@ -1013,6 +1014,7 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
         if ($ts) { try { $st.LastCompactAt = [datetime]$ts } catch {}; $st.CacheCompactAt = $ts }
         if ($g['trigger'].Success) { $st.LastCompactTrigger = Get-JsonString $g['trigger'] }
         if ($g['preTokens'].Success) { $st.LastCompactPreTokens = Get-JsonLong $g['preTokens'] }
+        $st.LastCompactPostTokens = if ($g['postTokens'].Success) { Get-JsonLong $g['postTokens'] } else { 0 }   # older Claude Code: not written
         continue
       }
       # the VS Code picker's name: {"type":"ai-title","sessionId":"...","aiTitle":"..."}  (verified 2026-09-09)
@@ -1141,9 +1143,14 @@ function Get-CacheState($act, [datetime]$now) {
   $now = $now.ToUniversalTime()
   $tok = [long]$act.RecacheTok
   $c = ConvertFrom-CacheTime ([string]$act.CacheCompactAt)
-  if ($c) { return @{ Kind = 'cold'; Reason = 'compacted'; IdleMs = [math]::Max(0.0, ($now - $c).TotalMilliseconds); RecacheTokens = 0 } }
-  $a = ConvertFrom-CacheTime ([string]$act.CacheAnchor)
   $ttl = [string]$act.CacheTtl
+  if ($c) {
+    # the next turn caches the compacted conversation (the boundary's postTokens), at the TTL the last call before it used
+    $cold = @{ Kind = 'cold'; Reason = 'compacted'; IdleMs = [math]::Max(0.0, ($now - $c).TotalMilliseconds); RecacheTokens = [long]$act.LastCompactPostTokens }
+    if ($ttl -in '1h', '5m') { $cold.Ttl = $ttl }
+    return $cold
+  }
+  $a = ConvertFrom-CacheTime ([string]$act.CacheAnchor)
   if (-not $a -or $ttl -notin '1h', '5m') { return @{ Kind = 'unknown' } }
   $len = if ($ttl -eq '1h') { 3600000.0 } else { 300000.0 }
   $left = [math]::Min($len, $len - ($now - $a).TotalMilliseconds)
@@ -1158,16 +1165,17 @@ function Format-CacheCell($state) {
 # peek's CACHE line. The next turn's cost re-reads (warm) or re-writes (cold) the last call's whole prompt,
 # at that model's cache-read or cache-write price for the TTL: an estimate without the new message itself.
 # What the next turn pays to write the whole context back into the cache once it is cold: the last call's
-# input + cache tokens at the TTL's write price. $null when unknown (no cache, compacted, unpriced model).
+# input + cache tokens at the TTL's write price; after a compaction, the compacted conversation (postTokens)
+# at the write price of the TTL before it. $null when unknown (no cache, no TTL, no size recorded, unpriced model).
 function Get-CacheColdDollars($state, [string]$model) {
-  if (-not $state -or $state.Kind -eq 'unknown' -or $state.Reason -eq 'compacted') { return $null }
+  if (-not $state -or $state.Kind -eq 'unknown' -or $state.Ttl -notin '1h', '5m') { return $null }
   $tok = [long]$state.RecacheTokens
   if ($tok -le 0) { return $null }
   $p = Get-Price $model $tok
   if (-not $p) { return $null }
   return $tok * $(if ($state.Ttl -eq '1h') { [double]$p.W1h } else { [double]$p.W5 }) / 1e6
 }
-# The cold cost as CACHE's second line, in its 5 cells: $6.03, or whole dollars from $10 ($15, $120).
+# The cold cost, the RECACHE column: $6.03, or whole dollars from $10 ($15, $120).
 function Format-CacheCost($state, [string]$model) {
   $d = Get-CacheColdDollars $state $model
   if ($null -eq $d) { return '' }
@@ -1216,7 +1224,7 @@ function Read-TailLines([string]$path, [int]$bytes) {
 }
 
 function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
-  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $null; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; CacheAnchor = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = '' }
+  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $null; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; CacheAnchor = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = ''; LastCompactPostTokens = 0 }
   if (-not $file) { return $out }
   $stamp = $script:TailCache[$sessionId]
   # the same file, unchanged: a session's transcript can become another file (it follows the cwd)
@@ -1387,7 +1395,7 @@ function Get-LastAction([System.IO.FileInfo]$file, [string]$sessionId) {
   $out.ToolLog = @($sc.ToolLog)
   $out.GitBranch = $sc.GitBranch
   $out.Compacts = $sc.Compacts; $out.LastCompactAt = $sc.LastCompactAt; $out.LastCompactTrigger = $sc.LastCompactTrigger; $out.LastCompactPreTokens = $sc.LastCompactPreTokens
-  $out.CacheAnchor = $sc.CacheAnchor; $out.CacheTtl = $sc.CacheTtl; $out.RecacheTok = $sc.RecacheTok; $out.CacheCompactAt = $sc.CacheCompactAt
+  $out.CacheAnchor = $sc.CacheAnchor; $out.CacheTtl = $sc.CacheTtl; $out.RecacheTok = $sc.RecacheTok; $out.CacheCompactAt = $sc.CacheCompactAt; $out.LastCompactPostTokens = $sc.LastCompactPostTokens
   $out.ToolMix = ($sc.ToolCounts.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ' · '
   # newest message was synthetic: its zero usage must not mask the context size; take CTX from
   # the newest real assistant entry in the tail
@@ -1962,7 +1970,7 @@ function Read-ClineManifests([string]$dir, [int]$budgetMs = [int]::MaxValue) {
 $script:ClineMsgCache = @{}   # path -> @{ Length; Write; Result }
 # -CachedOnly: no read; the last result (even of an older version of the file), or $null if there is none.
 function Read-ClineMessages([string]$path, [switch]$CachedOnly) {
-  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; CacheAnchor = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = '' }
+  $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; CacheAnchor = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = ''; LastCompactPostTokens = 0 }
   if (-not $path) { return $out }
   $f = $null; try { $f = [IO.FileInfo]::new($path) } catch { return $out }
   if (-not $f.Exists) { return $out }
@@ -2111,6 +2119,7 @@ function New-ClineRow($e, [bool]$sample) {
     AGE      = if ($startMs) { Get-Age $startMs } else { '-' }
     IDLE     = Get-Since $e.LastWrite
     CACHE    = '-'
+    RECACHE  = '-'
     _Cache   = $null
     TURN     = if ($act.TurnStart -and $active) { Get-Since $act.TurnStart } else { '' }
     TURNS    = $act.Turns
@@ -2648,6 +2657,7 @@ function New-CopilotRow($e, [bool]$sample) {
     AGE      = Get-Age $startMs
     IDLE     = Get-Since $e.Written
     CACHE    = '-'
+    RECACHE  = '-'
     _Cache   = $null
     TURN     = if ($act.TurnStart -and $state -in 'working', 'waiting') { Get-Since $act.TurnStart } else { '' }
     TURNS    = $act.Turns
@@ -3151,6 +3161,7 @@ function Update-GoneRow($r) {
   $r.IDLE     = if ($file) { Get-Since $file.LastWriteTime } else { '-' }
   $r._Cache   = Get-CacheState $r._Act (Get-Date)
   $r.CACHE    = Format-CacheCell $r._Cache
+  $r | Add-Member -NotePropertyName RECACHE -NotePropertyValue (Format-CacheCost $r._Cache $r._Act.Model) -Force   # Add-Member: a row made without the column has no such property to set
   $r.RATE     = Format-Rate ([double]$r._Act.Cost) $r._StartedAt (Get-Date)
   $r.ACTIVITY = $script:History[$r._SessionId]
   $r._Dirty   = $true   # Render-Table re-formats it
@@ -3251,6 +3262,7 @@ function Build-Rows {
           IDLE     = Get-Since $sf.LastWriteTime
           _Cache   = ($scache = Get-CacheState $sact (Get-Date))
           CACHE    = Format-CacheCell $scache
+          RECACHE  = Format-CacheCost $scache $sact.Model
           TURN     = if ($sact.TurnStart -and $sst0 -in 'working','thinking') { Get-Since $sact.TurnStart } else { '' }
           TURNS    = '-'
           TOOLS    = $sact.Tools
@@ -3337,6 +3349,7 @@ function Build-Rows {
       IDLE     = if ($file) { Get-Since $file.LastWriteTime } else { '-' }
       _Cache   = ($cache = Get-CacheState $act (Get-Date))
       CACHE    = Format-CacheCell $cache
+      RECACHE  = Format-CacheCost $cache $act.Model
       TURN     = if ($act.TurnStart -and $active) { Get-Since $act.TurnStart } else { '' }
       TURNS    = $act.Turns
       TOOLS    = $act.Tools
@@ -3632,18 +3645,19 @@ function Paint-Spark([string]$sp) {
 # Instead: bounded columns get a fixed width sized to their longest possible value;
 # unbounded ones (NAME, LAST ACTION, CWD) use a high-water mark that only ever grows.
 # Priority: lower numbers are hidden first when the window is too narrow. Flex columns
-# share the leftover width in proportion to Flex, never below Min.
+# share the leftover width in proportion to Flex, never below Min. Max caps an Auto column.
 $script:Columns = @(
   @{ Name = 'NAME';        Fixed = 0;  Min = 12; Flex = 2; Align = 'L'; Priority = 100 }
   @{ Name = 'TITLE';       Fixed = 0;  Min = 12; Flex = 3; Align = 'L'; Priority = 95 }   # picker's friendly name
   @{ Name = 'STATE';       Fixed = 8;  Auto = $true; Align = 'L'; Priority = 100 }
   @{ Name = 'CACHE';       Fixed = 5;  Align = 'R'; Priority = 85 }   # prompt cache: minutes left; IDLE is in peek
+  @{ Name = 'RECACHE';     Fixed = 7;  Align = 'R'; Priority = 84 }   # what the next turn costs once the cache is cold
   @{ Name = 'TURN';        Fixed = 5;  Align = 'R'; Priority = 90 }   # time on current turn
   @{ Name = 'CTX';         Fixed = 5;  Align = 'R'; Priority = 80 }   # "123K"
   @{ Name = 'CMP';         Fixed = 3;  Align = 'R'; Priority = 79 }   # compactions so far
-  @{ Name = 'LAST ACTION'; Fixed = 0;  Min = 16; Flex = 4; Align = 'L'; Priority = 75 }
+  @{ Name = 'LAST ACTION'; Fixed = 0;  Min = 16; Flex = 6; Align = 'L'; Priority = 75 }   # the widest share (user, 2026-11-13)
   @{ Name = 'ACTIVITY';    Fixed = 20; Align = 'L'; Priority = 70 }   # sparkline, 1 col = 2 s
-  @{ Name = 'BRANCH';      Fixed = 6;  Auto = $true; Align = 'L'; Priority = 60 }
+  @{ Name = 'BRANCH';      Fixed = 6;  Auto = $true; Max = 14; Align = 'L'; Priority = 60 }   # longer: on the second line
   @{ Name = 'AGE';         Fixed = 7;  Align = 'R'; Priority = 55 }
   @{ Name = 'CWD';         Fixed = 0;  Min = 14; Flex = 3; Align = 'L'; Priority = 50 }
   @{ Name = 'PID';         Fixed = 6;  Align = 'R'; Priority = 38 }
@@ -3710,7 +3724,7 @@ function Auto-Width([string]$name, [int]$floor, [object[]]$rows) {
 
 function Layout-Columns([object[]]$candidates, [object[]]$rows, [int]$avail, [string]$sep) {
   foreach ($c in $candidates) {
-    if ($c.Auto) { $c.Fixed = Auto-Width $c.Name $c.Floor $rows; $c.Natural = $c.Fixed; continue }
+    if ($c.Auto) { $c.Fixed = Auto-Width $c.Name $c.Floor $rows; if ($c.Max) { $c.Fixed = [math]::Min($c.Fixed, $c.Max) }; $c.Natural = $c.Fixed; continue }
     if ($c.Fixed -gt 0) { $c.Natural = $c.Fixed; continue }
     $seen = $c.Min
     foreach ($r in $rows) {
@@ -3752,7 +3766,8 @@ function Layout-Columns([object[]]$candidates, [object[]]$rows, [int]$avail, [st
     $c.Width--; $over--
   }
   $used = ($flex | ForEach-Object Width | Measure-Object -Sum).Sum
-  foreach ($n in 'NAME','TITLE','LAST ACTION','CWD') {
+  # width a column could not use (its text is shorter than its share) goes to LAST ACTION first
+  foreach ($n in 'LAST ACTION','NAME','TITLE','CWD') {
     $c = $flex | Where-Object Name -eq $n
     if ($c -and $left - $used -gt 0 -and $c.Width -lt $c.Natural) { $add = [math]::Min($left - $used, $c.Natural - $c.Width); $c.Width += $add; $used += $add }
   }
@@ -3826,9 +3841,16 @@ function Format-Row([object[]]$cols, $r, [string]$sep, [int]$maxLines) {
       $sig = if ($t -ge 1000) { 'Σ${0:N0}k' -f ($t / 1000) } elseif ($t -ge 100) { 'Σ${0:N0}' -f $t } else { 'Σ${0:N2}' -f $t }
       $pieces = @(((Fit $v $c.Width $c.Align)).TrimEnd(), ((Fit $sig $c.Width $c.Align)).TrimEnd())
     }
-    elseif ($c.Name -eq 'CACHE' -and $maxLines -gt 1 -and ($cc = Format-CacheCost $r._Cache $r._Act.Model)) {
-      # what letting it go cold costs, under the time left (the way COST carries the tree's Σ)
-      $pieces = @(((Fit $v $c.Width $c.Align)).TrimEnd(), ((Fit $cc $c.Width $c.Align)).TrimEnd())
+    elseif ($c.Name -eq 'CTX' -and $maxLines -gt 1 -and ($ceil = Get-RowCeiling $r)) {
+      $pieces = @(((Fit $v $c.Width $c.Align)).TrimEnd(), ((Fit (Format-Ceiling $ceil.Tokens) $c.Width $c.Align)).TrimEnd())
+    }
+    elseif ($c.Name -eq 'BRANCH') {
+      # a longer name continues on the next line; past the row's lines, or in one line, it keeps its end
+      # (a branch's last part names it, as a path's tail does)
+      $t = Clean $v
+      $pieces = if ($maxLines -gt 1) { Wrap-Cell $t $c.Width $maxLines $true }
+                elseif ((Get-CellWidth $t) -gt $c.Width) { ,@([string][char]0x2026 + (Last-Cells $t ($c.Width - 1))) }
+                else { ,@($t) }
     }
     elseif ($c.Name -eq 'STATE' -and $r._LiveKids -gt 0) {
       $pieces = ,@(((Fit "$v +$($r._LiveKids)" $c.Width $c.Align)).TrimEnd())
@@ -3871,7 +3893,7 @@ function Row-Key([object[]]$cols, $r, [string]$sig) {
   $jc = 0; foreach ($x in @($r._Jobs)) { if ($x) { $jc++ } }
   $cmpRecent = $false
   if ($r._Act -and $r._Act.LastCompactAt) { try { $cmpRecent = ((Get-Date) - [datetime]$r._Act.LastCompactAt).TotalMinutes -lt 10 } catch {} }
-  [void]$sb.Append([char]30).Append("$([bool]$r._Gone)|$(if ($r._Cache) { "$($r._Cache.Ttl)/$($r._Cache.RecacheTokens)" })|$($r._Act.Model)|$((Minutes $r.IDLE) -ge 2)|$($r._LaunchCwd)|$cmpRecent|$jc|$($r._LiveKids)|$($r._TreeLast)|$($r._Depth)|$($r._Done)|$($r._Orphaned)|$($r._Parent -ne $null)|$([math]::Round([double]$r._TreeCost, 2))")
+  [void]$sb.Append([char]30).Append("$([bool]$r._Gone)|$(if ($r._Cache) { $r._Cache.Ttl })|$((Minutes $r.IDLE) -ge 2)|$($r._LaunchCwd)|$cmpRecent|$jc|$($r._LiveKids)|$($r._TreeLast)|$($r._Depth)|$($r._Done)|$($r._Orphaned)|$($r._Parent -ne $null)|$([math]::Round([double]$r._TreeCost, 2))")
   return $sb.ToString()
 }
 function Get-RowLines([object[]]$cols, $r, [string]$sep, [int]$maxLines, [string]$sig) {
@@ -3902,6 +3924,7 @@ function Render-Table([object[]]$rows, [string]$selectedId) {
   if ($script:Compact) { $cands = @($cands | Where-Object { $_.Priority -ge 60 }) }
   $maxLines = if ($script:Layouts[$script:LayoutMode] -eq 'wrap') { [math]::Max(1, $WrapLines) } else { 1 }
   $cols = Layout-Columns $cands $rows $avail $sep
+  $script:ShownCols = @(foreach ($c in $cols) { @{ Name = $c.Name; Width = [int]$c.Width } }); $script:ShownSep = $sep.Length   # hover
   $out = [System.Collections.Generic.List[object]]::new()   # a List: += on an array copies it every time
   $out.Add((($cols | ForEach-Object { Fit $_.Name $_.Width $_.Align }) -join $sep))
   $out.Add((($cols | ForEach-Object { '-' * $_.Width }) -join $sep))
@@ -4177,7 +4200,8 @@ function Show-Help {
     '           A Cline session (VIA cline) is read from Cline''s own files instead: see CLINE below)',
     'MOUSE   (Windows; -NoMouse turns it off)  click a row to select it, click it again or double-click',
     '  to peek, wheel to move, click a footer item for its key, click in peek to close it. To select',
-    '  text in the terminal while ctop runs, hold Shift while dragging.',
+    '  text in the terminal while ctop runs, hold Shift while dragging. Rest the pointer on a cell and a box',
+    '  under it shows the cell whole, with what its column means; a key or moving off the cell closes it.',
     '',
     '  NAME        J  session name (/rename or --name); for subagents see SUBAGENT NAMES above',
     '  COST Σ      T  second line of a session''s COST: the whole tree — the session, every subagent it',
@@ -4190,12 +4214,15 @@ function Show-Help {
     '                 Agent SDK: VS Code''s own Claude agent, or another program built on it), remote,',
     '                 cline (a Cline session), copilot (a GitHub Copilot chat in VS Code)',
     '  CACHE       T  prompt cache: minutes left while warm (yellow near the end), cold once expired, - unknown;',
-    '                 the rule of the Claude Code extension for VS Code. Second line: what the next turn costs once',
-    '                 the cache is cold (the whole context written back). In peek: the next turn warm and cold',
+    '                 the rule of the Claude Code extension for VS Code. In peek: the next turn warm and cold',
+    '  RECACHE     T  what the next turn costs once the cache is cold: the whole context written back at the',
+    '                 cache-write price of its TTL (5m or 1h). After a compaction: the compacted conversation,',
+    '                 at the TTL used before it. Blank when unknown (no cache use, or a model with no price)',
     '  TURN        T  time since your last prompt — how long Claude has been on this turn (blank when idle).',
     '                 Yellow >= 10 min, red >= 30 min',
     '  IDLE        T  (peek) time since the transcript was last written to',
-    '  CTX         T  context size in K tokens (input + cache tokens on the newest assistant entry)',
+    '  CTX         T  context size in K tokens (input + cache tokens on the newest assistant entry); under it,',
+    '                 /967K: where Claude Code compacts (its documented default, or the window you set)',
     '  CMP         T  compactions so far. Magenta = one in the last 10 min, yellow = older. Each replaces',
     '                 the history with a summary; peek shows when / why / how big',
     '  LAST ACTION T  newest tool call (name + main argument), the start of Claude''s last text (text:),',
@@ -4206,7 +4233,8 @@ function Show-Help {
     '                 ▁ (red) waiting on you: a permission',
     '                 prompt or a question. No tokens are consumed while waiting',
     '  BRANCH      T  the gitBranch Claude Code stamps on entries (falls back to .git/HEAD).',
-    '                 wt: prefix = CWD is a linked git worktree',
+    '                 wt: prefix = CWD is a linked git worktree. At most 14 wide: a longer name goes on',
+    '                 to the second line, and keeps its end when even that is too short',
     '  AGE         J  time since the session (or agent) started',
     '  CWD         T  where the session is NOW (newest cwd in its transcript). Cyan = it moved since launch',
     '  PID, CPU(s), MEM(MB)   O  the claude process; subagents run inside the parent (no PID)',
@@ -4246,8 +4274,9 @@ function Show-Help {
     '         and in the footer). Gone sessions from earlier runs come from the closed log',
     '       r poll the roster now   [ / ] tick   h this help   q quit',
     '',
-    'LAYOUT   the table fills the window (cap with -MaxWidth). Extra width widens TITLE / LAST ACTION / CWD',
-    '  toward their full text; MODEL / BRANCH / KIND / STATE size to content (shrink is delayed ~5 s).',
+    'LAYOUT   the table fills the window (cap with -MaxWidth). Extra width widens LAST ACTION first, then',
+    '  TITLE / CWD, toward their full text; MODEL / BRANCH (up to 14) / KIND / STATE size to content',
+    '  (shrink is delayed ~5 s).',
     '  Column widths are sticky within a run so nothing jitters. Rows: one process = one row; after',
     '  /clear the old id may linger in the roster, ctop keeps the entry with the freshest transcript.',
     '',
@@ -4493,6 +4522,211 @@ function Resolve-Mouse($e, [string]$footer, [bool]$inPeek, [int]$selOrd) {
   return @{ Select = $ord }
 }
 
+# ---- the hover line ----------------------------------------------------------------
+# With the mouse on (Windows), the console reports pointer moves. The footer then shows the cell under the
+# pointer in full, and what its column means, in the help screen's own words: a tooltip, in a console.
+# The column under screen column $x in the last table drawn; $null on a gap between columns or past the end.
+function Get-ColumnAt([int]$x) {
+  $at = 0
+  foreach ($c in @($script:ShownCols)) {
+    if ($x -ge $at -and $x -lt $at + [int]$c.Width) { return $c.Name }
+    $at += [int]$c.Width + [int]$script:ShownSep
+  }
+  return $null
+}
+# A column's description from the help screen's COLUMNS section (read from Show-Help itself, so the two
+# can't drift): the line '  <NAME, 11 wide> <source>  <text>' and its continuation lines, joined.
+function Get-ColumnMeaning([string]$name) {
+  if (-not $script:ColumnMeaning) {
+    $m = @{}; $cur = $null
+    foreach ($n in ${function:Show-Help}.Ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)) {
+      $t = [string]$n.Value
+      if ($t.Length -gt 17 -and $t.StartsWith('  ') -and $t[2] -ne ' ' -and $t[14] -in 'T', 'J', 'R' -and $t.Substring(15, 2) -eq '  ' -and $t.Substring(2, 12).Trim() -cmatch '^[A-Z]') {
+        $cur = $t.Substring(2, 12).Trim(); $m[$cur] = $t.Substring(17).Trim()
+      }
+      elseif ($cur -and $t -match '^ {17}(\S.*)$') { $m[$cur] += ' ' + $Matches[1].Trim() }
+      else { $cur = $null }
+    }
+    $script:ColumnMeaning = $m
+  }
+  return $script:ColumnMeaning[$name]
+}
+# ---- the auto-compact ceiling (CTX's second line) -------------------------------------------------
+# The documented rule (code.claude.com/docs/en/model-config, "Default auto-compact thresholds" and "Set the
+# auto-compact window", read 2026-11-13). With no window set, a model with a native 1M window (Fable, Sonnet
+# 5+, Haiku 5.5, Opus 4.7+) compacts at about 967K; Opus/Sonnet 4.6 without [1m], or any model with
+# CLAUDE_CODE_DISABLE_1M_CONTEXT=1, at 200K. A window set in CLAUDE_CODE_AUTO_COMPACT_WINDOW wins over the
+# settings files; in the files, the highest-precedence one (managed > project local > project > user) that
+# sets a window for the model (modelSettings.<model>.autoCompactWindow) or for every model (the top-level
+# autoCompactWindow) decides, the model's own over the top-level in one file; "auto" means the default.
+# Any window is capped at the model's context window. Not seen by ctop: a --autocompact launch flag, a
+# subagent's own window, idle compaction, and the environment of the process that started Claude Code
+# (ctop reads its own).
+$script:ClaudeHome = $ConfigDir
+$script:ManagedSettingsPath = if ($IsLinux) { '/etc/claude-code/managed-settings.json' }
+                              elseif ($IsMacOS) { '/Library/Application Support/ClaudeCode/managed-settings.json' }
+                              else { 'C:\Program Files\ClaudeCode\managed-settings.json' }
+$script:CeilingCache = @{}   # settings file path -> @{ At; Write; Data } (re-read when it changes, checked every 5 s)
+function Read-SettingsFile([string]$path) {
+  $now = [datetime]::UtcNow
+  $c = $script:CeilingCache[$path]
+  if ($c -and ($now - $c.At).TotalSeconds -lt 5) { return $c.Data }
+  $data = $null; $write = $null
+  try {
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+      $write = (Get-Item -LiteralPath $path).LastWriteTimeUtc
+      if ($c -and $c.Write -eq $write) { $data = $c.Data }
+      else { $data = ConvertTo-Hashtable ((Read-SharedText $path) | ConvertFrom-Json) }
+    }
+  } catch { Write-Trace "settings ${path}: $_" }
+  $script:CeilingCache[$path] = @{ At = $now; Write = $write; Data = $data }
+  return $data
+}
+# A window value as tokens, clamped to 100K..1M; 'auto' -> 'auto'; $null when it is no window. $bareK: a
+# bare number from 100 to 1000 means thousands (the command's and the flag's form, not the variable's).
+function ConvertTo-WindowTokens($v, [bool]$bareK) {
+  if ($null -eq $v) { return $null }
+  $t = ([string]$v).Trim()
+  if ($t -eq 'auto') { return 'auto' }
+  if ($t -notmatch '^(\d+(?:\.\d+)?)\s*([kKmM]?)$') { return $null }
+  $n = [double]::Parse($Matches[1], [Globalization.CultureInfo]::InvariantCulture)
+  switch -CaseSensitive ($Matches[2].ToLowerInvariant()) { 'k' { $n *= 1000 } 'm' { $n *= 1000000 } default { if ($bareK -and $n -ge 100 -and $n -le 1000) { $n *= 1000 } } }
+  return [long][math]::Min(1000000, [math]::Max(100000, $n))
+}
+# @{ Tokens; Source } for a Claude model, or $null. $ctxK: the context seen, in K tokens (a 4.6 model past
+# 200K must be running its [1m] variant).
+function Get-CompactCeiling([string]$model, [string]$cwd, [double]$ctxK) {
+  if ($model -match '^(opus|sonnet|haiku|fable)-') { $model = 'claude-' + $model }   # ctop keeps the short name
+  if ($model -notmatch '^claude-') { return $null }
+  $canon = $model -replace '-\d{8}$', ''
+  $native1M = $canon -match 'fable|sonnet-([5-9]|\d\d)|haiku-([5-9]|\d\d)|opus-4-([7-9])|opus-([5-9]|\d\d)'
+  $off1M = $env:CLAUDE_CODE_DISABLE_1M_CONTEXT -eq '1'
+  $window = if ($off1M) { 200000 } elseif ($native1M -or $ctxK -gt 200) { 1000000 } else { 200000 }
+  $set = $null; $from = ''
+  $envW = ConvertTo-WindowTokens $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW $false
+  if ($envW -is [long]) { $set = $envW; $from = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW' }
+  else {
+    $files = @($script:ManagedSettingsPath)
+    if ($cwd) { $files += (Join-Path $cwd '.claude/settings.local.json'), (Join-Path $cwd '.claude/settings.json') }
+    $files += (Join-Path $script:ClaudeHome 'settings.json')
+    foreach ($f in $files) {
+      $d = Read-SettingsFile $f
+      if (-not $d) { continue }
+      $own = $null
+      if ($d.modelSettings -is [hashtable] -and $d.modelSettings[$canon] -is [hashtable]) { $own = ConvertTo-WindowTokens $d.modelSettings[$canon].autoCompactWindow $false }
+      $top = ConvertTo-WindowTokens $d.autoCompactWindow $false
+      $w = if ($null -ne $own) { $own } else { $top }
+      if ($null -eq $w) { continue }
+      if ($w -is [long]) { $set = $w; $from = if ($null -ne $own) { "modelSettings.$canon.autoCompactWindow in $f" } else { "autoCompactWindow in $f" } }
+      break   # this file decides, even with 'auto'
+    }
+  }
+  if ($null -ne $set) { return @{ Tokens = [long][math]::Min($set, $window); Source = $from } }
+  if ($window -eq 1000000 -and $native1M -and -not $off1M) { return @{ Tokens = 967000; Source = 'Claude Code''s default for a model with a native 1M window' } }
+  if ($window -eq 1000000) { return @{ Tokens = 1000000; Source = 'the model''s [1m] window: context past 200K' } }
+  $why = if ($off1M) { 'CLAUDE_CODE_DISABLE_1M_CONTEXT=1' } else { 'Claude Code''s default for this model' }
+  return @{ Tokens = 200000; Source = $why }
+}
+function Format-Ceiling([long]$tokens) {
+  if ($tokens -ge 1000000) { return '/' + ('{0:0.#}' -f ($tokens / 1000000.0)).Replace(',', '.') + 'M' }
+  return '/' + [math]::Round($tokens / 1000) + 'K'
+}
+# The ceiling for a row, or $null: Claude Code rows only (Copilot and Cline compact by their own rules).
+function Get-RowCeiling($r) {
+  if (-not $r._Act -or [string]$r.VIA -in 'copilot', 'cline') { return $null }
+  $k = 0.0; [void][double]::TryParse([string]$r._Act.Ctx, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$k)
+  Get-CompactCeiling ([string]$r._Act.Model) ([string]$r._Act.Cwd) $k
+}
+
+# What the hover box says about one cell: its column and row, the whole value, and what the column means.
+function Get-HoverParts($r, [string]$name) {
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  $v = switch ($name) {
+    'CACHE'       { Format-CachePeek $r._Cache $r._Act.Model }
+    'RECACHE'     { $d = Get-CacheColdDollars $r._Cache $r._Act.Model
+                    if ($null -ne $d) { '$' + $d.ToString('0.00', $inv) + " to write $([math]::Round([double]$r._Cache.RecacheTokens / 1000))K tokens back into the cache ($($r._Cache.Ttl))" } else { [string]$r.RECACHE } }
+    'CTX'         { $ceil = Get-RowCeiling $r
+                    if ($ceil) { "$([string]$r.CTX) tokens in context; compacts at about $([math]::Round($ceil.Tokens / 1000))K ($($ceil.Source))" } else { [string]$r.CTX } }
+    'LAST ACTION' { if ($r._Act.LastFull) { [string]$r._Act.LastFull } else { [string]$r.$name } }
+    'COST'        { $t = [string]$r.COST
+                    if (-not $r._Parent -and $null -ne $r._TreeCost -and [double]$r._TreeCost -ge [double]$r._Act.Cost + 0.005) { $t += ' · whole tree Σ$' + ([double]$r._TreeCost).ToString('0.00', $inv) }
+                    $t }
+    default       { [string]$r.$name }
+  }
+  $v = ([string]$v -replace '\s+', ' ').Trim(); if (-not $v) { $v = '-' }
+  $who = ([string]$r.NAME -replace '^\s*[│ ]*[└├] ', '').Trim()
+  return @{ Title = "$name · $who"; Value = $v; Meaning = [string](Get-ColumnMeaning $name) }
+}
+# Words of $text in lines of at most $w cells, at most $max lines (the last cut with …).
+function Split-Words([string]$text, [int]$w, [int]$max) {
+  $out = [System.Collections.Generic.List[string]]::new(); $cur = ''
+  foreach ($word in ($text -split ' ')) {
+    if (-not $word) { continue }
+    while ((Get-CellWidth $word) -gt $w) {   # a word longer than a line: break it
+      if ($cur) { $out.Add($cur); $cur = '' }
+      $head = Limit-Cells $word $w; $out.Add($head); $word = $word.Substring($head.Length)
+    }
+    $try = if ($cur) { "$cur $word" } else { $word }
+    if ((Get-CellWidth $try) -le $w) { $cur = $try } else { $out.Add($cur); $cur = $word }
+  }
+  if ($cur) { $out.Add($cur) }
+  if ($out.Count -gt $max) {
+    $keep = @($out.GetRange(0, $max)); $keep[$max - 1] = (Limit-Cells $keep[$max - 1] ($w - 1)) + [char]0x2026
+    return $keep
+  }
+  return @($out)
+}
+# The hover box for this frame, or $null: with the pointer over a cell of a row (not the header, a line
+# between rows, a gap between columns, or peek), a framed box under that row (above it when there is no
+# room below), lined up with the column: @{ X; Y; Lines } in screen cells, lines already painted.
+function Get-HoverBox($view, [object[]]$sorted, [int]$width, [int]$height) {
+  if ($view.PeekId -or -not $view.Hover -or -not $script:BodyMap) { return $null }
+  $i = [int]$view.Hover.Y - [int]$script:BodyY0
+  $map = @($script:BodyMap)
+  if ($i -lt 0 -or $i -ge $map.Count -or [int]$map[$i] -lt 0 -or [int]$map[$i] -ge $sorted.Count) { return $null }
+  $ord = [int]$map[$i]
+  $col = Get-ColumnAt ([int]$view.Hover.X)
+  if (-not $col) { return $null }
+  $parts = Get-HoverParts $sorted[$ord] $col
+  $inner = [math]::Max(16, [math]::Min(56, $width - 4))
+  $body = @(Split-Words $parts.Value $inner 5)
+  $mean = if ($parts.Meaning) { @(Split-Words $parts.Meaning $inner 4) } else { @() }
+  $title = Limit-Cells $parts.Title ($inner - 2)
+  $lines = [System.Collections.Generic.List[string]]::new()
+  $lines.Add('┌ ' + $title + ' ' + ('─' * [math]::Max(0, $inner - (Get-CellWidth $title))) + '┐')
+  foreach ($l in $body) { $lines.Add('│ ' + $l + (' ' * ($inner - (Get-CellWidth $l))) + ' │') }
+  foreach ($l in $mean) { $lines.Add('│ ' + (Paint ($l + (' ' * ($inner - (Get-CellWidth $l)))) 'dim') + ' │') }
+  $lines.Add('└' + ('─' * ($inner + 2)) + '┘')
+  # the hovered row's lines on screen, and the column's left edge
+  $first = [array]::IndexOf($map, $ord); $last = [array]::LastIndexOf($map, $ord)
+  $x = 0; foreach ($c in @($script:ShownCols)) { if ($c.Name -eq $col) { break }; $x += [int]$c.Width + [int]$script:ShownSep }
+  $boxW = $inner + 4
+  $x = [math]::Max(0, [math]::Min($x, $width - $boxW))
+  $below = [int]$script:BodyY0 + $last + 1
+  $y = if ($below + $lines.Count -le $height - 1) { $below } else { [math]::Max(0, [int]$script:BodyY0 + $first - $lines.Count) }
+  return @{ X = $x; Y = $y; Lines = @($lines) }
+}
+# The frame's lines with the box drawn over them: the cells left of the box keep their colors, the box
+# replaces its cells, and the text right of it is kept, plain. A row under the box loses its row styling
+# (selection, dimming) for those lines.
+function Add-HoverBox([object[]]$lines, $box) {
+  if (-not $box) { return ,$lines }
+  $out = [System.Collections.Generic.List[object]]::new(); foreach ($l in $lines) { $out.Add($l) }
+  $boxW = Get-CellWidth (Strip-Ansi $box.Lines[0])
+  for ($k = 0; $k -lt $box.Lines.Count; $k++) {
+    $y = $box.Y + $k
+    while ($out.Count -le $y) { $out.Add('') }
+    $base = $out[$y]; $text = if ($base -is [string]) { $base } else { [string]$base.Text }
+    $plain = Strip-Ansi $text; $pw = Get-CellWidth $plain
+    $left = if ($pw -ge $box.X) { Truncate-Ansi $text $box.X } else { $text + "$([char]27)[0m" }
+    $leftW = Get-CellWidth (Strip-Ansi $left)
+    $pad = ' ' * [math]::Max(0, $box.X - $leftW)
+    $right = Last-Cells $plain ([math]::Max(0, $pw - $box.X - $boxW))
+    $out[$y] = $left + $pad + $box.Lines[$k] + $right
+  }
+  return ,$out.ToArray()
+}
+
 # ---- one frame -------------------------------------------------------------------
 # Everything a frame needs from the outside world (roster, transcripts, processes) and everything it
 # draws, for one view: selection, peek, toggles, window size. The in-process loop calls it every tick;
@@ -4625,7 +4859,8 @@ function Invoke-Frame($view) {
     $frame += $head + $body
   }
   $foot = Build-Footer
-  $lines = $frame; $footer = $foot
+  # the hover box: drawn over the table, under the cell the pointer rests on (Windows, mouse on)
+  $lines = Add-HoverBox $frame (Get-HoverBox $view $sorted (Get-WindowWidth) (Get-WindowHeight)); $footer = $foot
   if ($script:PeekId) {
     $pr = $sorted | Where-Object _SessionId -eq $script:PeekId | Select-Object -First 1
     if ($pr) { $lines = Build-Peek $pr; $footer = "  live peek   ↑↓ other session   esc/enter close   t path   y resume   n contact   d ID   h help" }
@@ -4655,7 +4890,8 @@ function Invoke-Frame($view) {
 function New-View {
   [pscustomobject]@{ Rev = 0; SelectedId = $null; PeekId = $null; Tick = [math]::Max(50, $Tick); KeepMin = $script:KeepMin
                      ShowSubagents = [bool]$script:ShowSubagents; Compact = [bool]$script:Compact; SortMode = [int]$script:SortMode
-                     LayoutMode = [int]$script:LayoutMode; ShowGone = [bool]$script:ShowGone; Actions = @(); PendingCopies = @(); CopyFor = $null }
+                     LayoutMode = [int]$script:LayoutMode; ShowGone = [bool]$script:ShowGone; Actions = @(); PendingCopies = @(); CopyFor = $null
+                     Hover = $null }   # the pointer, in window cells (the hover line); not a reason to redraw at once
 }
 # One key against the view and the last frame drawn (its row ids, page size). Returns what the loop must
 # do beyond redrawing: quit, help, closed (the log), poll, or copy-<t|y|n|d>; $null for nothing more.
@@ -4752,6 +4988,13 @@ function Read-Keys($view, $packet) {
   while ($null -ne ($inp = Next-Input)) {
     $any = $true
     $k = $inp
+    if ($inp -isnot [ConsoleKeyInfo] -and ($inp.Flags -band 1) -and -not ($inp.Buttons -band 0xFFFF)) {
+      # a pointer move: the next frame (at most a tick away) shows the hover line; no Rev++, or every move
+      # would ask the worker for a frame
+      $view.Hover = [pscustomobject]@{ X = [int]$inp.X; Y = [int]$inp.Y - $(try { [Console]::WindowTop } catch { 0 }) }
+      continue
+    }
+    if ($inp -is [ConsoleKeyInfo]) { $view.Hover = $null }   # typing: the footer's key hints come back
     if ($inp -isnot [ConsoleKeyInfo]) {   # a mouse event
       $ids = @($packet.Ids)
       $act = Resolve-Mouse $inp $script:ShownFooter ([bool]$view.PeekId) ([array]::IndexOf($ids, [string]$view.SelectedId))
