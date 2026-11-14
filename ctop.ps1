@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.16 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.17 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.16'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.17'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -3793,6 +3793,9 @@ function Format-Row([object[]]$cols, $r, [string]$sep, [int]$maxLines) {
       $sig = if ($t -ge 1000) { 'Σ${0:N0}k' -f ($t / 1000) } elseif ($t -ge 100) { 'Σ${0:N0}' -f $t } else { 'Σ${0:N2}' -f $t }
       $pieces = @(((Fit $v $c.Width $c.Align)).TrimEnd(), ((Fit $sig $c.Width $c.Align)).TrimEnd())
     }
+    elseif ($c.Name -eq 'CTX' -and $maxLines -gt 1 -and ($ceil = Get-RowCeiling $r)) {
+      $pieces = @(((Fit $v $c.Width $c.Align)).TrimEnd(), ((Fit (Format-Ceiling $ceil.Tokens) $c.Width $c.Align)).TrimEnd())
+    }
     elseif ($c.Name -eq 'BRANCH') {
       # a longer name continues on the next line; past the row's lines, or in one line, it keeps its end
       # (a branch's last part names it, as a path's tail does)
@@ -4170,7 +4173,8 @@ function Show-Help {
     '  TURN        T  time since your last prompt — how long Claude has been on this turn (blank when idle).',
     '                 Yellow >= 10 min, red >= 30 min',
     '  IDLE        T  (peek) time since the transcript was last written to',
-    '  CTX         T  context size in K tokens (input + cache tokens on the newest assistant entry)',
+    '  CTX         T  context size in K tokens (input + cache tokens on the newest assistant entry); under it,',
+    '                 /967K: where Claude Code compacts (its documented default, or the window you set)',
     '  CMP         T  compactions so far. Magenta = one in the last 10 min, yellow = older. Each replaces',
     '                 the history with a summary; peek shows when / why / how big',
     '  LAST ACTION T  newest tool call (name + main argument), the start of Claude''s last text (text:),',
@@ -4499,6 +4503,93 @@ function Get-ColumnMeaning([string]$name) {
   }
   return $script:ColumnMeaning[$name]
 }
+# ---- the auto-compact ceiling (CTX's second line) -------------------------------------------------
+# The documented rule (code.claude.com/docs/en/model-config, "Default auto-compact thresholds" and "Set the
+# auto-compact window", read 2026-11-13). With no window set, a model with a native 1M window (Fable, Sonnet
+# 5+, Haiku 5.5, Opus 4.7+) compacts at about 967K; Opus/Sonnet 4.6 without [1m], or any model with
+# CLAUDE_CODE_DISABLE_1M_CONTEXT=1, at 200K. A window set in CLAUDE_CODE_AUTO_COMPACT_WINDOW wins over the
+# settings files; in the files, the highest-precedence one (managed > project local > project > user) that
+# sets a window for the model (modelSettings.<model>.autoCompactWindow) or for every model (the top-level
+# autoCompactWindow) decides, the model's own over the top-level in one file; "auto" means the default.
+# Any window is capped at the model's context window. Not seen by ctop: a --autocompact launch flag, a
+# subagent's own window, idle compaction, and the environment of the process that started Claude Code
+# (ctop reads its own).
+$script:ClaudeHome = $ConfigDir
+$script:ManagedSettingsPath = if ($IsLinux) { '/etc/claude-code/managed-settings.json' }
+                              elseif ($IsMacOS) { '/Library/Application Support/ClaudeCode/managed-settings.json' }
+                              else { 'C:\Program Files\ClaudeCode\managed-settings.json' }
+$script:CeilingCache = @{}   # settings file path -> @{ At; Write; Data } (re-read when it changes, checked every 5 s)
+function Read-SettingsFile([string]$path) {
+  $now = [datetime]::UtcNow
+  $c = $script:CeilingCache[$path]
+  if ($c -and ($now - $c.At).TotalSeconds -lt 5) { return $c.Data }
+  $data = $null; $write = $null
+  try {
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+      $write = (Get-Item -LiteralPath $path).LastWriteTimeUtc
+      if ($c -and $c.Write -eq $write) { $data = $c.Data }
+      else { $data = ConvertTo-Hashtable ((Read-SharedText $path) | ConvertFrom-Json) }
+    }
+  } catch { Write-Trace "settings ${path}: $_" }
+  $script:CeilingCache[$path] = @{ At = $now; Write = $write; Data = $data }
+  return $data
+}
+# A window value as tokens, clamped to 100K..1M; 'auto' -> 'auto'; $null when it is no window. $bareK: a
+# bare number from 100 to 1000 means thousands (the command's and the flag's form, not the variable's).
+function ConvertTo-WindowTokens($v, [bool]$bareK) {
+  if ($null -eq $v) { return $null }
+  $t = ([string]$v).Trim()
+  if ($t -eq 'auto') { return 'auto' }
+  if ($t -notmatch '^(\d+(?:\.\d+)?)\s*([kKmM]?)$') { return $null }
+  $n = [double]::Parse($Matches[1], [Globalization.CultureInfo]::InvariantCulture)
+  switch -CaseSensitive ($Matches[2].ToLowerInvariant()) { 'k' { $n *= 1000 } 'm' { $n *= 1000000 } default { if ($bareK -and $n -ge 100 -and $n -le 1000) { $n *= 1000 } } }
+  return [long][math]::Min(1000000, [math]::Max(100000, $n))
+}
+# @{ Tokens; Source } for a Claude model, or $null. $ctxK: the context seen, in K tokens (a 4.6 model past
+# 200K must be running its [1m] variant).
+function Get-CompactCeiling([string]$model, [string]$cwd, [double]$ctxK) {
+  if ($model -match '^(opus|sonnet|haiku|fable)-') { $model = 'claude-' + $model }   # ctop keeps the short name
+  if ($model -notmatch '^claude-') { return $null }
+  $canon = $model -replace '-\d{8}$', ''
+  $native1M = $canon -match 'fable|sonnet-([5-9]|\d\d)|haiku-([5-9]|\d\d)|opus-4-([7-9])|opus-([5-9]|\d\d)'
+  $off1M = $env:CLAUDE_CODE_DISABLE_1M_CONTEXT -eq '1'
+  $window = if ($off1M) { 200000 } elseif ($native1M -or $ctxK -gt 200) { 1000000 } else { 200000 }
+  $set = $null; $from = ''
+  $envW = ConvertTo-WindowTokens $env:CLAUDE_CODE_AUTO_COMPACT_WINDOW $false
+  if ($envW -is [long]) { $set = $envW; $from = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW' }
+  else {
+    $files = @($script:ManagedSettingsPath)
+    if ($cwd) { $files += (Join-Path $cwd '.claude/settings.local.json'), (Join-Path $cwd '.claude/settings.json') }
+    $files += (Join-Path $script:ClaudeHome 'settings.json')
+    foreach ($f in $files) {
+      $d = Read-SettingsFile $f
+      if (-not $d) { continue }
+      $own = $null
+      if ($d.modelSettings -is [hashtable] -and $d.modelSettings[$canon] -is [hashtable]) { $own = ConvertTo-WindowTokens $d.modelSettings[$canon].autoCompactWindow $false }
+      $top = ConvertTo-WindowTokens $d.autoCompactWindow $false
+      $w = if ($null -ne $own) { $own } else { $top }
+      if ($null -eq $w) { continue }
+      if ($w -is [long]) { $set = $w; $from = if ($null -ne $own) { "modelSettings.$canon.autoCompactWindow in $f" } else { "autoCompactWindow in $f" } }
+      break   # this file decides, even with 'auto'
+    }
+  }
+  if ($null -ne $set) { return @{ Tokens = [long][math]::Min($set, $window); Source = $from } }
+  if ($window -eq 1000000 -and $native1M -and -not $off1M) { return @{ Tokens = 967000; Source = 'Claude Code''s default for a model with a native 1M window' } }
+  if ($window -eq 1000000) { return @{ Tokens = 1000000; Source = 'the model''s [1m] window: context past 200K' } }
+  $why = if ($off1M) { 'CLAUDE_CODE_DISABLE_1M_CONTEXT=1' } else { 'Claude Code''s default for this model' }
+  return @{ Tokens = 200000; Source = $why }
+}
+function Format-Ceiling([long]$tokens) {
+  if ($tokens -ge 1000000) { return '/' + ('{0:0.#}' -f ($tokens / 1000000.0)).Replace(',', '.') + 'M' }
+  return '/' + [math]::Round($tokens / 1000) + 'K'
+}
+# The ceiling for a row, or $null: Claude Code rows only (Copilot and Cline compact by their own rules).
+function Get-RowCeiling($r) {
+  if (-not $r._Act -or [string]$r.VIA -in 'copilot', 'cline') { return $null }
+  $k = 0.0; [void][double]::TryParse([string]$r._Act.Ctx, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$k)
+  Get-CompactCeiling ([string]$r._Act.Model) ([string]$r._Act.Cwd) $k
+}
+
 # What the hover box says about one cell: its column and row, the whole value, and what the column means.
 function Get-HoverParts($r, [string]$name) {
   $inv = [Globalization.CultureInfo]::InvariantCulture
@@ -4506,6 +4597,8 @@ function Get-HoverParts($r, [string]$name) {
     'CACHE'       { Format-CachePeek $r._Cache $r._Act.Model }
     'RECACHE'     { $d = Get-CacheColdDollars $r._Cache $r._Act.Model
                     if ($null -ne $d) { '$' + $d.ToString('0.00', $inv) + " to write $([math]::Round([double]$r._Cache.RecacheTokens / 1000))K tokens back into the cache ($($r._Cache.Ttl))" } else { [string]$r.RECACHE } }
+    'CTX'         { $ceil = Get-RowCeiling $r
+                    if ($ceil) { "$([string]$r.CTX) tokens in context; compacts at about $([math]::Round($ceil.Tokens / 1000))K ($($ceil.Source))" } else { [string]$r.CTX } }
     'LAST ACTION' { if ($r._Act.LastFull) { [string]$r._Act.LastFull } else { [string]$r.$name } }
     'COST'        { $t = [string]$r.COST
                     if (-not $r._Parent -and $null -ne $r._TreeCost -and [double]$r._TreeCost -ge [double]$r._Act.Cost + 0.005) { $t += ' · whole tree Σ$' + ([double]$r._TreeCost).ToString('0.00', $inv) }

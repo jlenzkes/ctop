@@ -3,6 +3,21 @@
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
 
+
+## 2026.11.13.17 — the auto-compact ceiling under CTX
+
+- CTX's second line shows where Claude Code compacts, as `/967K` under the context size (the user's
+  choice, 2026-11-13). The rule is the documented one (code.claude.com/docs/en/model-config, read
+  2026-11-13): with no window set, a model with a native 1M window (Fable, Sonnet 5 and later, Haiku 5.5,
+  Opus 4.7 and later) compacts at about 967K; Opus and Sonnet 4.6 without `[1m]`, or any model with
+  `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, at 200K (a 4.6 session past 200K is taken as its `[1m]` variant). A
+  window you set wins: `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, then the highest-precedence settings file that
+  sets one (managed, the project's local, the project's, yours), a model's own
+  `modelSettings.<model>.autoCompactWindow` over the top-level `autoCompactWindow`; `"auto"` is the
+  default; any window is capped at the model's context window. The hover box says which one applied.
+- not seen by ctop: a window passed with `--autocompact` for one launch, a subagent's own window, idle
+  compaction, and the environment Claude Code was started in (ctop reads its own). Claude Code rows only.
+
 ## 2026.11.13.16 — the hover box
 
 - the hover line becomes a box: rest the pointer on a cell and a framed box opens right under it (above it
