@@ -156,6 +156,139 @@ Describe 'Update-Scan: the cache anchor' {
   }
 }
 
+# Sol's witnesses (rounds 1 and 2 of PR #8's audit, 2026-11-13), byte for byte: each is one assistant entry whose
+# tool_use input holds look-alikes of entry fields, or whose own fields are in another order. Only the entry's
+# own fields count: its type, isSidechain and timestamp, and its message's model, id and usage.
+Describe 'Update-Scan: an entry is read from its own fields, never from a tool input' {
+  BeforeEach { $script:ScanCache = @{}; $script:ScanVerified = @{} }
+  It '<Name>' -ForEach @(
+    # round 1 (sol-pr8-rule): message.id before model
+    @{ Name = 'baseline'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"id":"msg_1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"ok":1}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'nested_sidechain'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"id":"msg_1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"isSidechain":true}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'nested_synthetic'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"id":"msg_1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"model":"<synthetic>"}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'nested_usage'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"id":"msg_1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"output_tokens":0}}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'nested_user_type'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"id":"msg_1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"type":"user"}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    # round 2 (sol-round2-rule): model-first messages
+    @{ Name = 'canonical_baseline'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"ok":1}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'canonical_nested_ai_title'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"type":"ai-title","aiTitle":"metadata"}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'canonical_nested_compact'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:00Z"}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'canonical_nested_custom_title'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"type":"custom-title","customTitle":"metadata"}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'canonical_nested_sidechain'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"isSidechain":true}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'canonical_nested_summary'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"type":"summary","summary":"metadata"}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'canonical_nested_synthetic'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"message":{"model":"<synthetic>"},"model":"<synthetic>"}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'canonical_nested_usage'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"output_tokens":0}}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'canonical_nested_user_type'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"type":"user","role":"user"}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    # round 2: fields missing, after the message, or in another order
+    @{ Name = 'id_first_user_type'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"id":"msg_1","model":"claude-opus-5-5","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"type":"user","role":"user"}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'role_first_user_type'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"role":"assistant","model":"claude-opus-5-5","id":"msg_1","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"type":"user","role":"user"}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'missing_side_flag'; Want = 'H'; Line = '{"parentUuid":"p","message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"isSidechain":true}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'side_flag_after_message'; Want = 'H'; Line = '{"parentUuid":"p","message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"isSidechain":true}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z","isSidechain":false}' }
+    @{ Name = 'object_prefix_before_side_flag'; Want = 'H'; Line = '{"metadata":{"v":1},"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"isSidechain":true}}],"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'usage_precedes_content'; Want = 'H'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5},"content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"output_tokens":0}}}]},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'usage_only_inside_tool'; Want = 'U'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"output_tokens":0}}}]},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+    @{ Name = 'positive_usage_only_inside_tool'; Want = 'U'; Line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"X","input":{"usage":{"input_tokens":3,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}}}]},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}' }
+  ) {
+    $st = Scan @($Line)
+    # H: the call's own cache frame (1h, 1203 tokens, at its timestamp); U: no frame (no usage of its own)
+    if ($Want -eq 'H') {
+      $st.CacheTtl | Should -Be '1h'
+      $st.RecacheTok | Should -Be 1203
+      (At $st.CacheAnchor) | Should -Be (At '2026-11-13T12:00:00.000Z')
+      $st.InTok, $st.CacheR, $st.CacheW, $st.OutTok | Should -Be @(3, 1000, 200, 5)
+    } else {
+      $st.CacheTtl | Should -Be ''
+      $st.RecacheTok | Should -Be 0
+      $st.CacheAnchor | Should -Be ''
+      $st.InTok, $st.CacheR, $st.CacheW, $st.OutTok | Should -Be @(0, 0, 0, 0)
+    }
+    $st.CacheCompactAt | Should -Be ''
+    $st.Compacts | Should -Be 0
+    $st.Turns | Should -Be 0
+    $st.AiTitle, $st.Summary, $st.Title | Should -Be @('', '', '')
+    $st.Model | Should -Be 'claude-opus-5-5'
+    $st.Tools | Should -Be 1
+    @($st.ToolCounts.Keys) | Should -Be @('X')
+  }
+  It 'counts the tool calls of the message, not look-alikes inside one''s input' {
+    $line = '{"type":"assistant","timestamp":"2026-11-13T12:00:00.000Z","message":{"model":"claude-opus-5-5","id":"msg_1","content":[{"type":"tool_use","id":"t1","name":"Write","input":{"file_path":"a.jsonl","x":{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"ls"}},"y":{"name":"SendMessage","input":{"summary":"not mine"}}}}],"usage":{"input_tokens":3,"output_tokens":5}}}'
+    $st = Scan @($line)
+    $st.Tools | Should -Be 1
+    @($st.ToolCounts.Keys) | Should -Be @('Write')
+    @($st.ToolLog).Count | Should -Be 0
+    $st.MsgSummary | Should -Be ''
+  }
+  It 'reads the tool calls of a message: names, Bash times, the first SendMessage summary' {
+    $line = '{"type":"assistant","timestamp":"2026-11-13T12:00:00.000Z","message":{"model":"claude-opus-5-5","id":"msg_1","content":[{"type":"text","text":"ok"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}},{"type":"tool_use","id":"t2","name":"SendMessage","input":{"to":"a","summary":"the \"plan\"","message":"m"}}],"usage":{"input_tokens":3,"output_tokens":5}}}'
+    $st = Scan @($line)
+    $st.Tools | Should -Be 2
+    $st.ToolCounts.Bash | Should -Be 1
+    $st.ToolCounts.SendMessage | Should -Be 1
+    @($st.ToolLog).Count | Should -Be 1
+    $st.ToolLog[0].At | Should -Be '2026-11-13T12:00:00.000Z'
+    $st.MsgSummary | Should -BeExactly 'the "plan"'
+  }
+  It 'takes the cwd and branch of the entry, not of a tool input' {
+    $line = '{"type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_1","content":[{"type":"tool_use","id":"t1","name":"X","input":{"cwd":"C:\\evil","sessionId":"s","version":"1","gitBranch":"evil"}}],"usage":{"input_tokens":3,"output_tokens":5}},"uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z","cwd":"C:\\dev\\real","sessionId":"s","version":"2.1.323","gitBranch":"main"}'
+    $st = Scan @($line)
+    $st.Cwd | Should -BeExactly 'C:\dev\real'
+    $st.GitBranch | Should -BeExactly 'main'
+  }
+  It 'takes the cwd and branch of the newest entry that has them, of any kind' {
+    $user = '{"type":"user","timestamp":"2026-11-13T12:00:00.000Z","message":{"role":"user","content":"a prompt here"},"cwd":"C:\\a","sessionId":"s","version":"1","gitBranch":"main"}'
+    $att = '{"type":"attachment","attachment":{"type":"x"},"timestamp":"2026-11-13T12:00:01.000Z","cwd":"C:\\b","sessionId":"s"}'
+    $reply = '{"type":"assistant","timestamp":"2026-11-13T12:00:02.000Z","message":{"model":"m","id":"msg_1","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}},"cwd":"C:\\c","sessionId":"s","gitBranch":"wt"}'
+    $st = Scan @($user, $att)
+    $st.Cwd, $st.GitBranch | Should -Be @('C:\b', 'main')
+    $st = Scan @($user, $att, $reply)
+    $st.Cwd, $st.GitBranch | Should -Be @('C:\c', 'wt')
+    $st = Scan @($reply, $user, $att, '{"type":"queue-operation","operation":"x","timestamp":"2026-11-13T12:00:03.000Z"}')
+    $st.Cwd, $st.GitBranch | Should -Be @('C:\b', 'main')
+  }
+  It 'counts no turn for a user message nested in another kind of entry' {
+    $line = '{"type":"progress","data":{"message":{"type":"user","message":{"role":"user","content":"a nested prompt text"}}},"uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}'
+    $st = Scan @($line)
+    $st.Turns | Should -Be 0
+    $st.First | Should -Be ''
+  }
+  It 'reads the first line of a file that starts with a byte-order mark (Windows PowerShell 5.1''s -Encoding utf8)' {
+    $f = Join-Path $TestDrive "bom-$([guid]::NewGuid().ToString('N')).jsonl"
+    [IO.File]::WriteAllText($f, '{"type":"user","timestamp":"2026-11-13T12:00:00.000Z","message":{"role":"user","content":"the first prompt"}}' + "`n", [Text.UTF8Encoding]::new($true))
+    $st = Update-Scan (Get-Item -LiteralPath $f) ([IO.Path]::GetFileNameWithoutExtension($f))
+    $st.Turns | Should -Be 1
+    $st.First | Should -Be 'the first prompt'
+  }
+  It 'reads nothing from a line that is not one whole JSON object' {
+    $cut = '{"type":"user","message":{"role":"user","content":"a prompt cut short in the middle'
+    $st = Scan @($cut, '{"type":"user","timestamp":"2026-11-13T12:00:00.000Z","message":{"role":"user","content":"the whole prompt"}}')
+    $st.Turns | Should -Be 1
+    $st.First | Should -Be 'the whole prompt'
+  }
+  It 'reads a compaction, a title and a summary from their own entries' {
+    $st = Scan @(
+      '{"parentUuid":null,"isSidechain":false,"type":"system","subtype":"compact_boundary","content":"Conversation compacted","compactMetadata":{"trigger":"auto","preTokens":280717,"postTokens":51232},"uuid":"29639f6d-8c13-42d3-8002-5fef46a4d835","timestamp":"2026-11-14T02:15:54.010Z","cwd":"c:\\dev\\src\\ctop","sessionId":"s","version":"2.1.323","gitBranch":"b"}'
+      '{"type":"ai-title","sessionId":"s","aiTitle":"An \"AI\" title"}'
+      '{"type":"custom-title","customTitle":"Mine","sessionId":"s"}'
+      '{"type":"summary","summary":"What happened","leafUuid":"u"}'
+    )
+    $st.Compacts | Should -Be 1
+    $st.LastCompactTrigger | Should -Be 'auto'
+    $st.LastCompactPreTokens | Should -Be 280717
+    (At $st.CacheCompactAt) | Should -Be (At '2026-11-14T02:15:54.010Z')
+    $st.LastCompactAt.ToUniversalTime() | Should -Be (At '2026-11-14T02:15:54.010Z')
+    $st.AiTitle | Should -BeExactly 'An "AI" title'
+    $st.Title | Should -BeExactly 'Mine'
+    $st.Summary | Should -BeExactly 'What happened'
+    $st.Cwd | Should -BeExactly 'c:\dev\src\ctop'
+  }
+  It 'reads a message that does not start with its model (Claude Code writes diagnostics first on some)' {
+    $line = '{"parentUuid":"p","isSidechain":false,"type":"assistant","uuid":"b3e50dfa-7eef-40f6-a2e6-27256ef30667","timestamp":"2026-11-13T12:00:00.000Z","message":{"diagnostics":null,"id":"msg_1","container":null,"model":"claude-opus-5-5","role":"assistant","type":"message","usage":{"output_tokens_details":null,"input_tokens":3,"output_tokens":5,"cache_creation_input_tokens":200,"cache_read_input_tokens":1000,"server_tool_use":{"web_search_requests":0},"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0}},"content":[{"type":"text","text":"hi"}]},"cwd":"c:\\x","sessionId":"s"}'
+    $st = Scan @($line)
+    $st.Model | Should -Be 'claude-opus-5-5'
+    $st.CacheTtl | Should -Be '1h'
+    $st.RecacheTok | Should -Be 1203
+  }
+}
+
 Describe 'Get-CacheState' {
   It 'is <Kind> <Want> with <Ttl> after <Offset>' -ForEach @(
     @{ Ttl = '1h'; Offset = '00:17:01';    Kind = 'warm'; Want = 43 }
@@ -235,6 +368,35 @@ Describe 'the CACHE column' {
       (GoneRow 'warm1' @{ Kind = 'warm'; Ttl = '1h'; MsLeft = 60000.0; Anchor = $now.AddMinutes(-59) } 4)
     )
     @(Sort-Rows $rows | ForEach-Object { $_._SessionId }) | Should -Be @('warm1', 'warm30', 'cold', 'unknown')
+  }
+  # Sol's R2-F8c (ties.ps1): each row's key read its own clock, so two rows with one deadline got different keys
+  # and swapped places from one frame to the next
+  It 'keeps <Cohort> rows with the same deadline in one order, sort after sort' -ForEach @(@{ Cohort = 'live' }, @{ Cohort = 'gone' }) {
+    $script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx', 'cache')
+    $script:SortMode = 5
+    $now = [datetime]::UtcNow; $anchor = $now.AddMinutes(-30); $gone = $now.AddMinutes(-1)
+    $rows = @(foreach ($id in 'a', 'b') {
+      [pscustomobject]@{ _SessionId = $id; _Gone = $(if ($Cohort -eq 'gone') { $gone } else { $null }); _StartedAt = $now.AddHours(-4); STATE = 'idle'
+                         NAME = $id; PID = '-'; _Parent = $null; _LaunchedBy = $null; _Spawner = ''; _Order = 0; _Depth = 0
+                         _Act = @{ Cost = 0.0; Ctx = '-' }; _AgentCost = 0.0; _Cache = @{ Kind = 'warm'; Ttl = '1h'; Anchor = $anchor; MsLeft = 1800000 } }
+    })
+    $orders = @(for ($i = 0; $i -lt 64; $i++) { $rows = @(Sort-Rows $rows); @($rows | ForEach-Object { $_._SessionId }) -join ',' })
+    @($orders | Select-Object -Unique) | Should -Be @('a,b')
+  }
+  It 'sorts gone sessions in <Mode> by the mode''s key, then most recently gone, then id' -ForEach @(
+    @{ Mode = 'cost'; Want = @('big', 'mid-new', 'mid-old-a', 'mid-old-b', 'zero') }
+    @{ Mode = 'ctx';  Want = @('big', 'mid-new', 'mid-old-a', 'mid-old-b', 'zero') }
+  ) {
+    $script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx', 'cache')
+    $script:SortMode = [array]::IndexOf($script:SortModes, $Mode)
+    $now = Get-Date
+    function GoneRow([string]$id, [double]$v, [int]$goneMin) {
+      [pscustomobject]@{ _SessionId = $id; _Gone = $now.AddMinutes(-$goneMin); _StartedAt = [datetime]'2026-11-13T10:00:00'; STATE = 'gone'
+                         NAME = $id; PID = '-'; _Parent = $null; _LaunchedBy = $null; _Spawner = ''; _Order = 0; _Depth = 0
+                         _Act = @{ Cost = $v; Ctx = $(if ($v) { $v } else { '-' }) }; _AgentCost = 0.0; _Cache = $null }
+    }
+    $rows = @((GoneRow 'zero' 0 1), (GoneRow 'mid-old-b' 2.5 9), (GoneRow 'big' 40 5), (GoneRow 'mid-old-a' 2.5 9), (GoneRow 'mid-new' 2.5 2))
+    @(Sort-Rows $rows | ForEach-Object { $_._SessionId }) | Should -Be $Want
   }
   It 'sorts by the time left now, not when the row was built' {
     $script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx', 'cache')

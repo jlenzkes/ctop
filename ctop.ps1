@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.17 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.18 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.17'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.18'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -680,8 +680,9 @@ $script:PriceFrom = 'the built-in table, read 2026-10-20 (-PricingFile for your 
 # 4: a first prompt needs three letters in a row of any script to be the title, not three ASCII letters
 # 5: the prompt-cache anchor, TTL and compaction (the CACHE column)
 # 6: the cache anchor is the request's time, and synthetic, empty and sidechain calls change nothing
-# 7: a compaction's postTokens (the size of the compacted conversation: RECACHE prices it)
-$script:ScanVer = 7
+# 7: an entry is read from its own fields by its JSON structure, never from look-alikes inside a tool input
+# 8: a compaction's postTokens (the size of the compacted conversation: RECACHE prices it)
+$script:ScanVer = 8
 $script:Pricing = @(
   @{ Match = 'fable-5-1|mythos-5-1'; In = 10;  W5 = 12.5;  W1h = 20;  Read = 0.25; Out = 50 }
   @{ Match = 'fable-5|mythos-5';     In = 10;  W5 = 12.5;  W1h = 20;  Read = 1;    Out = 50 }
@@ -737,15 +738,73 @@ function Get-Price([string]$model, [long]$prompt = 0) {
 
 # ---- incremental transcript scanner ------------------------------------------------
 # Reads only bytes appended since the last scan, so a large busy transcript costs one
-# small read per tick, never a full-file grep. Per line, regex extraction (no JSON parse):
-#   user line without tool_result  -> a prompt (TURNS, TurnStart)
-#   "type":"tool_use" occurrences  -> TOOLS
-#   assistant line with usage      -> tokens + cost, deduped on message id (Claude Code writes
-#                                     one line per content block, each repeating the usage)
+# small read per tick, never a full-file grep. Each line is one entry, read by its structure
+# (Get-JsonRx; no ConvertFrom-Json):
+#   user entry without a tool_result block -> a prompt (TURNS, TurnStart)
+#   tool_use blocks of an assistant entry  -> TOOLS
+#   assistant entry with usage             -> tokens + cost, deduped on message id (Claude Code writes
+#                                             one line per content block, each repeating the usage)
 # Decode a JSON string body captured by regex. Never throws: a malformed escape returns the raw text.
 function Unescape-Json([string]$t) {
   if (-not $t -or $t.IndexOf([char]92) -lt 0) { return $t }   # no backslash, nothing escaped ('\\' would be two)
   try { return (ConvertFrom-Json ('"' + $t + '"')) } catch { return $t }
+}
+# A transcript line is one entry, a JSON object. Its own fields are the members of that object, and of its
+# message, and of that message's usage; a tool's input is a value inside the message, an object that can hold
+# anything ("type":"user", "isSidechain":true, a "usage" or a "compact_boundary" of its own: Sol, 2026-11-13).
+# So a field is read only where it is. Entry matches the line as ONE object, member by member from its start
+# (\G), skipping every value whole (a string by its quotes and escapes, an object or array by balancing its
+# brackets), and captures the wanted members under their own names: the entry's, its message's (model, id,
+# content, usage; each block of the content as an "el" capture), its usage's and that usage's cache_creation's,
+# its compactMetadata's. All in one pass over the line; a member another level holds under the same name is
+# never captured. A key written twice: the last, as JSON.parse takes it. A line that is not one whole object
+# (cut short) matches nothing. Atomic groups: a value is matched once, so a malformed line fails in linear time.
+# A content block is read only up to the member wanted (First: the first member of that name in the object
+# starting at a given place; the block was matched whole already), so a long tool input is not walked again.
+# Kind: what every entry the scan reads holds; a line without it is none of them (Update-Scan reads such a
+# line only for its cwd and branch).
+function Get-JsonRx {
+  if (-not $script:JsonRx) {
+    $str = '"[^"\\]*(?:\\.[^"\\]*)*"'
+    $val = '(?>' + $str + '|[{\[](?>[^{}\[\]"]+|' + $str + '|(?<o>[{\[])|(?<-o>[}\]]))*(?(o)(?!))[}\]]|[-+.\w]+)'
+    # an object's members; $as: a pattern tried first for a wanted member's value, to capture its own members
+    $object = {
+      param([string[]]$keys, [hashtable]$as = @{})
+      $alts = foreach ($k in $keys) {
+        $v = if ($as.ContainsKey($k)) { '(?>' + $as[$k] + '|' + $val + ')' } else { $val }
+        '"' + $k + '"\s*:\s*(?<' + $k + '>' + $v + ')'
+      }
+      # each member once, then a comma or the end: written once, not as m(,m)*, a pattern holding objects inside
+      # objects doesn't double at every level (27,541 characters were 1.4 s to compile on Windows PowerShell 5.1)
+      $m = '(?>' + ((@($alts) + @($str + '\s*:\s*' + $val)) -join '|') + ')'
+      '\{\s*(?>' + $m + '\s*(?:,\s*|(?=\})))*\}'
+    }
+    $writes  = & $object 'ephemeral_1h_input_tokens', 'ephemeral_5m_input_tokens'
+    $usage   = & $object 'input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens', 'cache_creation' @{ cache_creation = $writes }
+    $content = '\[\s*(?>(?<el>' + $val + ')\s*(?:,\s*|(?=\])))*\]'
+    $message = & $object 'model', 'id', 'content', 'usage' @{ content = $content; usage = $usage }
+    $compact = & $object 'trigger', 'preTokens', 'postTokens'
+    $entry   = & $object 'type', 'subtype', 'isSidechain', 'isCompactSummary', 'timestamp', 'cwd', 'gitBranch', 'message', 'aiTitle', 'summary', 'customTitle', 'compactMetadata' @{ message = $message; compactMetadata = $compact }
+    $first = { param([string]$k) [regex]::new('\G\{\s*(?:(?>' + $str + '\s*:\s*' + $val + ')\s*,\s*)*?"' + $k + '"\s*:\s*(?<v>' + $val + ')', 'Compiled') }
+    $script:JsonRx = @{
+      # (a file's first line can start with a byte-order mark: Windows PowerShell 5.1's -Encoding utf8 writes one)
+      Entry = [regex]::new('\G\uFEFF?\s*' + $entry, 'Compiled')
+      Kind  = [regex]::new('"type"\s*:\s*"(?:user|assistant|system|ai-title|summary|custom-title)"', 'Compiled')
+      Type = & $first 'type'; Name = & $first 'name'; Input = & $first 'input'; Summary = & $first 'summary'
+    }
+  }
+  return $script:JsonRx
+}
+# A captured value: the text of a JSON string (unescaped), '' for any other value or none.
+function Get-JsonString($g) {
+  if (-not $g.Success -or $g.Length -lt 2 -or $g.Value[0] -ne [char]34) { return '' }
+  return (Unescape-Json $g.Value.Substring(1, $g.Length - 2))
+}
+# A captured value: a whole number, 0 for any other value or none.
+function Get-JsonLong($g) {
+  $n = 0L
+  if ($g.Success -and [long]::TryParse($g.Value, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$n)) { return $n }
+  return 0L
 }
 
 $script:ScanCache = @{}
@@ -929,154 +988,127 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
     $st.Offset += $lastNl + 1
     $st.Write = $write
     $text = [Text.Encoding]::UTF8.GetString($buf, 0, $lastNl)
-    foreach ($line in $text.Split("`n")) {
-      if ($line.Length -lt 20) { continue }
-      # entry-level fields are in the last few hundred chars of a line: search only there
-      $tailPart = if ($line.Length -gt 2000) { $line.Substring($line.Length - 2000) } else { $line }
-      # Entry-level fields sit AFTER the message body (verified 2026-09-14: ... entrypoint, cwd,
-      # sessionId, version, gitBranch). Anchor on the key adjacency so a "cwd" printed inside tool
-      # output can't be mistaken for the session's location. Newest entry wins, so a session that
-      # moved into a worktree (/cd, EnterWorktree) reports its new location.
-      if ($tailPart -match '"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"sessionId"\s*:') { $st.Cwd = Unescape-Json($Matches[1]) }
-      if ($tailPart -match '"version"\s*:\s*"[^"]*"\s*,\s*"gitBranch"\s*:\s*"((?:[^"\\]|\\.)*)"') { $st.GitBranch = Unescape-Json($Matches[1]) }
-      # Compaction: {"type":"system","subtype":"compact_boundary","compactMetadata":{trigger,preTokens}}
+    $rx = Get-JsonRx
+    $lines = $text.Split("`n")
+    # the newest entry's cwd and branch win (a session that moved into a worktree, by /cd or EnterWorktree,
+    # reports its new location): kept raw and unescaped once at the end (a Windows path has escapes, and
+    # unescaping one on every line was most of a long transcript's scan)
+    $cwdRaw = $null; $cwdAt = -1; $branchRaw = $null; $branchAt = -1
+    for ($li = 0; $li -lt $lines.Length; $li++) {
+      $line = $lines[$li]
+      if ($line.Length -lt 20 -or -not $rx.Kind.IsMatch($line)) { continue }   # none of the kinds read here
+      $e = $rx.Entry.Match($line)
+      if (-not $e.Success) { continue }   # not one whole JSON object (cut short, say): nothing is read from it
+      $g = $e.Groups
+      if ($g['cwd'].Success) { $cwdRaw = $g['cwd']; $cwdAt = $li }
+      if ($g['gitBranch'].Success) { $branchRaw = $g['gitBranch']; $branchAt = $li }
+      $type = $g['type'].Value            # the raw value, quotes included
+      $tg = $g['timestamp']               # read here, not by Get-JsonString: a call per line costs
+      $ts = if ($tg.Length -gt 1 -and $line[$tg.Index] -eq '"') { $tg.Value.Substring(1, $tg.Length - 2) } else { '' }
+      if ($ts.IndexOf([char]92) -ge 0) { $ts = Unescape-Json $ts }
+      # Compaction: {"type":"system","subtype":"compact_boundary","compactMetadata":{trigger,preTokens,postTokens}}
       # followed by a user entry with isCompactSummary:true (the summary that replaces the history)
-      if ($line.Contains('"subtype":"compact_boundary"')) {
+      if ($type -ceq '"system"') {
+        if ($g['subtype'].Value -cne '"compact_boundary"') { continue }
         $st.Compacts++
-        if ($line -match '"timestamp":"([^"]+)"') { try { $st.LastCompactAt = [datetime]$Matches[1] } catch {} }
-        if ($line -match '"trigger":"([^"]+)"') { $st.LastCompactTrigger = $Matches[1] }
-        if ($line -match '"preTokens":(\d+)') { $st.LastCompactPreTokens = [long]$Matches[1] }
-        $st.LastCompactPostTokens = if ($line -match '"postTokens":(\d+)') { [long]$Matches[1] } else { 0 }   # older Claude Code: not written
-        $cts = Get-EntryTimestamp $tailPart
-        if ($cts) { $st.CacheCompactAt = $cts }
+        if ($ts) { try { $st.LastCompactAt = [datetime]$ts } catch {}; $st.CacheCompactAt = $ts }
+        if ($g['trigger'].Success) { $st.LastCompactTrigger = Get-JsonString $g['trigger'] }
+        if ($g['preTokens'].Success) { $st.LastCompactPreTokens = Get-JsonLong $g['preTokens'] }
+        $st.LastCompactPostTokens = if ($g['postTokens'].Success) { Get-JsonLong $g['postTokens'] } else { 0 }   # older Claude Code: not written
         continue
       }
-      if ($line.Contains('"type":"ai-title"')) {
-        # the VS Code picker's name: {"type":"ai-title","sessionId":"...","aiTitle":"..."}  (verified 2026-09-09)
-        if ($line -match '"aiTitle":"((?:[^"\\]|\\.)*)"') { $st.AiTitle = Unescape-Json($Matches[1]) }
-        continue
-      }
-      if ($line.Contains('"type":"summary"')) {
-        if ($line -match '"summary":"((?:[^"\\]|\\.)*)"') { $st.Summary = Unescape-Json($Matches[1]) }
-        continue
-      }
-      if ($line.Contains('"type":"custom-title"')) {
-        if ($line -match '"customTitle":"((?:[^"\\]|\\.)*)"') { $st.Title = Unescape-Json($Matches[1]) }
-        continue
-      }
-      # The entry's own shape, read where Claude Code writes it rather than anywhere in the line: a tool's
-      # input is an object inside the line and can hold "type":"user", "isSidechain":true, a "model" or a
-      # "usage" of its own (Sol, 2026-11-13). The message's first key says whose it is (an assistant's
-      # starts with its model, a user's with its role); isSidechain is among the scalars before it.
-      $shape = Get-EntryShape $line
-      $side = if ($null -ne $shape.Side) { $shape.Side } else { $line.Contains('"isSidechain":true') }
-      if ($line.Contains('"type":"user"') -and $shape.Kind -ne 'assistant') {
+      # the VS Code picker's name: {"type":"ai-title","sessionId":"...","aiTitle":"..."}  (verified 2026-09-09)
+      if ($type -ceq '"ai-title"') { if ($g['aiTitle'].Success) { $st.AiTitle = Get-JsonString $g['aiTitle'] }; continue }
+      if ($type -ceq '"summary"') { if ($g['summary'].Success) { $st.Summary = Get-JsonString $g['summary'] }; continue }
+      if ($type -ceq '"custom-title"') { if ($g['customTitle'].Success) { $st.Title = Get-JsonString $g['customTitle'] }; continue }
+      $isUser = $type -ceq '"user"'
+      if (-not $isUser -and $type -cne '"assistant"') { continue }
+      $side = $g['isSidechain'].Value -ceq 'true'
+      # the message's content blocks (none unless the message is an object and its content an array)
+      $blocks = $g['el'].Captures
+      if ($isUser) {
         # the prompt cache's request time, as the extension keeps it: the latest main-thread user entry
         # (a prompt, a tool result, a compact summary) since the last recorded call
         if ($isSub -or -not $side) {
-          $uts = Get-LineTimestamp $line $tailPart; $ut = ConvertFrom-CacheTime $uts
-          if ($ut -and -not ($st.CacheReqAt -and (ConvertFrom-CacheTime $st.CacheReqAt) -ge $ut)) { $st.CacheReqAt = $uts }
+          $ut = ConvertFrom-CacheTime $ts
+          if ($ut -and -not ($st.CacheReqAt -and (ConvertFrom-CacheTime $st.CacheReqAt) -ge $ut)) { $st.CacheReqAt = $ts }
         }
-        if ($line.Contains('"isCompactSummary":true')) { continue }   # machine-written summary, not a human turn
-        # a tool_result content block, not the word: a prompt may well mention "tool_result" (inside a
-        # JSON string its quotes are escaped, so this pattern only matches the structure)
-        if (-not $line.Contains('"type":"tool_result"')) {
-          $st.Turns++
-          if (-not $st.First -and $line -match '"content":"((?:[^"\\]|\\.)*)"') {
-            $f = ((Unescape-Json($Matches[1]) -replace '<[^>]+>', '') -replace '\s+', ' ').Trim()
-            # only accept something that reads like a human prompt
-            if ($f.Length -ge 4 -and $f -notmatch '^[\[<{]' -and $f -notmatch 'toolu_|hook feedback|^Caveat:|^This session is being continued|^Another Claude session|^\[Request interrupted' -and $f -match '\p{L}{3}') { $st.First = $f }   # three letters in a row, any script ([a-zA-Z] left Hebrew, Chinese, Russian... untitled; marks between letters, as in Hindi, still break the run)
-          }
-          if ($line -match '"timestamp":"([^"]+)"') { try { $st.TurnStart = [datetime]$Matches[1] } catch {} }
+        if ($g['isCompactSummary'].Value -ceq 'true') { continue }   # machine-written summary, not a human turn
+        # a tool_result content block, not the word: a prompt may well mention tool_result
+        $isResult = $false
+        foreach ($b in $blocks) { if ($line[$b.Index] -eq '{' -and $rx.Type.Match($line, $b.Index).Groups['v'].Value -ceq '"tool_result"') { $isResult = $true; break } }
+        if ($isResult) { continue }
+        $st.Turns++
+        $content = $g['content']
+        if (-not $st.First -and $content.Success -and $line[$content.Index] -eq '"') {
+          # Tags are kept, so a prompt that starts with one (a slash command, a task notification, a caveat) is not
+          # the title. Builds before 2026.11.13.14 read as if they stripped tags first, but that -replace went to
+          # Unescape-Json as an argument and did nothing; stripping them would retitle most sessions "/model ...".
+          $f = ((Get-JsonString $content) -replace '\s+', ' ').Trim()
+          # only accept something that reads like a human prompt
+          if ($f.Length -ge 4 -and $f -notmatch '^[\[<{]' -and $f -notmatch 'toolu_|hook feedback|^Caveat:|^This session is being continued|^Another Claude session|^\[Request interrupted' -and $f -match '\p{L}{3}') { $st.First = $f }   # three letters in a row, any script ([a-zA-Z] left Hebrew, Chinese, Russian... untitled; marks between letters, as in Hindi, still break the run)
         }
-      } elseif ($line.Contains('"type":"assistant"') -or $shape.Kind -eq 'assistant') {
-        $st.Tools += ([regex]::Matches($line, '"type":"tool_use"')).Count
-        # tool_use blocks are {"type":"tool_use","id":..,"name":"Bash","input":{..}} — name precedes input
-        foreach ($m in [regex]::Matches($line, '"name":"([^"]+)","input":\{')) { $n = $m.Groups[1].Value; $st.ToolCounts[$n] = 1 + [int]$st.ToolCounts[$n] }
+        if ($ts) { try { $st.TurnStart = [datetime]$ts } catch {} }
+        continue
+      }
+      # an assistant entry: its tool calls are the tool_use blocks of its message
+      foreach ($b in $blocks) {
+        if ($line[$b.Index] -ne '{' -or $rx.Type.Match($line, $b.Index).Groups['v'].Value -cne '"tool_use"') { continue }
+        $st.Tools++
+        $n = Get-JsonString $rx.Name.Match($line, $b.Index).Groups['v']
+        if (-not $n) { continue }
+        $st.ToolCounts[$n] = 1 + [int]$st.ToolCounts[$n]
         # when this agent made each Bash / PowerShell call: used to tell which agent a running job belongs to
-        if ($line.Contains('"name":"Bash"') -or $line.Contains('"name":"PowerShell"')) {
-          $ts = if ($tailPart -match '"timestamp":"([^"]+)"') { $Matches[1] } elseif ($line -match '"timestamp":"([^"]+)"') { $Matches[1] } else { $null }
-          if ($ts) {
-            foreach ($m in [regex]::Matches($line, '"name":"(Bash|PowerShell)","input":\{')) {
-              $st.ToolLog = @(@($st.ToolLog) + @(@{ Tool = $m.Groups[1].Value; At = $ts }) | Select-Object -Last 40)
-            }
-          }
-        }
+        if (($n -ceq 'Bash' -or $n -ceq 'PowerShell') -and $ts) { $st.ToolLog = @(@($st.ToolLog) + @(@{ Tool = $n; At = $ts }) | Select-Object -Last 40) }
         # The VS Code picker titles an otherwise-untitled session by the "summary" of its FIRST
         # outbound SendMessage, and keeps it when later messages are sent (verified 2026-09-14 against
         # sessions that sent a re-verdict: the picker kept the original). First wins.
-        if (-not $st.MsgSummary -and $line -match '"name":"SendMessage","input":\{[^}]*?"summary":"((?:[^"\\]|\\.)*)"') { $st.MsgSummary = Unescape-Json($Matches[1]) }
-        $model = if ($shape.Model) { $shape.Model } elseif ($line -match '"model":"([^"]+)"') { $Matches[1] } else { '' }
-        if ($model -and $model -ne '<synthetic>') { $st.Model = $model }
-        # the message's usage comes after its content (tool inputs included): the last one in the line
-        $ua = $line.LastIndexOf('"usage":{')
-        if ($ua -ge 0) {
-          $us = $line.Substring($ua)
-          $id = if ($line -match '"id":"(msg_[^"]+)"') { $Matches[1] } else { '' }
-          $in  = if ($us -match '"input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $out = if ($us -match '"output_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $cr  = if ($us -match '"cache_read_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $cw  = if ($us -match '"cache_creation_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $cw1h = if ($us -match '"ephemeral_1h_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          $cw5m = if ($us -match '"ephemeral_5m_input_tokens":(\d+)') { [long]$Matches[1] } else { 0 }
-          # the extension records no cache frame for a synthetic entry (an API error, a session limit, an
-          # interrupt) or a sidechain one in the main thread; Update-CacheAnchor drops a call with no tokens
-          if ($model -ne '<synthetic>' -and ($isSub -or -not $side)) {
-            Update-CacheAnchor $st (Get-EntryTimestamp $tailPart) $id $in $cr $cw $cw1h $cw5m
-          }
-          $cw5 = [math]::Max(0, $cw - $cw1h)
-          $price = Get-Price $st.Model ($in + $cr + $cw)
-          $c = if ($price) { ($in * $price.In + $out * $price.Out + $cr * $price.Read + $cw5 * $price.W5 + $cw1h * $price.W1h) / 1e6 } else { 0.0 }
-          if ($id -and $id -eq $st.LastId) {
-            # same message: replace, don't add (later lines carry the final output_tokens)
-            $st.Cost -= $st.LastCost; $st.OutTok -= $st.LastOut
-          } else {
-            $st.InTok += $in; $st.CacheR += $cr; $st.CacheW += $cw
-          }
-          $st.Cost += $c; $st.OutTok += $out; $st.LastId = $id; $st.LastCost = $c; $st.LastOut = $out
+        if ($n -ceq 'SendMessage' -and -not $st.MsgSummary) {
+          $inp = $rx.Input.Match($line, $b.Index).Groups['v']
+          if ($inp.Success -and $line[$inp.Index] -eq '{') { $st.MsgSummary = Get-JsonString $rx.Summary.Match($line, $inp.Index).Groups['v'] }
         }
       }
+      $model = Get-JsonString $g['model']
+      if ($model -and $model -ne '<synthetic>') { $st.Model = $model }
+      if (-not ($g['usage'].Success -and $line[$g['usage'].Index] -eq '{')) { continue }   # no usage object
+      $id = Get-JsonString $g['id']
+      $in  = Get-JsonLong $g['input_tokens']
+      $out = Get-JsonLong $g['output_tokens']
+      $cr  = Get-JsonLong $g['cache_read_input_tokens']
+      $cw  = Get-JsonLong $g['cache_creation_input_tokens']
+      $cw1h = Get-JsonLong $g['ephemeral_1h_input_tokens']
+      $cw5m = Get-JsonLong $g['ephemeral_5m_input_tokens']
+      # the extension records no cache frame for a synthetic entry (an API error, a session limit, an
+      # interrupt) or a sidechain one in the main thread; Update-CacheAnchor drops a call with no tokens
+      if ($model -ne '<synthetic>' -and ($isSub -or -not $side)) {
+        Update-CacheAnchor $st $ts $id $in $cr $cw $cw1h $cw5m
+      }
+      $cw5 = [math]::Max(0, $cw - $cw1h)
+      $price = Get-Price $st.Model ($in + $cr + $cw)
+      $c = if ($price) { ($in * $price.In + $out * $price.Out + $cr * $price.Read + $cw5 * $price.W5 + $cw1h * $price.W1h) / 1e6 } else { 0.0 }
+      if ($id -and $id -eq $st.LastId) {
+        # same message: replace, don't add (later lines carry the final output_tokens)
+        $st.Cost -= $st.LastCost; $st.OutTok -= $st.LastOut
+      } else {
+        $st.InTok += $in; $st.CacheR += $cr; $st.CacheW += $cw
+      }
+      $st.Cost += $c; $st.OutTok += $out; $st.LastId = $id; $st.LastCost = $c; $st.LastOut = $out
     }
+    # a line of another kind can be the newest with a cwd or a branch: look back over those after the last read one
+    for ($li = $lines.Length - 1; $li -gt $cwdAt -or $li -gt $branchAt; $li--) {
+      $line = $lines[$li]
+      if ($line.Length -lt 20 -or $rx.Kind.IsMatch($line)) { continue }   # too short, or read above
+      $e = $rx.Entry.Match($line)
+      if (-not $e.Success) { continue }
+      if ($li -gt $cwdAt -and $e.Groups['cwd'].Success) { $cwdRaw = $e.Groups['cwd']; $cwdAt = $li }
+      if ($li -gt $branchAt -and $e.Groups['gitBranch'].Success) { $branchRaw = $e.Groups['gitBranch']; $branchAt = $li }
+    }
+    if ($null -ne $cwdRaw) { $st.Cwd = Get-JsonString $cwdRaw }
+    if ($null -ne $branchRaw) { $st.GitBranch = Get-JsonString $branchRaw }
   } catch {} finally { if ($fs) { $fs.Dispose() } }
   return $st
 }
 
-# A USER entry's own timestamp, anywhere in the line: on a tool result a large toolUseResult object follows
-# it, pushing it out of the last 2000 characters (seen 2026-11-13: 7.5 KB lines). The first uuid-then-timestamp
-# pair is the entry's: a user message's content (prompt text, tool_result strings and text blocks) holds no
-# unescaped object before it. Not for assistant lines, whose tool_use inputs are objects that can hold such
-# a pair before the entry's own: Get-EntryTimestamp reads those (their entry-level fields are short).
-# Kind: 'assistant' or 'user' from the message's first key, '' when the line has another shape. Side: the
-# entry's isSidechain from the scalar fields before its message, $null when not found there. Model: the
-# assistant message's model (its first key), '' otherwise.
-function Get-EntryShape([string]$line) {
-  $shape = @{ Kind = ''; Side = $null; Model = '' }
-  $at = $line.IndexOf('"message":{"')
-  if ($at -ge 0) {
-    if ([string]::CompareOrdinal($line, $at + 12, 'role":"user"', 0, 12) -eq 0) { $shape.Kind = 'user' }
-    elseif ([string]::CompareOrdinal($line, $at + 12, 'model":"', 0, 8) -eq 0) {
-      $shape.Kind = 'assistant'
-      $end = $line.IndexOf('"', $at + 20)
-      if ($end -gt $at + 20) { $shape.Model = $line.Substring($at + 20, $end - $at - 20) }
-    }
-  }
-  if (-not $script:EntryHeadRx) { $script:EntryHeadRx = [regex]::new('^\{(?:"[A-Za-z_]+":(?:null|true|false|-?\d+|"(?:[^"\\]|\\.)*"),)*?"isSidechain":(true|false)', 'Compiled') }
-  $m = $script:EntryHeadRx.Match($line)
-  if ($m.Success) { $shape.Side = $m.Groups[1].Value -eq 'true' }
-  return $shape
-}
-function Get-LineTimestamp([string]$line, [string]$tail) {
-  if (-not $script:EntryTsRx) { $script:EntryTsRx = [regex]::new('"uuid":"[0-9a-fA-F-]{36}","timestamp":"([^"]+)"', 'Compiled') }
-  $m = $script:EntryTsRx.Match($line)
-  if ($m.Success) { return $m.Groups[1].Value }
-  return Get-EntryTimestamp $tail
-}
-# The entry's own timestamp: the last one in the line's tail (entry-level fields follow the message body).
-function Get-EntryTimestamp([string]$tail) {
-  $ms = [regex]::Matches($tail, '"timestamp":"([^"]+)"')
-  if ($ms.Count) { return $ms[$ms.Count - 1].Groups[1].Value }
-  return ''
-}
 # The prompt cache, by the rule of the Claude Code extension for VS Code (anthropic.claude-code-2.1.323,
 # webview/index.js, read 2026-11-13): anchored on the last model call (lines of one message keep the first
 # one's time); 1h or 5m from that call's cache writes, the previous TTL when it only read the cache, unknown
@@ -3415,18 +3447,24 @@ function Sort-Rows([object[]]$rows) {
     foreach ($n in '_Group', '_TreeCost', '_LaunchCost', '_LaunchN', '_Launcher', '_LaunchedNames', '_TreeLast') { if (-not $r.PSObject.Properties[$n]) { $r.PSObject.Properties.Add([psnoteproperty]::new($n, $null)) } }
   }
   $mode = $script:SortModes[$script:SortMode]
+  # one clock reading for the whole sort: rows with the same cache deadline get the same key, and the tiebreaks
+  # decide between them (a reading per row gave them different keys, so they swapped places from frame to
+  # frame: Sol, 2026-11-13)
+  $nowUtc = [datetime]::UtcNow
+  # the mode's key of each row given, in order (one call for many rows: a call per row was most of a long
+  # history's sort)
   $key = switch ($mode) {
-    'activity' { { param($r) if ($r._Gone) { 3 } elseif ($r.STATE -like 'waiting*') { 0 } elseif ($r.STATE -in 'working','thinking' -or $r.STATE -like 'awaiting*' -or $r.STATE -eq 'polling') { 1 } elseif ($r.STATE -eq 'idle') { 2 } else { 2 } } }
-    'roster'   { { param($r) [int]$r._Order } }   # exactly as claude agents --json lists them
-    'start'    { { param($r) 0 } }
-    'cost'     { { param($r) -[double]$r._Act.Cost } }
-    'ctx'      { { param($r) if ($r._Act.Ctx -ne '-') { -[double]$r._Act.Ctx } else { 0 } } }
-    'cache'    { { param($r) $c = $r._Cache
+    'activity' { { param($rs) foreach ($r in $rs) { if ($r._Gone) { 3 } elseif ($r.STATE -like 'waiting*') { 0 } elseif ($r.STATE -in 'working','thinking' -or $r.STATE -like 'awaiting*' -or $r.STATE -eq 'polling') { 1 } elseif ($r.STATE -eq 'idle') { 2 } else { 2 } } } }
+    'roster'   { { param($rs) foreach ($r in $rs) { [int]$r._Order } } }   # exactly as claude agents --json lists them
+    'start'    { { param($rs) foreach ($r in $rs) { 0 } } }
+    'cost'     { { param($rs) foreach ($r in $rs) { -[double]$r._Act.Cost } } }
+    'ctx'      { { param($rs) foreach ($r in $rs) { if ($r._Act.Ctx -ne '-') { -[double]$r._Act.Ctx } else { 0 } } } }
+    'cache'    { { param($rs) foreach ($r in $rs) { $c = $r._Cache
                    # from the anchor, not MsLeft: a row off screen keeps the _Cache it was last drawn with
                    if ($c -and $c.Anchor -and $c.Ttl) {
-                     $left = ($c.Anchor.AddMilliseconds($(if ($c.Ttl -eq '1h') { 3600000 } else { 300000 })) - [datetime]::UtcNow).TotalMilliseconds
+                     $left = ($c.Anchor.AddMilliseconds($(if ($c.Ttl -eq '1h') { 3600000 } else { 300000 })) - $nowUtc).TotalMilliseconds
                      if ($left -gt 0) { $left } else { 1e12 }
-                   } elseif ($c -and $c.Kind -eq 'warm') { [double]$c.MsLeft } elseif ($c -and $c.Kind -eq 'cold') { 1e12 } else { 2e12 } } }   # soonest cold first
+                   } elseif ($c -and $c.Kind -eq 'warm') { [double]$c.MsLeft } elseif ($c -and $c.Kind -eq 'cold') { 1e12 } else { 2e12 } } } }   # soonest cold first
   }
   # Sessions launched by another listed session's job (a script running claude -p, say) are drawn
   # under that session, after its own subagents. They stay sessions: own row, own subagents.
@@ -3446,9 +3484,10 @@ function Sort-Rows([object[]]$rows) {
     if ($lr) { $lr._LaunchedNames = @($launchKids[$id] | ForEach-Object { ([string]$_.NAME).Trim() }) -join ', ' }
   }
   # Live sessions sort on the mode's key. Gone ones always follow them, most recently gone first (ties,
-  # which one poll's departures share: session id), or on the mode's key in cost / ctx / cache. Gone rows get a
-  # .NET sort on a string key: Sort-Object with script-block keys was most of the sort time with a long
-  # history.
+  # which one poll's departures share: session id); in cost / ctx / cache, on the mode's key first, then those. Gone
+  # rows get a .NET sort on a string key, the mode's key computed once per row: Sort-Object with script-block
+  # keys was most of the sort time with a long history (in cache mode, 52 -> 88 ms a frame at 1,000 gone rows:
+  # Sol, 2026-11-13).
   $liveP = [System.Collections.Generic.List[object]]::new(); $goneP = [System.Collections.Generic.List[object]]::new()
   foreach ($r in $rows) {
     if ($r._Parent -or $isLaunched.ContainsKey($r._SessionId)) { continue }
@@ -3457,12 +3496,21 @@ function Sort-Rows([object[]]$rows) {
   $parents = @($liveP | Sort-Object @{ e = { & $key $_ } },
                                     @{ e = { if ($_._StartedAt) { $_._StartedAt.Ticks } else { [long]::MaxValue } } },
                                     @{ e = { $_._SessionId } })
-  if ($mode -in 'cost', 'ctx', 'cache') {
-    $parents += @($goneP | Sort-Object @{ e = { & $key $_ } }, @{ e = { -([datetime]$_._Gone).Ticks } }, @{ e = { $_._SessionId } })
-  } elseif ($goneP.Count) {
+  if ($goneP.Count) {
     $gone = $goneP.ToArray(); $gk = [string[]]::new($gone.Count)
     $max = [datetime]::MaxValue.Ticks
-    for ($i = 0; $i -lt $gone.Count; $i++) { $gk[$i] = '{0:D19}|{1}' -f ($max - ([datetime]$gone[$i]._Gone).Ticks), $gone[$i]._SessionId }
+    $byKey = $mode -in 'cost', 'ctx', 'cache'
+    $gks = if ($byKey) { @(& $key $gone) }
+    for ($i = 0; $i -lt $gone.Count; $i++) {
+      $pre = ''
+      if ($byKey) {
+        # the mode's key as text that sorts as the number does: the double's bits, the sign bit flipped for
+        # 0 and up and every bit for below 0 (+ 0.0 turns -0 into 0, which it equals)
+        $b = [BitConverter]::DoubleToInt64Bits([double]$gks[$i] + 0.0)
+        $pre = '{0:X16}|' -f $(if ($b -lt 0) { -bnot $b } else { $b -bor [long]::MinValue })
+      }
+      $gk[$i] = $pre + ('{0:D19}|{1}' -f ($max - ([datetime]$gone[$i]._Gone).Ticks), $gone[$i]._SessionId)
+    }
     [Array]::Sort([Array]$gk, [Array]$gone, [Collections.IComparer][StringComparer]::Ordinal)   # in place; see Get-KeptDeparted
     $parents += $gone
   }
