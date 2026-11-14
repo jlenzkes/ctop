@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.2 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.4 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.2'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.4'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -597,7 +597,7 @@ function Get-Spawner([System.IO.FileInfo]$sf, $meta, [object[]]$siblings) {
   if ($meta -and $meta.toolUseId -and [int]$meta.spawnDepth -ge 2) {   # fallback: find the Agent call by id
     foreach ($o in $siblings) {
       if ($o.FullName -ceq $k) { continue }
-      if (Select-String -LiteralPath $o.FullName -Pattern ([regex]::Escape('"id":"' + $meta.toolUseId + '"')) -Quiet) { $result = 'sub:' + $o.FullName; break }
+      if (Test-SharedContains $o.FullName ('"id":"' + $meta.toolUseId + '"')) { $result = 'sub:' + $o.FullName; break }
     }
   }
   if ($meta) { $script:SpawnerCache[$k] = $result }   # no meta yet = undecided, ask again next time
@@ -766,8 +766,24 @@ function ConvertTo-Hashtable($o) {
   if ($o -is [System.Collections.IList]) { return ,@(foreach ($x in $o) { ConvertTo-Hashtable $x }) }
   return $o
 }
+# What a killed save leaves beside the cache: ctop-scancache.json.<pid>.tmp (a whole new cache never moved into
+# place), and ctop-scancache.json~RF*.TMP from build 2026.11.13.2, which saved through File.Replace. A .tmp whose
+# ctop is still running may be mid-save, so only those of a process that is gone, or older than a day, go.
+function Remove-StaleCacheTemps {
+  try {
+    $dir = Split-Path -Parent $script:ScanCachePath; $name = Split-Path -Leaf $script:ScanCachePath
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter "$name*" -File -ErrorAction SilentlyContinue)) {
+      if ($f.Name -match ('^' + [regex]::Escape($name) + '\.(\d+)\.tmp$')) {
+        $alive = [int]$Matches[1] -ne $PID -and (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)
+        if ($alive -and $f.LastWriteTimeUtc -gt [datetime]::UtcNow.AddDays(-1)) { continue }
+      } elseif ($f.Name -notmatch ('^' + [regex]::Escape($name) + '~RF[0-9a-fA-F]+\.TMP$')) { continue }
+      Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+    }
+  } catch {}
+}
 function Load-ScanCache {
   try {
+    Remove-StaleCacheTemps
     if (-not (Test-Path -LiteralPath $script:ScanCachePath)) { return }
     $raw = Get-Content -LiteralPath $script:ScanCachePath -Raw -Encoding UTF8
     $h = if ($PSVersionTable.PSVersion.Major -ge 6) { $raw | ConvertFrom-Json -AsHashtable } else { ConvertTo-Hashtable ($raw | ConvertFrom-Json) }
@@ -788,21 +804,43 @@ function Save-ScanCache {
     $cut = (Get-Date).ToUniversalTime().AddDays(-$script:CacheDays).Ticks
     $keep = @{}
     foreach ($k in @($script:ScanCache.Keys)) { $e = $script:ScanCache[$k]; if ($e.Path -and $e.Used -and [long]$e.Used -ge $cut) { $keep[$k] = $e } }
-    # written beside the cache and then renamed over it, so a kill or a crash mid-write leaves the old cache
-    # whole rather than a truncated one (which Load-ScanCache would drop entirely, rescanning everything)
+    # written beside the cache and then renamed over it in one step, so a kill or a crash mid-save leaves the
+    # old cache or the new one, whole (a truncated one Load-ScanCache would drop, rescanning everything).
+    # Not File.Replace: that is several steps, and a kill between them left no cache at all (seen in 3 of
+    # 130 kills, 2026-11-13).
     $tmp = "$($script:ScanCachePath).$PID.tmp"
     try {
       $keep | ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $tmp -Encoding UTF8 -ErrorAction Stop
-      if (Test-Path -LiteralPath $script:ScanCachePath) { [IO.File]::Replace($tmp, $script:ScanCachePath, [NullString]::Value) }
-      else { [IO.File]::Move($tmp, $script:ScanCachePath) }
+      Move-Over $tmp $script:ScanCachePath
     } finally { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }
   } catch {}
+}
+# Renames $src over $dst in one step, replacing it: rename(2) on Linux and macOS, MoveFileEx with
+# MOVEFILE_REPLACE_EXISTING on Windows. .NET Framework (Windows PowerShell 5.1) has no File.Move overload
+# that replaces, so there it calls MoveFileEx itself, from the console helper ctop compiles once (CtopCon).
+# Throws when the rename fails (on Windows, for one, while another program has $dst open).
+function Move-Over([string]$src, [string]$dst) {
+  if ([IO.File].GetMethod('Move', [type[]]@([string], [string], [bool]))) { [IO.File]::Move($src, $dst, $true); return }
+  if (-not (Import-ConType)) {   # no compiler here (or not Windows): File.Replace, several steps, beats no save
+    if (Test-Path -LiteralPath $dst) { [IO.File]::Replace($src, $dst, [NullString]::Value) } else { [IO.File]::Move($src, $dst) }
+    return
+  }
+  if (-not [CtopCon.Fs]::MoveOver($src, $dst)) { throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
 }
 # Files other programs write, rename and delete (transcripts, session files, chat files, git's HEAD) are
 # opened sharing Read, Write AND Delete: without Delete, a rename or delete by Claude Code, VS Code or git
 # fails for as long as ctop holds the file (Windows; from cxtop, which opens every file this way).
 function Open-Shared([string]$path) {
   [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+}
+# Whether a line of the file holds $needle (ordinal), read line by line through Open-Shared.
+function Test-SharedContains([string]$path, [string]$needle) {
+  $fs = Open-Shared $path
+  try {
+    $sr = [IO.StreamReader]::new($fs)
+    while ($null -ne ($line = $sr.ReadLine())) { if ($line.Contains($needle)) { return $true } }
+    return $false
+  } finally { $fs.Dispose() }
 }
 function Read-SharedText([string]$path, [switch]$FirstLine) {
   $fs = Open-Shared $path
@@ -4043,6 +4081,11 @@ namespace CtopCon {
   [StructLayout(LayoutKind.Sequential)] public struct MOUSE_EVENT_RECORD { public short X; public short Y; public uint dwButtonState; public uint dwControlKeyState; public uint dwEventFlags; }
   [StructLayout(LayoutKind.Explicit)] public struct INPUT_RECORD { [FieldOffset(0)] public ushort EventType; [FieldOffset(4)] public KEY_EVENT_RECORD Key; [FieldOffset(4)] public MOUSE_EVENT_RECORD Mouse; }
   public class Ev { public int Kind; public ushort Vk; public char Ch; public uint Ctrl; public int Repeat; public int X; public int Y; public uint Buttons; public uint Flags; }
+  public static class Fs {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "MoveFileExW")] static extern bool MoveFileEx(string src, string dst, uint flags);
+    // MOVEFILE_REPLACE_EXISTING 0x1 | MOVEFILE_WRITE_THROUGH 0x8
+    public static bool MoveOver(string src, string dst) { return MoveFileEx(src, dst, 0x9u); }
+  }
   public static class Con {
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr GetStdHandle(int n);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetConsoleMode(IntPtr h, out uint m);
@@ -4088,17 +4131,28 @@ namespace CtopCon {
   }
 }
 '@
+# Loads CtopCon (Windows only); $true when it is loaded. Compiled once to a DLL beside the caches: compiling
+# on every start would cost ~1 s. Named by a hash of the source (String.GetHashCode is randomized per process
+# in .NET Core); DLLs from other versions of the source are deleted (one still loaded by a running ctop stays).
+function Import-ConType {
+  if ('CtopCon.Con' -as [type]) { return $true }
+  if (-not ($IsWindows -or $env:OS -eq 'Windows_NT')) { return $false }
+  try {
+    $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:ConSrc)), 0, 4) -replace '-'
+    $dll = Join-Path $ConfigDir "ctop-con-$h.dll"
+    if (-not (Test-Path -LiteralPath $dll)) {
+      Add-Type -TypeDefinition $script:ConSrc -OutputAssembly $dll -OutputType Library -ErrorAction Stop
+      Get-ChildItem -LiteralPath $ConfigDir -Filter 'ctop-con-*.dll' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -ne $dll } | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+    Add-Type -Path $dll -ErrorAction Stop
+    return $true
+  } catch { return $false }
+}
 function Enable-Mouse {
   if ($NoMouse -or -not ($IsWindows -or $env:OS -eq 'Windows_NT')) { return }
   try {
-    if (-not ('CtopCon.Con' -as [type])) {
-      # compiled once to a DLL beside the caches: compiling on every start would cost ~1 s
-      # named by a hash of the source (String.GetHashCode is randomized per process in .NET Core)
-      $h = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:ConSrc)), 0, 4) -replace '-'
-      $dll = Join-Path $ConfigDir "ctop-con-$h.dll"
-      if (-not (Test-Path -LiteralPath $dll)) { Add-Type -TypeDefinition $script:ConSrc -OutputAssembly $dll -OutputType Library -ErrorAction Stop }
-      Add-Type -Path $dll -ErrorAction Stop
-    }
+    if (-not (Import-ConType)) { $script:Mouse = $false; return }
     $old = [CtopCon.Con]::Enable()
     if ($old -ge 0) { $script:ConModeOld = $old; $script:Mouse = $true }
   } catch { $script:Mouse = $false }

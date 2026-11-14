@@ -63,6 +63,11 @@ Describe 'Apply-Key with Alt or Ctrl held' {
     Apply-Key $v (Chord ([char]0) DownArrow $true $false) $packet | Out-Null
     $v.SelectedId | Should -Be 'b'
   }
+  It 'does not quit on Ctrl+Alt+q reported with its letter (AltGr text is never a letter command)' {
+    $v = View
+    Apply-Key $v (Chord 'q' Q $true $true) $packet | Should -BeNullOrEmpty
+    $v.Rev | Should -Be 0
+  }
   It 'takes AltGr text as the character it types (AltGr+9 is ] on a German keyboard)' {
     $v = View
     Apply-Key $v (Chord ']' D9 $true $true) $packet | Should -BeNullOrEmpty

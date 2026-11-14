@@ -2,6 +2,24 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.4 — a review of 2026.11.13.1–.2
+
+- the scan cache is now renamed over the old one in one step (`File.Move` with overwrite; on Windows
+  PowerShell 5.1, `MoveFileEx` through ctop's compiled console helper). 2026.11.13.2 used `File.Replace`,
+  which is several steps: in a test that killed ctop mid-save, 3 of 130 kills left no cache at all. With
+  one rename, 80 kills left none missing and none unreadable (timing-dependent, so evidence, not proof).
+  When the helper can't be compiled, `File.Replace` is still used rather than no save
+- the files a killed save leaves beside the cache (`ctop-scancache.json.<pid>.tmp` of a ctop no longer
+  running, and `~RF….TMP` from 2026.11.13.2) are deleted at the start; so are the compiled helper DLLs of
+  earlier builds (`ctop-con-*.dll`) when a new one is compiled
+- finding which agent spawned a nested subagent (when Claude Code wrote no `parentAgentId`) read the other
+  subagent transcripts with `Select-String`, which doesn't share delete; it now reads them through the
+  same shared open, line by line
+- 2026.11.13.2's "rename over it" holds for `File.Replace`, Node's `fs.rename` (Claude Code, VS Code,
+  Cline) and git (measured). A rename with `MoveFileEx` and replace-existing (.NET `File.Move` with
+  overwrite, Python `os.replace`) is still refused while ctop holds the file: Windows refuses that over any
+  open file, whatever it shares
+
 ## 2026.11.13.2 — more from cxtop
 
 - the files ctop reads are opened so that their owners can still rename or delete them meanwhile:
