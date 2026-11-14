@@ -18,9 +18,9 @@ Describe 'files other programs write are opened sharing delete' {
     } finally { $fs.Dispose() }
     Test-Path -LiteralPath $script:f | Should -BeFalse
   }
-  # ReplaceFile (File.Replace), Node's fs.rename and git succeed against a file held this way (measured
-  # 2026-11-13). MoveFileEx with REPLACE_EXISTING (.NET File.Move overwrite, Python os.replace) does not:
-  # Windows refuses that rename over any open file, whatever it shares.
+  # ReplaceFile (File.Replace) and git succeed against a file held this way (measured 2026-11-13). Node's
+  # fs.rename (EPERM) and MoveFileEx with REPLACE_EXISTING (.NET File.Move overwrite, Python os.replace) do
+  # not: Windows refuses those over any open file, whatever it shares.
   It 'lets another program rename a file over one ctop holds open (as git does with HEAD)' {
     $new = "$($script:f).lock"; [IO.File]::WriteAllText($new, 'ref: refs/heads/other')
     $fs = Open-Shared $script:f
@@ -37,9 +37,13 @@ Describe 'files other programs write are opened sharing delete' {
     Test-SharedContains $script:f 'heads/main' | Should -BeTrue
     Test-SharedContains $script:f 'heads/other' | Should -BeFalse
   }
+  It 'finds nothing in a file that is gone, rather than throwing (Get-Spawner has no catch)' {
+    { Test-SharedContains (Join-Path $TestDrive 'gone.jsonl') 'x' } | Should -Not -Throw
+    Test-SharedContains (Join-Path $TestDrive 'gone.jsonl') 'x' | Should -BeFalse
+  }
   It 'opens other programs'' files only through Open-Shared (every other read is of ctop''s own files)' {
     $lines = Get-Content (Join-Path (Split-Path -Parent $PSScriptRoot) 'ctop.ps1') | Where-Object { $_ -notmatch '^\s*#' }
-    $reads = @($lines | Where-Object { $_ -match 'Get-Content\s+-LiteralPath|Select-String\b|ReadAll(Text|Lines|Bytes)\(|OpenRead\(|\[IO\.File\]::Open\(|StreamReader\]::new\(\$(path|file)' })
+    $reads = @($lines | Where-Object { $_ -match 'Get-Content\b|(^|[\s(|;{])gc\s+[-$''"]|Select-String\b|\bsls\s|ReadAll(Text|Lines|Bytes)\(|OpenRead\(|\[IO\.File\]::Open\(|StreamReader\]::new\(\$(path|file)' })
     $own = 'Get-Content -LiteralPath \$script:(ScanCachePath|ClosedLogPath)|ReadAllText\(\(Resolve-Path -LiteralPath \$path\)|ReadAllLines\(\$Path\)|ReadAllText\("/proc/|\[IO\.File\]::Open\(\$path, \[IO\.FileMode\]::Open, \[IO\.FileAccess\]::Read, \[IO\.FileShare\]''ReadWrite, Delete''\)'
     @($reads | Where-Object { $_ -notmatch $own }) | Should -BeNullOrEmpty -Because 'the scan cache, the closed log, a pricing file, /proc, and Open-Shared itself are the only other reads'
   }
@@ -74,6 +78,34 @@ Describe 'Move-Over' {
     [IO.File]::WriteAllText($script:dst, 'old')
     [CtopConFsTest.Fs]::MoveOver($script:src, $script:dst) | Should -BeTrue
     [IO.File]::ReadAllText($script:dst) | Should -Be 'new'
+  }
+}
+
+Describe 'Load-ScanCache' {
+  It 'clears what killed saves left before reading' {
+    $script:ScanCachePath = Join-Path $TestDrive 'none.json'
+    Mock Remove-StaleCacheTemps { } -Verifiable
+    Load-ScanCache
+    Should -InvokeVerifiable
+  }
+}
+
+Describe 'the console helper DLL' {
+  It 'is named by the runtime as well as the source (a DLL PowerShell 7 compiled does not load in 5.1)' {
+    $ed = if ($PSVersionTable.PSEdition -eq 'Core') { 'core' } else { 'desktop' }
+    Split-Path -Leaf (Get-ConDllPath) | Should -Match "^ctop-con-[0-9A-F]{8}-$ed\.dll$"
+  }
+  It 'deletes the old DLLs of this runtime, and leaves the other runtime''s' {
+    $d = Join-Path $TestDrive "dll-$([guid]::NewGuid().ToString('N'))"; New-Item -ItemType Directory -Path $d | Out-Null
+    foreach ($n in 'ctop-con-AAAAAAAA-core.dll', 'ctop-con-BBBBBBBB-core.dll', 'ctop-con-CCCCCCCC-desktop.dll', 'ctop-con-DDDDDDDD.dll', 'other.dll') {
+      [IO.File]::WriteAllText((Join-Path $d $n), 'x')
+    }
+    Remove-OldConDlls (Join-Path $d 'ctop-con-AAAAAAAA-core.dll')
+    @(Get-ChildItem -LiteralPath $d -Name | Sort-Object) | Should -Be @('ctop-con-AAAAAAAA-core.dll', 'ctop-con-CCCCCCCC-desktop.dll', 'other.dll')
+  }
+  It 'loads on this runtime, so Move-Over renames in one step rather than falling back (Windows)' -Skip:(-not ($IsWindows -or $env:OS -eq 'Windows_NT')) {
+    Import-ConType | Should -BeTrue
+    [CtopCon.Fs].GetMethod('MoveOver') | Should -Not -BeNullOrEmpty
   }
 }
 

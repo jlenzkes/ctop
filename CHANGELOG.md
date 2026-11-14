@@ -2,6 +2,18 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.6 — a second review of 2026.11.13.1–.2
+
+- correction to 2026.11.13.2 and .4: sharing delete lets another program delete a file while ctop reads it
+  (Node's `unlinkSync` too), and lets git rename `HEAD.lock` over `HEAD` (measured). It does not help a
+  rename over the file by Node's `fs.rename` (Claude Code, VS Code, Cline) or by `MoveFileEx` with
+  replace-existing: Windows refuses those over any open file (EPERM / access denied), whatever ctop shares.
+  ctop holds a file only for the length of a read
+- the compiled console helper's DLL is now named by the runtime too: a DLL PowerShell 7 compiled doesn't
+  load in Windows PowerShell 5.1, which then lost the mouse (since the helper was added) and fell back to
+  `File.Replace` for the cache save
+- a subagent transcript that disappears while ctop looks for a nested agent's spawner no longer stops ctop
+
 ## 2026.11.13.4 — a review of 2026.11.13.1–.2
 
 - the scan cache is now renamed over the old one in one step (`File.Move` with overwrite; on Windows
