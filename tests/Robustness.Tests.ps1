@@ -1,5 +1,13 @@
 ﻿# What ctop must not do to the files it watches, or to its own cache, when things go wrong.
-BeforeAll { . (Join-Path $PSScriptRoot 'Import-Ctop.ps1') }
+BeforeAll {
+  . (Join-Path $PSScriptRoot 'Import-Ctop.ps1')
+  # Move-Over on Windows PowerShell 5.1 compiles ctop's C# helper (CtopCon) into the config dir. Not in
+  # TestDrive: the loaded DLL stays locked until the process ends, and Pester could not delete TestDrive.
+  $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path -Parent $PSScriptRoot) 'ctop.ps1'), [ref]$null, [ref]$null)
+  $script:ConSrc = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$script:ConSrc' }, $true).Right.Expression.Value
+  $script:ConfigDir = Join-Path ([IO.Path]::GetTempPath()) 'ctop-tests-con'; $ConfigDir = $script:ConfigDir
+  New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
+}
 
 Describe 'files other programs write are opened sharing delete' {
   BeforeEach { $script:f = Join-Path $TestDrive "f-$([guid]::NewGuid().ToString('N')).json"; [IO.File]::WriteAllText($script:f, "ref: refs/heads/main`nmore") }
@@ -10,6 +18,9 @@ Describe 'files other programs write are opened sharing delete' {
     } finally { $fs.Dispose() }
     Test-Path -LiteralPath $script:f | Should -BeFalse
   }
+  # ReplaceFile (File.Replace), Node's fs.rename and git succeed against a file held this way (measured
+  # 2026-11-13). MoveFileEx with REPLACE_EXISTING (.NET File.Move overwrite, Python os.replace) does not:
+  # Windows refuses that rename over any open file, whatever it shares.
   It 'lets another program rename a file over one ctop holds open (as git does with HEAD)' {
     $new = "$($script:f).lock"; [IO.File]::WriteAllText($new, 'ref: refs/heads/other')
     $fs = Open-Shared $script:f
@@ -22,9 +33,70 @@ Describe 'files other programs write are opened sharing delete' {
     Read-SharedText $script:f | Should -Be "ref: refs/heads/main`nmore"
     Read-SharedText $script:f -FirstLine | Should -Be 'ref: refs/heads/main'
   }
-  It 'opens files only through Open-Shared' {
-    $src = Get-Content -Raw (Join-Path (Split-Path -Parent $PSScriptRoot) 'ctop.ps1')
-    ([regex]::Matches($src, '\[IO\.File\]::Open\(')).Count | Should -Be 1 -Because 'the one inside Open-Shared'
+  It 'finds a line holding a string, reading through Open-Shared' {
+    Test-SharedContains $script:f 'heads/main' | Should -BeTrue
+    Test-SharedContains $script:f 'heads/other' | Should -BeFalse
+  }
+  It 'opens other programs'' files only through Open-Shared (every other read is of ctop''s own files)' {
+    $lines = Get-Content (Join-Path (Split-Path -Parent $PSScriptRoot) 'ctop.ps1') | Where-Object { $_ -notmatch '^\s*#' }
+    $reads = @($lines | Where-Object { $_ -match 'Get-Content\s+-LiteralPath|Select-String\b|ReadAll(Text|Lines|Bytes)\(|OpenRead\(|\[IO\.File\]::Open\(|StreamReader\]::new\(\$(path|file)' })
+    $own = 'Get-Content -LiteralPath \$script:(ScanCachePath|ClosedLogPath)|ReadAllText\(\(Resolve-Path -LiteralPath \$path\)|ReadAllLines\(\$Path\)|ReadAllText\("/proc/|\[IO\.File\]::Open\(\$path, \[IO\.FileMode\]::Open, \[IO\.FileAccess\]::Read, \[IO\.FileShare\]''ReadWrite, Delete''\)'
+    @($reads | Where-Object { $_ -notmatch $own }) | Should -BeNullOrEmpty -Because 'the scan cache, the closed log, a pricing file, /proc, and Open-Shared itself are the only other reads'
+  }
+}
+
+Describe 'Move-Over' {
+  BeforeEach {
+    $script:src = Join-Path $TestDrive "s-$([guid]::NewGuid().ToString('N'))"; $script:dst = "$($script:src).dst"
+    [IO.File]::WriteAllText($script:src, 'new')
+  }
+  It 'creates the target' {
+    Move-Over $script:src $script:dst
+    [IO.File]::ReadAllText($script:dst) | Should -Be 'new'
+    Test-Path -LiteralPath $script:src | Should -BeFalse
+  }
+  It 'replaces the target' {
+    [IO.File]::WriteAllText($script:dst, 'old')
+    Move-Over $script:src $script:dst
+    [IO.File]::ReadAllText($script:dst) | Should -Be 'new'
+  }
+  It 'throws, and leaves the target as it was, when the target is held open (Windows)' -Skip:(-not ($IsWindows -or $env:OS -eq 'Windows_NT')) {
+    [IO.File]::WriteAllText($script:dst, 'old')
+    $fs = [IO.File]::Open($script:dst, 'Open', 'Read', 'Read')
+    try { { Move-Over $script:src $script:dst } | Should -Throw } finally { $fs.Dispose() }
+    [IO.File]::ReadAllText($script:dst) | Should -Be 'old'
+  }
+  It 'replaces through MoveFileEx, as on Windows PowerShell 5.1 (Windows)' -Skip:(-not ($IsWindows -or $env:OS -eq 'Windows_NT')) {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path -Parent $PSScriptRoot) 'ctop.ps1'), [ref]$null, [ref]$null)
+    $assign = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$script:ConSrc' }, $true)
+    $csrc = $assign.Right.Expression.Value
+    if (-not ('CtopConFsTest.Fs' -as [type])) { Add-Type -TypeDefinition ($csrc -replace 'namespace CtopCon', 'namespace CtopConFsTest') }
+    [IO.File]::WriteAllText($script:dst, 'old')
+    [CtopConFsTest.Fs]::MoveOver($script:src, $script:dst) | Should -BeTrue
+    [IO.File]::ReadAllText($script:dst) | Should -Be 'new'
+  }
+}
+
+Describe 'Remove-StaleCacheTemps' {
+  BeforeEach {
+    $script:dir = Join-Path $TestDrive "c-$([guid]::NewGuid().ToString('N'))"; New-Item -ItemType Directory -Path $script:dir | Out-Null
+    $script:ScanCachePath = Join-Path $script:dir 'ctop-scancache.json'
+    [IO.File]::WriteAllText($script:ScanCachePath, '{}')
+  }
+  It 'deletes what a killed save left, and keeps a live ctop''s save and other files' {
+    $alivePid = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 4 } else { 1 }   # System / init: always running
+    foreach ($n in 'ctop-scancache.json.999999999.tmp', 'ctop-scancache.json~RF2a4f.TMP', "ctop-scancache.json.$alivePid.tmp", 'ctop-scancache.json.bak', 'other.tmp') {
+      [IO.File]::WriteAllText((Join-Path $script:dir $n), 'x')
+    }
+    Remove-StaleCacheTemps
+    @(Get-ChildItem -LiteralPath $script:dir -Name | Sort-Object) | Should -Be @('ctop-scancache.json', "ctop-scancache.json.$alivePid.tmp", 'ctop-scancache.json.bak', 'other.tmp')
+  }
+  It 'deletes a live ctop''s save once it is a day old' {
+    $alivePid = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 4 } else { 1 }
+    $f = Join-Path $script:dir "ctop-scancache.json.$alivePid.tmp"; [IO.File]::WriteAllText($f, 'x')
+    (Get-Item -LiteralPath $f).LastWriteTimeUtc = [datetime]::UtcNow.AddDays(-2)
+    Remove-StaleCacheTemps
+    Test-Path -LiteralPath $f | Should -BeFalse
   }
 }
 
@@ -39,6 +111,11 @@ Describe 'Save-ScanCache' {
     Save-ScanCache
     (Get-Content -Raw $script:ScanCachePath | ConvertFrom-Json).a.Path | Should -Be '/a.jsonl'
     @(Get-ChildItem -LiteralPath $TestDrive -Filter '*.tmp').Count | Should -Be 0
+  }
+  It 'saves through one rename (Move-Over), not File.Replace, which is several steps a kill can split' {
+    Mock Move-Over { [IO.File]::Copy($src, $dst, $true) } -Verifiable
+    Save-ScanCache
+    Should -InvokeVerifiable
   }
   It 'replaces an existing cache (PowerShell passes $null to .NET as an empty string)' {
     [IO.File]::WriteAllText($script:ScanCachePath, '{"old":{"Path":"/old.jsonl"}}')
