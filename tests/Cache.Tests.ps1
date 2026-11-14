@@ -234,6 +234,48 @@ Describe 'the CACHE column' {
   }
 }
 
+Describe 'the cold cost under CACHE' {
+  BeforeAll {
+    $script:Pricing = @(@{ Match = '^priced$'; In = 5; Out = 25; Read = 0.5; W5 = 6.25; W1h = 10 })
+    $script:Color = $false
+    $cols = @([pscustomobject]@{ Name = 'CACHE'; Width = 5; Align = 'R'; Fixed = 5 })
+  }
+  It 'is <Want> for <Tok> tokens of a <Ttl> cache' -ForEach @(
+    @{ Tok = 220000;  Ttl = '1h'; Want = '$2.20' }    # 220K x $10/MTok
+    @{ Tok = 220000;  Ttl = '5m'; Want = '$1.38' }    # 220K x $6.25/MTok
+    @{ Tok = 1500000; Ttl = '1h'; Want = '$15' }      # 5 cells: no cents from $10
+    @{ Tok = 12000000; Ttl = '1h'; Want = '$120' }
+  ) {
+    Format-CacheCost @{ Kind = 'warm'; Ttl = $Ttl; RecacheTokens = $Tok } 'priced' | Should -Be $Want
+  }
+  It 'is the next turn''s cost once expired too' {
+    Format-CacheCost @{ Kind = 'cold'; Reason = 'expired'; Ttl = '1h'; RecacheTokens = 220000 } 'priced' | Should -Be '$2.20'
+  }
+  It 'is empty when it can''t be priced or isn''t known: <Name>' -ForEach @(
+    @{ Name = 'unpriced model'; State = @{ Kind = 'warm'; Ttl = '1h'; RecacheTokens = 220000 }; Model = 'nobody' }
+    @{ Name = 'compacted';      State = @{ Kind = 'cold'; Reason = 'compacted' };               Model = 'priced' }
+    @{ Name = 'unknown';        State = @{ Kind = 'unknown' };                                  Model = 'priced' }
+    @{ Name = 'no tokens';      State = @{ Kind = 'warm'; Ttl = '1h'; RecacheTokens = 0 };      Model = 'priced' }
+  ) {
+    Format-CacheCost $State $Model | Should -Be ''
+  }
+  It 'is drawn as the cell''s second line when rows have two' {
+    $r = [pscustomobject]@{ CACHE = '43m'; _Cache = @{ Kind = 'warm'; Ttl = '1h'; RecacheTokens = 220000; MsLeft = 2580000.0 }; _Act = @{ Model = 'priced' }; _Gone = $null }
+    $lines = Format-Row $cols $r '  ' 2   # returns its lines as one array (return ,$lines)
+    $lines.Count | Should -Be 2
+    (Strip-Ansi $lines[0]).Trim() | Should -Be '43m'
+    (Strip-Ansi $lines[1]).Trim() | Should -Be '$2.20'
+    $one = Format-Row $cols $r '  ' 1
+    @($one).Count | Should -Be 1
+  }
+  It 'redraws the row when the tokens or the model change' {
+    $r = [pscustomobject]@{ CACHE = '43m'; _Cache = @{ Kind = 'warm'; Ttl = '1h'; RecacheTokens = 220000 }; _Act = @{ Model = 'priced' }; _Gone = $null; _Jobs = @(); IDLE = '1m' }
+    $k1 = Row-Key $cols $r 'sig'
+    $r._Cache.RecacheTokens = 230000
+    Row-Key $cols $r 'sig' | Should -Not -Be $k1
+  }
+}
+
 Describe 'Format-CachePeek' {
   BeforeAll {
     $script:Pricing = @(@{ Match = '^priced$'; In = 5; Out = 25; Read = 0.5; W5 = 6.25; W1h = 10 })

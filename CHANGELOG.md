@@ -2,6 +2,13 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.13.9 — what going cold costs, under CACHE
+
+- CACHE has a second line: what the next turn costs once the cache is cold, the whole context written back
+  at the cache-write price (`$6.03`; whole dollars from $10). It is what makes two `4m` rows unequal: on
+  Opus 5.5 at 754K tokens, about $6 cold against $0.15 warm. Shown while warm and once expired; not after a
+  compaction, for an unpriced model, or with one line per row (`-Layout truncate`)
+
 ## 2026.11.13.8 — CACHE before TURN
 
 - CACHE now stands right after STATE, before TURN (the user's choice). Which hides first on a narrow window

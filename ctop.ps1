@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.13.8 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.13.9 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.13.8'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.13.9'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -1096,6 +1096,24 @@ function Format-CacheCell($state) {
 
 # peek's CACHE line. The next turn's cost re-reads (warm) or re-writes (cold) the last call's whole prompt,
 # at that model's cache-read or cache-write price for the TTL: an estimate without the new message itself.
+# What the next turn pays to write the whole context back into the cache once it is cold: the last call's
+# input + cache tokens at the TTL's write price. $null when unknown (no cache, compacted, unpriced model).
+function Get-CacheColdDollars($state, [string]$model) {
+  if (-not $state -or $state.Kind -eq 'unknown' -or $state.Reason -eq 'compacted') { return $null }
+  $tok = [long]$state.RecacheTokens
+  if ($tok -le 0) { return $null }
+  $p = Get-Price $model $tok
+  if (-not $p) { return $null }
+  return $tok * $(if ($state.Ttl -eq '1h') { [double]$p.W1h } else { [double]$p.W5 }) / 1e6
+}
+# The cold cost as CACHE's second line, in its 5 cells: $6.03, or whole dollars from $10 ($15, $120).
+function Format-CacheCost($state, [string]$model) {
+  $d = Get-CacheColdDollars $state $model
+  if ($null -eq $d) { return '' }
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  if ($d -lt 9.995) { return '$' + $d.ToString('0.00', $inv) }
+  return '$' + [math]::Round($d).ToString('0', $inv)
+}
 function Format-CachePeek($state, [string]$model) {
   if (-not $state -or $state.Kind -eq 'unknown') { return 'unknown (no cache use recorded)' }
   if ($state.Reason -eq 'compacted') { return "doesn't cover the compacted conversation: the next turn re-caches it" }
@@ -1103,8 +1121,8 @@ function Format-CachePeek($state, [string]$model) {
   $tok = [long]$state.RecacheTokens
   $tokText = "$([math]::Round($tok / 1000))K tokens"
   $p = if ($tok -gt 0) { Get-Price $model $tok } else { $null }
-  $writePrice = if ($p) { if ($state.Ttl -eq '1h') { [double]$p.W1h } else { [double]$p.W5 } } else { 0 }
-  $cold = '$' + ($tok * $writePrice / 1e6).ToString('0.00', $inv)
+  $cd = Get-CacheColdDollars $state $model
+  $cold = '$' + $(if ($null -ne $cd) { $cd } else { 0.0 }).ToString('0.00', $inv)
   if ($state.Kind -eq 'warm') {
     $at = ([datetime]$state.Anchor).ToLocalTime().ToString('HH:mm:ss', $inv)
     $cost = if ($p) { ' ≈ $' + ($tok * [double]$p.Read / 1e6).ToString('0.00', $inv) + " warm, $cold cold" } else { '' }
@@ -3731,6 +3749,10 @@ function Format-Row([object[]]$cols, $r, [string]$sep, [int]$maxLines) {
       $sig = if ($t -ge 1000) { 'Σ${0:N0}k' -f ($t / 1000) } elseif ($t -ge 100) { 'Σ${0:N0}' -f $t } else { 'Σ${0:N2}' -f $t }
       $pieces = @(((Fit $v $c.Width $c.Align)).TrimEnd(), ((Fit $sig $c.Width $c.Align)).TrimEnd())
     }
+    elseif ($c.Name -eq 'CACHE' -and $maxLines -gt 1 -and ($cc = Format-CacheCost $r._Cache $r._Act.Model)) {
+      # what letting it go cold costs, under the time left (the way COST carries the tree's Σ)
+      $pieces = @(((Fit $v $c.Width $c.Align)).TrimEnd(), ((Fit $cc $c.Width $c.Align)).TrimEnd())
+    }
     elseif ($c.Name -eq 'STATE' -and $r._LiveKids -gt 0) {
       $pieces = ,@(((Fit "$v +$($r._LiveKids)" $c.Width $c.Align)).TrimEnd())
     }
@@ -3772,7 +3794,7 @@ function Row-Key([object[]]$cols, $r, [string]$sig) {
   $jc = 0; foreach ($x in @($r._Jobs)) { if ($x) { $jc++ } }
   $cmpRecent = $false
   if ($r._Act -and $r._Act.LastCompactAt) { try { $cmpRecent = ((Get-Date) - [datetime]$r._Act.LastCompactAt).TotalMinutes -lt 10 } catch {} }
-  [void]$sb.Append([char]30).Append("$([bool]$r._Gone)|$(if ($r._Cache) { $r._Cache.Ttl })|$((Minutes $r.IDLE) -ge 2)|$($r._LaunchCwd)|$cmpRecent|$jc|$($r._LiveKids)|$($r._TreeLast)|$($r._Depth)|$($r._Done)|$($r._Orphaned)|$($r._Parent -ne $null)|$([math]::Round([double]$r._TreeCost, 2))")
+  [void]$sb.Append([char]30).Append("$([bool]$r._Gone)|$(if ($r._Cache) { "$($r._Cache.Ttl)/$($r._Cache.RecacheTokens)" })|$($r._Act.Model)|$((Minutes $r.IDLE) -ge 2)|$($r._LaunchCwd)|$cmpRecent|$jc|$($r._LiveKids)|$($r._TreeLast)|$($r._Depth)|$($r._Done)|$($r._Orphaned)|$($r._Parent -ne $null)|$([math]::Round([double]$r._TreeCost, 2))")
   return $sb.ToString()
 }
 function Get-RowLines([object[]]$cols, $r, [string]$sep, [int]$maxLines, [string]$sig) {
@@ -4091,7 +4113,8 @@ function Show-Help {
     '                 Agent SDK: VS Code''s own Claude agent, or another program built on it), remote,',
     '                 cline (a Cline session), copilot (a GitHub Copilot chat in VS Code)',
     '  CACHE       T  prompt cache: minutes left while warm (yellow near the end), cold once expired, - unknown;',
-    '                 the rule of the Claude Code extension for VS Code. In peek: what the next turn costs warm and cold',
+    '                 the rule of the Claude Code extension for VS Code. Second line: what the next turn costs once',
+    '                 the cache is cold (the whole context written back). In peek: the next turn warm and cold',
     '  TURN        T  time since your last prompt — how long Claude has been on this turn (blank when idle).',
     '                 Yellow >= 10 min, red >= 30 min',
     '  IDLE        T  (peek) time since the transcript was last written to',
