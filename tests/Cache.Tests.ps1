@@ -108,6 +108,19 @@ Describe 'Update-Scan: the cache anchor' {
     Load-ScanCache
     foreach ($f in 'CacheAnchor', 'CacheReqAt', 'CacheCompactAt') { (At ([string]$script:ScanCache.k[$f])) | Should -Be (At $t) -Because $f }
   }
+  It 'reads the entry''s own fields, not look-alikes inside a tool input: <Name>' -ForEach @(
+    @{ Name = 'a usage object';        Nested = '{"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}' }
+    @{ Name = 'isSidechain true';      Nested = '{"isSidechain":true}' }
+    @{ Name = 'a synthetic model';     Nested = '{"message":{"model":"<synthetic>"},"model":"<synthetic>"}' }
+    @{ Name = 'a user type';           Nested = '{"type":"user","role":"user"}' }
+  ) {
+    $line = '{"parentUuid":"p","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"t","name":"X","input":' + $Nested + '}],"usage":{"input_tokens":3,"cache_creation_input_tokens":200,"cache_read_input_tokens":1000,"cache_creation":{"ephemeral_1h_input_tokens":200,"ephemeral_5m_input_tokens":0},"output_tokens":5}},"type":"assistant","uuid":"60e1b897-551b-4656-862d-7a087d547208","timestamp":"2026-11-13T12:00:00.000Z"}'
+    $st = Scan @($line)
+    $st.CacheTtl | Should -Be '1h'
+    $st.RecacheTok | Should -Be 1203
+    $st.Turns | Should -Be 0
+    $st.InTok | Should -Be 3
+  }
   It 'keeps the first anchor across lines of one message' {
     $st = Scan @((Usage '2026-11-13T12:00:00.000Z' 'msg_1'), (Usage '2026-11-13T12:00:30.000Z' 'msg_1'))
     (At $st.CacheAnchor) | Should -Be (At '2026-11-13T12:00:00.000Z')
@@ -185,6 +198,23 @@ Describe 'the CACHE column' {
       (Row 'cold' @{ Kind = 'cold'; Reason = 'expired' }), (Row 'w2' @{ Kind = 'warm'; MsLeft = 120000.0 })
     )
     @(Sort-Rows $rows | ForEach-Object { $_._SessionId }) | Should -Be @('w2', 'w10', 'cold', 'unknown')
+  }
+  It 'sorts gone sessions by the cache too, after the live ones' {
+    $script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx', 'cache')
+    $script:SortMode = 5
+    function GoneRow([string]$id, $cache, [int]$goneMin) {
+      [pscustomobject]@{ _SessionId = $id; _Gone = (Get-Date).AddMinutes(-$goneMin); _StartedAt = [datetime]'2026-11-13T10:00:00'; STATE = 'gone'
+                         NAME = $id; PID = '-'; _Parent = $null; _LaunchedBy = $null; _Spawner = ''; _Order = 0; _Depth = 0
+                         _Act = @{ Cost = 0.0; Ctx = '-' }; _AgentCost = 0.0; _Cache = $cache }
+    }
+    $now = [datetime]::UtcNow
+    $rows = @(
+      (GoneRow 'unknown' @{ Kind = 'unknown' } 1)
+      (GoneRow 'cold' @{ Kind = 'cold'; Reason = 'expired' } 2)
+      (GoneRow 'warm30' @{ Kind = 'warm'; Ttl = '1h'; MsLeft = 1800000.0; Anchor = $now.AddMinutes(-30) } 3)
+      (GoneRow 'warm1' @{ Kind = 'warm'; Ttl = '1h'; MsLeft = 60000.0; Anchor = $now.AddMinutes(-59) } 4)
+    )
+    @(Sort-Rows $rows | ForEach-Object { $_._SessionId }) | Should -Be @('warm1', 'warm30', 'cold', 'unknown')
   }
   It 'sorts by the time left now, not when the row was built' {
     $script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx', 'cache')

@@ -2,7 +2,7 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
-## 2026.11.13.10 — the hover line
+## 2026.11.13.13 — the hover line
 
 - with the mouse on (Windows), resting the pointer on a cell shows it on the bottom line, whole, with what
   its column means in the help screen's words: `CACHE · ctop-cc: warm, 43 min left (1h, last call
@@ -10,6 +10,22 @@ Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build numbe
   ACTION, BRANCH, TITLE and CWD show in full where their cells are cut. Any key brings the key hints back;
   a click on the bottom line still does what the key hints say. A console has no tooltips; this is the
   nearest. Not checked in Windows Terminal, only in tests
+## 2026.11.13.12 — Sol's round 1 on PR #8
+
+- a transcript line's own fields are read where Claude Code writes them: whether it is a user or an
+  assistant entry from its message's first key, `isSidechain` from the fields before the message, the model
+  from the message's first key, and the usage from the last `"usage"` in the line (it follows the content).
+  A tool's input can hold look-alikes of all four; one used to wipe the countdown or count a turn. COST
+  reads its tokens from the same place, so a tool input holding `"input_tokens"` no longer skews it
+- the `cache` sort orders gone sessions by their cache too (they kept the newest-gone order)
+
+## 2026.11.13.11 — Sol's round 1 on PR #7
+
+- the console helper is compiled under a name of its own and renamed into place. ctops starting at the
+  same time used to compile into the shared DLL at once; the losers found no helper and saved their scan
+  cache through `File.Replace` (Sol measured 2 to 7 of 8 Windows PowerShell 5.1 processes started together;
+  with Sol's own test, 15 of 32 before this build and 0 of 32 after). A compile killed before its rename
+  leaves a `ctop-con-tmp-*.dll`, deleted after 10 minutes. Numbered .11: builds .7 to .10 are on PRs #8–#9
 
 ## 2026.11.13.9 — what going cold costs, under CACHE
 
