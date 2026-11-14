@@ -31,6 +31,10 @@ Describe 'the command line' {
     $x.Text | Should -Match $Says
     $x.Text | Should -Not -Match "\x1b\[(2J|H|\?25l)" -Because 'it must not start drawing (clear screen, cursor home, hide cursor)'
   }
+  It 'accepts -Sort cache' {
+    $x = Invoke-Ctop @('-Version', '-Sort', 'cache')
+    $x.Code | Should -Be 0 -Because $x.Text
+  }
   It 'names the same build in -Version, .NOTES and the newest CHANGELOG.md entry' {
     $r = Invoke-Ctop @('-Version')
     ($r.Text.Trim() -match '^ctop (\d{4}\.\d{2}\.\d{2}\.\d+)$') | Should -BeTrue -Because $r.Text

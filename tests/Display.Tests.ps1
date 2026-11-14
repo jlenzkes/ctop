@@ -117,7 +117,7 @@ Describe 'Update-GoneRow (refresh the clock-dependent cells of a gone row)' {
       $started = [DateTimeOffset]::UtcNow.AddHours(-3)
       [pscustomobject]@{ _SessionId = 'g1'; _Gone = (Get-Date).AddMinutes(-7); _Cleared = $cleared; _Act = @{ Cost = 6.0 }
                          _StartedAt = $started.LocalDateTime; _Src = [pscustomobject]@{ sessionId = 'g1'; startedAt = $started.ToUnixTimeMilliseconds() }
-                         STATE = 'stale'; AGE = 'stale'; IDLE = 'stale'; RATE = 'stale'; ACTIVITY = 'stale'; _Dirty = $false }
+                         STATE = 'stale'; AGE = 'stale'; IDLE = 'stale'; RATE = 'stale'; ACTIVITY = 'stale'; CACHE = 'stale'; _Cache = $null; _Dirty = $false }
     }
   }
   It 'sets STATE, AGE, IDLE, RATE and ACTIVITY from the clock and marks the row changed' {

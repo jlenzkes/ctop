@@ -24,7 +24,7 @@
   parent goes away") means inf. Ignored when -Keep is given.
 
 .PARAMETER Sort
-  Initial sort mode: activity (default), roster, start, cost, ctx. Cycle at runtime with 'o'.
+  Initial sort mode: activity (default), roster, start, cost, ctx, cache. Cycle at runtime with 'o'.
 
 .PARAMETER Layout
   wrap (default): one row per session; a cell longer than its column wraps onto extra lines
@@ -55,7 +55,7 @@
   Disable ANSI colors (STATE, TURN, MODEL, sparkline, COST).
 
 .PARAMETER Compact
-  Show only the essential columns (NAME, STATE, TURN, IDLE, CTX, LAST ACTION, ACTIVITY, COST,
+  Show only the essential columns (NAME, STATE, TURN, CACHE, CTX, LAST ACTION, ACTIVITY, COST,
   BRANCH) regardless of window width. Toggle at runtime with 'c'.
 
 .PARAMETER NoSubagents
@@ -120,7 +120,7 @@ param(
   [int]$SubagentWindow = 0,
   [switch]$NoSubagents,
   [switch]$Compact,
-  [ValidateSet('activity','roster','start','cost','ctx')][string]$Sort = 'activity',
+  [ValidateSet('activity','roster','start','cost','ctx','cache')][string]$Sort = 'activity',
   [ValidateSet('wrap','truncate')][string]$Layout = 'wrap',
   [int]$WrapLines = 2,
   [int]$MaxWidth = 0,
@@ -1930,6 +1930,8 @@ function New-ClineRow($e, [bool]$sample) {
     'MEM(MB)'= '-'
     AGE      = if ($startMs) { Get-Age $startMs } else { '-' }
     IDLE     = Get-Since $e.LastWrite
+    CACHE    = '-'
+    _Cache   = $null
     TURN     = if ($act.TurnStart -and $active) { Get-Since $act.TurnStart } else { '' }
     TURNS    = $act.Turns
     TOOLS    = $act.Tools
@@ -2465,6 +2467,8 @@ function New-CopilotRow($e, [bool]$sample) {
     'MEM(MB)'= '-'
     AGE      = Get-Age $startMs
     IDLE     = Get-Since $e.Written
+    CACHE    = '-'
+    _Cache   = $null
     TURN     = if ($act.TurnStart -and $state -in 'working', 'waiting') { Get-Since $act.TurnStart } else { '' }
     TURNS    = $act.Turns
     TOOLS    = $act.Tools
@@ -2965,6 +2969,8 @@ function Update-GoneRow($r) {
   $r.STATE    = Resolve-State $s $r._Act $r._Gone ([bool]$r._Cleared)
   $r.AGE      = if ($s.startedAt) { Get-Age $s.startedAt } else { '-' }
   $r.IDLE     = if ($file) { Get-Since $file.LastWriteTime } else { '-' }
+  $r._Cache   = Get-CacheState $r._Act (Get-Date)
+  $r.CACHE    = Format-CacheCell $r._Cache
   $r.RATE     = Format-Rate ([double]$r._Act.Cost) $r._StartedAt (Get-Date)
   $r.ACTIVITY = $script:History[$r._SessionId]
   $r._Dirty   = $true   # Render-Table re-formats it
@@ -3063,6 +3069,8 @@ function Build-Rows {
           'MEM(MB)'= '-'
           AGE      = Get-Since $sf.CreationTime
           IDLE     = Get-Since $sf.LastWriteTime
+          _Cache   = ($scache = Get-CacheState $sact (Get-Date))
+          CACHE    = Format-CacheCell $scache
           TURN     = if ($sact.TurnStart -and $sst0 -in 'working','thinking') { Get-Since $sact.TurnStart } else { '' }
           TURNS    = '-'
           TOOLS    = $sact.Tools
@@ -3147,6 +3155,8 @@ function Build-Rows {
       'MEM(MB)'= if ($proc) { [math]::Round($proc.WorkingSet64 / 1MB) } else { '-' }
       AGE      = if ($s.startedAt) { Get-Age $s.startedAt } else { '-' }
       IDLE     = if ($file) { Get-Since $file.LastWriteTime } else { '-' }
+      _Cache   = ($cache = Get-CacheState $act (Get-Date))
+      CACHE    = Format-CacheCell $cache
       TURN     = if ($act.TurnStart -and $active) { Get-Since $act.TurnStart } else { '' }
       TURNS    = $act.Turns
       TOOLS    = $act.Tools
@@ -3233,7 +3243,7 @@ function Build-Rows {
 # Deterministic: every mode ends with startedAt (numeric) then sessionId as tiebreaks, so a
 # row never moves without a real change. 'activity' ranks working and thinking together, so
 # a session cycling through tool calls doesn't hop; only active<->idle transitions move it.
-$script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx')
+$script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx', 'cache')
 $script:SortMode  = [array]::IndexOf($script:SortModes, $Sort)
 function Sort-Rows([object[]]$rows) {
   # The fields filled in below. Build-Rows creates rows with them, so filling them is a plain assignment
@@ -3250,6 +3260,7 @@ function Sort-Rows([object[]]$rows) {
     'start'    { { param($r) 0 } }
     'cost'     { { param($r) -[double]$r._Act.Cost } }
     'ctx'      { { param($r) if ($r._Act.Ctx -ne '-') { -[double]$r._Act.Ctx } else { 0 } } }
+    'cache'    { { param($r) $c = $r._Cache; if ($c -and $c.Kind -eq 'warm') { [double]$c.MsLeft } elseif ($c -and $c.Kind -eq 'cold') { 1e12 } else { 2e12 } } }   # soonest cold first
   }
   # Sessions launched by another listed session's job (a script running claude -p, say) are drawn
   # under that session, after its own subagents. They stay sessions: own row, own subagents.
@@ -3391,6 +3402,11 @@ function Cell-Color([string]$col, $r) {
     'KIND'     { if ($r.KIND -like 'subagent*') { 'cyan' } else { '' } }
     'CWD'      { if ($r._LaunchCwd -and -not [string]::Equals($r._LaunchCwd, $r.CWD, [StringComparison]::OrdinalIgnoreCase)) { 'cyan' } else { '' } }
     'COST'     { if ([double]($r._Act.Cost) -ge 100) { 'yellow' } else { '' } }
+    'CACHE'    { $c = $r._Cache
+                 if (-not $c) { '' }
+                 elseif ($c.Kind -eq 'cold') { 'dim' }
+                 elseif ($c.Kind -eq 'warm' -and [double]$c.MsLeft -le $(if ($c.Ttl -eq '1h') { 300000 } else { 60000 })) { 'yellow' }
+                 else { '' } }
     default    { '' }
   }
 }
@@ -3421,7 +3437,7 @@ $script:Columns = @(
   @{ Name = 'TITLE';       Fixed = 0;  Min = 12; Flex = 3; Align = 'L'; Priority = 95 }   # picker's friendly name
   @{ Name = 'STATE';       Fixed = 8;  Auto = $true; Align = 'L'; Priority = 100 }
   @{ Name = 'TURN';        Fixed = 5;  Align = 'R'; Priority = 90 }   # time on current turn
-  @{ Name = 'IDLE';        Fixed = 5;  Align = 'R'; Priority = 85 }
+  @{ Name = 'CACHE';       Fixed = 5;  Align = 'R'; Priority = 85 }   # prompt cache: minutes left; IDLE is in peek
   @{ Name = 'CTX';         Fixed = 5;  Align = 'R'; Priority = 80 }   # "123K"
   @{ Name = 'CMP';         Fixed = 3;  Align = 'R'; Priority = 79 }   # compactions so far
   @{ Name = 'LAST ACTION'; Fixed = 0;  Min = 16; Flex = 4; Align = 'L'; Priority = 75 }
@@ -3650,7 +3666,7 @@ function Row-Key([object[]]$cols, $r, [string]$sig) {
   $jc = 0; foreach ($x in @($r._Jobs)) { if ($x) { $jc++ } }
   $cmpRecent = $false
   if ($r._Act -and $r._Act.LastCompactAt) { try { $cmpRecent = ((Get-Date) - [datetime]$r._Act.LastCompactAt).TotalMinutes -lt 10 } catch {} }
-  [void]$sb.Append([char]30).Append("$([bool]$r._Gone)|$($r._LaunchCwd)|$cmpRecent|$jc|$($r._LiveKids)|$($r._TreeLast)|$($r._Depth)|$($r._Done)|$($r._Orphaned)|$($r._Parent -ne $null)|$([math]::Round([double]$r._TreeCost, 2))")
+  [void]$sb.Append([char]30).Append("$([bool]$r._Gone)|$(if ($r._Cache) { $r._Cache.Ttl })|$($r._LaunchCwd)|$cmpRecent|$jc|$($r._LiveKids)|$($r._TreeLast)|$($r._Depth)|$($r._Done)|$($r._Orphaned)|$($r._Parent -ne $null)|$([math]::Round([double]$r._TreeCost, 2))")
   return $sb.ToString()
 }
 function Get-RowLines([object[]]$cols, $r, [string]$sep, [int]$maxLines, [string]$sig) {
@@ -3969,7 +3985,9 @@ function Show-Help {
     '                 cline (a Cline session), copilot (a GitHub Copilot chat in VS Code)',
     '  TURN        T  time since your last prompt — how long Claude has been on this turn (blank when idle).',
     '                 Yellow >= 10 min, red >= 30 min',
-    '  IDLE        T  time since the transcript was last written to',
+    '  CACHE       T  prompt cache: minutes left while warm (yellow near the end), cold once expired, - unknown;',
+    '                 the rule of the Claude Code extension for VS Code. In peek: what the next turn costs warm and cold',
+    '  IDLE        T  (peek) time since the transcript was last written to',
     '  CTX         T  context size in K tokens (input + cache tokens on the newest assistant entry)',
     '  CMP         T  compactions so far. Magenta = one in the last 10 min, yellow = older. Each replaces',
     '                 the history with a summary; peek shows when / why / how big',
