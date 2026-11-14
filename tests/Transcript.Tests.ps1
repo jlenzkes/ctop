@@ -86,6 +86,16 @@ Describe 'Update-Scan: what counts as a human prompt' {
     $st.TurnStart | Should -Not -BeNullOrEmpty
     $st.First | Should -Be 'explain the tool_result field'
   }
+  It 'does not take a prompt that starts with a tag (a slash command, a notification) as the title' {
+    $f = Join-Path $TestDrive 'p3.jsonl'
+    Set-Content -LiteralPath $f -Value @(
+      (@{ type = 'user'; sessionId = 'p3'; timestamp = '2026-10-31T05:19:00Z'; message = @{ role = 'user'; content = '<command-name>/model</command-name> <command-args>opus</command-args>' } } | ConvertTo-Json -Compress -Depth 5)
+      (@{ type = 'user'; sessionId = 'p3'; timestamp = '2026-10-31T05:20:00Z'; message = @{ role = 'user'; content = 'list the files please' } } | ConvertTo-Json -Compress -Depth 5)
+    )
+    $st = Update-Scan (Get-Item -LiteralPath $f) 'p3'
+    $st.First | Should -Be 'list the files please'
+    $st.Turns | Should -Be 2
+  }
   It 'does not count a tool result as a turn' {
     $f = Join-Path $TestDrive 'p2.jsonl'
     $lines = @(
