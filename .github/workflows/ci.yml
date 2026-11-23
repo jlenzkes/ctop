@@ -32,20 +32,20 @@ jobs:
           curl -sSLf -o /tmp/pwsh.deb "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell_${PWSH_VERSION}-1.deb_amd64.deb"
           sudo apt-get install -y -q --allow-downgrades /tmp/pwsh.deb
 
-      # Run from Windows PowerShell, so no pwsh.exe is running while the MSI replaces it. The MSI installs
-      # to Program Files\PowerShell\7; GITHUB_PATH puts that first on PATH for the steps that follow.
+      # The runner image already has a PowerShell 7 installed by MSI, so installing another MSI over it
+      # fails (1603). Unpack the release zip beside it instead; GITHUB_PATH puts it first on PATH, and
+      # `shell: pwsh` in the steps that follow resolves pwsh from PATH.
       - name: Install PowerShell 7.6.10 (Windows)
         if: runner.os == 'Windows'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $msi = Join-Path $env:RUNNER_TEMP 'pwsh.msi'
-          $log = Join-Path $env:RUNNER_TEMP 'pwsh-msi.log'
-          curl.exe -sSLf -o $msi "https://github.com/PowerShell/PowerShell/releases/download/v$env:PWSH_VERSION/PowerShell-$env:PWSH_VERSION-win-x64.msi"
+          $zip = Join-Path $env:RUNNER_TEMP 'pwsh.zip'
+          $dir = Join-Path $env:RUNNER_TEMP "pwsh-$env:PWSH_VERSION"
+          curl.exe -sSLf -o $zip "https://github.com/PowerShell/PowerShell/releases/download/v$env:PWSH_VERSION/PowerShell-$env:PWSH_VERSION-win-x64.zip"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$log`"" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { Get-Content $log -Tail 40; "msiexec exited with $($p.ExitCode)"; exit 1 }
-          "$env:ProgramFiles\PowerShell\7" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          [IO.File]::AppendAllText($env:GITHUB_PATH, "$dir`n")   # no BOM: Windows PowerShell's utf8 writes one
 
       - name: PowerShell version
         run: |
