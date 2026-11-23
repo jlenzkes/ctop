@@ -1,0 +1,7 @@
+# Normalize line endings in the repository; check out with the platform default.
+* text=auto
+
+*.ps1  text
+*.psd1 text
+*.md   text
+*.yml  text

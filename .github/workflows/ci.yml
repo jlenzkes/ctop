@@ -1,0 +1,189 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # GitHub's own runners, with PowerShell 7.6.10 installed over the runner image's own pwsh, so every job
+  # tests the same release: the deb from the GitHub release on Ubuntu, the MSI on Windows.
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PWSH_VERSION: '7.6.10'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install PowerShell 7.6.10 (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -e
+          curl -sSLf -o /tmp/pwsh.deb "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell_${PWSH_VERSION}-1.deb_amd64.deb"
+          sudo apt-get install -y -q --allow-downgrades /tmp/pwsh.deb
+
+      # Run from Windows PowerShell, so no pwsh.exe is running while the MSI replaces it. The MSI installs
+      # to Program Files\PowerShell\7; GITHUB_PATH puts that first on PATH for the steps that follow.
+      - name: Install PowerShell 7.6.10 (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = Join-Path $env:RUNNER_TEMP 'pwsh.msi'
+          $log = Join-Path $env:RUNNER_TEMP 'pwsh-msi.log'
+          curl.exe -sSLf -o $msi "https://github.com/PowerShell/PowerShell/releases/download/v$env:PWSH_VERSION/PowerShell-$env:PWSH_VERSION-win-x64.msi"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$log`"" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content $log -Tail 40; "msiexec exited with $($p.ExitCode)"; exit 1 }
+          "$env:ProgramFiles\PowerShell\7" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: PowerShell version
+        run: |
+          $PSVersionTable
+          $v = $PSVersionTable.PSVersion.ToString()
+          if ($v -ne $env:PWSH_VERSION) { Write-Error "this step ran PowerShell $v, not $env:PWSH_VERSION"; exit 1 }
+
+      - name: Parse
+        run: |
+          $tokens = $null; $errors = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./ctop.ps1), [ref]$tokens, [ref]$errors)
+          if ($errors) { $errors | ForEach-Object { Write-Error "$($_.Extent.StartLineNumber): $($_.Message)" }; exit 1 }
+
+      - name: Version matches .NOTES
+        run: |
+          $out = & ./ctop.ps1 -Version
+          if ($out -notmatch '^ctop (\d{4}\.\d{2}\.\d{2}\.\d+)$') { Write-Error "unexpected -Version output: $out"; exit 1 }
+          $v = $Matches[1]
+          $notes = (Get-Content ./ctop.ps1 -Raw) -cmatch 'VERSION (\d{4}\.\d{2}\.\d{2}\.\d+)'
+          if (-not $notes) { Write-Error 'no VERSION line in .NOTES'; exit 1 }
+          if ($Matches[1] -ne $v) { Write-Error "-Version says $v but .NOTES says $($Matches[1])"; exit 1 }
+          "ctop $v"
+
+      - name: PSScriptAnalyzer
+        run: |
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $r = Invoke-ScriptAnalyzer -Path ./ctop.ps1 -Settings ./PSScriptAnalyzerSettings.psd1
+          $r | Format-Table -AutoSize
+          if ($r) { exit 1 }
+
+      - name: tmux (integration tests)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -y -q tmux)
+
+      - name: Tests (Pester)
+        run: |
+          Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          ./tests/Run-Tests.ps1 -Integration ${{ runner.os == 'Linux' && 'Expect' || 'Skip' }}
+
+      # The same inputs through main's ctop and this one, side by side (tests/Compare-Versions.ps1); fails if
+      # this one fails a check. main's results are printed for comparison.
+      - name: Compare with main
+        if: runner.os == 'Linux'
+        run: |
+          git fetch --depth=1 origin main
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./tests/Compare-Versions.ps1 -Base FETCH_HEAD
+
+  # Windows PowerShell 5.1, the version built into Windows: the script as committed (UTF-8 with BOM,
+  # which 5.1 needs to read its non-ASCII characters), and the unit tests. The end-to-end tests need
+  # tmux, so they run on Linux only.
+  windows-powershell-5:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: PowerShell version
+        run: $PSVersionTable
+
+      - name: Parse
+        run: |
+          $t = $null; $e = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path .\ctop.ps1), [ref]$t, [ref]$e)
+          "parse errors: $(@($e).Count)"
+          $e | Select-Object -First 5 | ForEach-Object { "  line $($_.Extent.StartLineNumber): $($_.Message)" }
+          if ($e) { exit 1 }
+
+      - name: -Version
+        run: |
+          powershell -NoProfile -File .\ctop.ps1 -Version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Unit tests (Pester)
+        run: |
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+          Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          .\tests\Run-Tests.ps1 -Integration Skip
+
+  # The script on other Linux distributions, with PowerShell from Microsoft's packages (7.6.10, and 7.7.0 on
+  # one job): the deb from the GitHub release on Ubuntu / Debian, Microsoft's RHEL 9 rpm on the RHEL 9 family
+  # and on Fedora (Microsoft's install docs have no Fedora page; the RHEL 9 package works there).
+  linux-distros:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Debian family: Ubuntu 22.04, Debian 12. Fedora family: RHEL 9 (UBI 9: Red Hat's own packages, but
+        # no tmux, so no end-to-end tests), AlmaLinux 9 and Rocky Linux 9 (RHEL 9 rebuilds with tmux), Fedora.
+        # Rocky: rockylinux/rockylinux is the maintained image; the official rockylinux:9 stopped in 2024.
+        # pwsh: the PowerShell release installed (a deb on apt-get images, the RHEL 9 rpm on dnf images).
+        # integration: Expect = tmux must install and every end-to-end test must run; Skip = left out on purpose
+        include:
+          - { image: 'ubuntu:22.04', pwsh: '7.6.10', integration: Expect }
+          - { image: 'ubuntu:22.04', pwsh: '7.7.0', integration: Expect }    # the newest release
+          - { image: 'debian:12', pwsh: '7.6.10', integration: Expect }
+          - { image: 'registry.access.redhat.com/ubi9/ubi:latest', pwsh: '7.6.10', integration: Skip }   # UBI's repositories have no tmux
+          - { image: 'almalinux:9', pwsh: '7.6.10', integration: Expect }
+          - { image: 'rockylinux/rockylinux:9', pwsh: '7.6.10', integration: Expect }
+          - { image: 'fedora:44', pwsh: '7.6.10', integration: Expect }   # Fedora 45 has OpenSSL 4 only, which PowerShell 7.6
+                                                                           # could not use to install Pester
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    steps:
+      - name: Install PowerShell ${{ matrix.pwsh }}, ps, tmux
+        shell: sh
+        run: |
+          set -e
+          if command -v apt-get >/dev/null; then
+            apt-get update -q
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -q curl ca-certificates procps tmux
+            curl -sSLf -o /tmp/pwsh.deb https://github.com/PowerShell/PowerShell/releases/download/v${{ matrix.pwsh }}/powershell_${{ matrix.pwsh }}-1.deb_amd64.deb
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -q /tmp/pwsh.deb
+          else
+            dnf install -y procps-ng
+            if [ "${{ matrix.integration }}" = Expect ]; then dnf install -y tmux; fi
+            dnf install -y https://packages.microsoft.com/rhel/9/prod/Packages/p/powershell-${{ matrix.pwsh }}-1.rh.x86_64.rpm
+          fi
+          head -2 /etc/os-release
+
+      - uses: actions/checkout@v7
+
+      - name: PowerShell version
+        shell: pwsh
+        run: |
+          $PSVersionTable
+          $v = $PSVersionTable.PSVersion.ToString()
+          if ($v -ne '${{ matrix.pwsh }}') { Write-Error "this step ran PowerShell $v, not ${{ matrix.pwsh }}"; exit 1 }
+
+      - name: -Version
+        shell: pwsh
+        run: ./ctop.ps1 -Version
+
+      - name: Tests (Pester)
+        shell: pwsh
+        run: |
+          Install-Module Pester -RequiredVersion 5.9.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          ./tests/Run-Tests.ps1 -Integration ${{ matrix.integration }}
