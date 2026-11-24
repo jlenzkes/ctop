@@ -11,8 +11,9 @@ Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build numbe
   counted again (14 of 4,542 real transcripts, 0.4% to 30% over), and a zeroed copy could undo a reply's cost.
   Checked against one charge per reply on 221 real transcripts: equal on every one. Saved scans are redone once.
 - **A Copilot CLI question to you shows `waiting`** (its `ask_user` tool), not `working`.
-- **A `claude` command that will not start** (uninstalled, or caught mid-update) no longer stops ctop: that poll
-  reads Claude Code's session registry instead.
+- **A `claude` command that has gone, or will not start** (uninstalled, or caught mid-update), no longer stops
+  ctop: that poll reads Claude Code's session registry instead. A launcher that starts but whose program is gone
+  (an npm `.cmd` mid-update) still shows a failed poll and keeps the last roster, as before.
 - **TURN and CMP are right after a restart on Windows PowerShell 5.1**: the turn start and last compaction it had
   saved came back off by the UTC offset.
 - **`y` copies a Copilot CLI session's resume command** (`copilot --resume <id>`), peek shows it for an ended

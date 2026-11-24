@@ -240,6 +240,9 @@ Each was run on PowerShell 7.6.10 and Windows PowerShell 5.1 (2026-11-23); what 
 - A sidechain line in a main transcript sets the session's model (no real transcript has one; pricing is not affected).
 - A copy key queued behind another waits up to one frame tick, 250 ms by default.
 - `-Keep` above about 1.0e9 minutes stops ctop at start.
+- A `claude` launcher that starts but cannot run Claude Code (an npm `.cmd` whose package an update has moved
+  away: Node exits 1) gives a failed poll, which keeps the last roster instead of reading the registry; the same
+  on `main`. Reproduced with a shim npm's own `cmd-shim` generated, on both runtimes; a live update not run.
 - A bad `-Keep` or `-PricingFile` starts a worker that rejects it and exits about 3 s later.
 - A Copilot chat edit that pushes a `null` drops it (none of 4,848 real edits holds one).
 - COST, Claude Code: a reply's later line that comes more than 8 replies after its last one is not counted, so
