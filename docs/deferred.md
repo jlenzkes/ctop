@@ -242,12 +242,15 @@ Each was run on PowerShell 7.6.10 and Windows PowerShell 5.1 (2026-11-23); what 
 - `-Keep` above about 1.0e9 minutes stops ctop at start.
 - A bad `-Keep` or `-PricingFile` starts a worker that rejects it and exits about 3 s later.
 - A Copilot chat edit that pushes a `null` drops it (none of 4,848 real edits holds one).
-- A click on footer text that is not an item, such as an error message in the footer, presses a key when the
-  text holds a lone letter and a word, such as `s file` (read; the footer's own items and ctop's usual messages
-  hold none but `q quits`). `↑↓ select` and `PgUp/PgDn` are not clickable.
+- COST, Claude Code: a reply's later line that comes more than 8 replies after its last one is not counted, so
+  a larger final output then would be lost; and a later copy of only an earlier block of a recent reply replaces
+  its final usage (neither shape is in 4,582 real transcripts, counted 2026-11-23).
+- The keep window compares local clock times: across the spring change to daylight time, a session that ended
+  inside the window can count as an hour older and be left out, for every agent (run on both runtimes with a
+  fixed clock; the same on `main`).
+- `↑↓ select` and `PgUp/PgDn` in the footer are not clickable.
 - When the `claude` command will not start and no session is found, the empty table still names
   `claude agents --json` as the source.
-- A submodule whose own gitdir path ends in `worktrees/<name>` is shown as a linked worktree.
 
 ## Not yet checked (not bugs)
 

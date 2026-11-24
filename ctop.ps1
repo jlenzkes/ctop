@@ -2086,11 +2086,12 @@ function Get-GitInfo([string]$dir) {
       $g = Join-Path $d '.git'
       $wt = $false; $main = ''
       $headFile = if (Test-Path -LiteralPath $g -PathType Leaf) {
-        # .git is a pointer file "gitdir: <dir>": a linked worktree's dir is <main>/.git/worktrees/<name>; a
-        # submodule's is the superproject's .git/modules/<name>, its own repository, not a worktree
+        # .git is a pointer file "gitdir: <dir>": a linked worktree's dir has a commondir file naming the main
+        # repository's (git worktree add writes it); a submodule's, under the superproject's .git/modules/, has
+        # none: it is the submodule's own repository, not a worktree, whatever its path
         $ptr = ([string]$(try { Read-SharedText $g -FirstLine } catch { '' })) -replace '^gitdir:\s*', ''
         if (-not [IO.Path]::IsPathRooted($ptr)) { $ptr = Join-Path $d $ptr }
-        $wt = $ptr -match '[\\/]worktrees[\\/][^\\/]+[\\/]*$'
+        $wt = [bool]$ptr -and (Test-Path -LiteralPath (Join-Path $ptr 'commondir') -PathType Leaf)
         if ($ptr -match '^(.*)[\\/]\.git[\\/]worktrees[\\/]') { $main = $Matches[1] }
         Join-Path $ptr 'HEAD'
       } else { Join-Path $g 'HEAD' }
@@ -2506,7 +2507,7 @@ function Get-ClosedLines([object[]]$recs) {
     $lines += "  $t  $(if ($r.why -eq 'cleared') { 'clr' } else { '   ' })  $nm  $($r.title)"
     $lines += "                              claude --resume $($r.sessionId)     $($r.cwd)"
   }
-  return ,$lines
+  return $lines   # one line each, unrolled: Show-Closed pages them
 }
 function Show-Closed {
   $lines = @(Get-ClosedLines @(Read-ClosedLog))
@@ -3912,9 +3913,12 @@ function Start-RosterPoll {
   $psi.RedirectStandardError  = $true
   $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
   # The claude command found at start can be gone or half-written now (uninstalled, or caught mid-update):
-  # this poll then reads the registry, as with no claude command at all.
+  # this poll then reads the registry, as with no claude command at all. A .cmd is run by cmd.exe, which
+  # starts whether or not the .cmd is still there: so the file itself is looked for first.
   $proc = $null
-  try { $proc = [System.Diagnostics.Process]::Start($psi) } catch { Write-Trace "claude would not start: $($_.Exception.Message)" }
+  if (Test-Path -LiteralPath $script:ClaudeCmd -PathType Leaf) {
+    try { $proc = [System.Diagnostics.Process]::Start($psi) } catch { Write-Trace "claude would not start: $($_.Exception.Message)" }
+  } else { Write-Trace "claude is gone: $($script:ClaudeCmd)" }
   if (-not $proc) { $script:Poll = @{ Registry = @(Get-RegistryRoster); Started = [Diagnostics.Stopwatch]::StartNew() }; return }
   # Async readers so a full pipe buffer can never deadlock the child.
   $script:Poll = @{
@@ -6373,6 +6377,7 @@ function Show-Packet($packet, [string]$note = '') {
   if (-not $script:TracedRows -and @($packet.Ids).Count) { $script:TracedRows = $true; Write-Trace 'first frame with sessions drawn' }
   $foot = if ((Get-Date) -lt $script:FlashUntil) { "  ► $($script:Flash)" } elseif ($note) { $note } else { [string]$packet.Footer }
   $script:ShownFooter = $foot
+  $script:ShownItems = if ($foot -ceq [string]$packet.Footer) { $foot } else { '' }   # a click presses a key only on these
   $script:BodyMap = @($packet.BodyMap); $script:BodyY0 = [int]$packet.BodyY0
   Write-Frame @($packet.Lines) $foot
 }
@@ -6391,7 +6396,7 @@ function Read-Keys($view, $packet) {
     if ($inp -is [ConsoleKeyInfo]) { $view.Hover = $null }   # typing: the footer's key hints come back
     if ($inp -isnot [ConsoleKeyInfo]) {   # a mouse event
       $ids = @($packet.Ids)
-      $act = Resolve-Mouse $inp $script:ShownFooter ([bool]$view.PeekId) ([array]::IndexOf($ids, [string]$view.SelectedId))
+      $act = Resolve-Mouse $inp $script:ShownItems ([bool]$view.PeekId) ([array]::IndexOf($ids, [string]$view.SelectedId))
       if (-not $act) { continue }
       if ($null -ne $act.Select -and $act.Select -lt $ids.Count) { $view.SelectedId = $ids[$act.Select]; $view.Rev++ }
       if (-not $act.Key) { continue }

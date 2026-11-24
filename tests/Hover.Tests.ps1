@@ -297,3 +297,21 @@ Describe 'a lone row of one line' {
     ($frame.Lines | ForEach-Object { if ($_ -is [string]) { $_ } else { [string]$_.Text } }) -join "`n" | Should -Match '┌ COST · demo'
   }
 }
+
+# A click on the footer line presses a key only on the footer's own items: a status line or a flash shown there
+# instead ("starting: no frame yet ... (q quits)") holds no controls, though its words can look like items.
+Describe 'a click on a status line shown in the footer' {
+  It 'presses nothing' {
+    Mock Write-Frame { }
+    Mock Get-WindowHeight { 40 }
+    $script:FlashUntil = [datetime]::MinValue
+    $script:InQ = [System.Collections.Generic.Queue[object]]::new()
+    $note = '  starting: no frame yet after 3 s   (q quits)'
+    Show-Packet ([pscustomobject]@{ Lines = @('x'); Footer = '  q quit'; Ids = @(); BodyMap = @(); BodyY0 = 0 }) $note
+    $top = try { [Console]::WindowTop } catch { 0 }
+    $x = $note.IndexOf('quits') + 2
+    $script:InQ.Enqueue([pscustomobject]@{ Kind = 2; X = $x; Y = 39 + $top; Buttons = [uint32]1; Flags = [uint32]0 })
+    Mock Next-Input { if ($script:InQ.Count) { $script:InQ.Dequeue() } else { $null } }
+    Read-Keys (New-View) @{ Ids = @(); PageRows = 1 } | Should -Not -Be 'quit'
+  }
+}

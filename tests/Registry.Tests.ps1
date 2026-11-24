@@ -121,6 +121,14 @@ Describe 'Start-RosterPoll: a claude command that will not start' {
     finally { $script:ClaudeCmd = $null }
     $script:Poll.ContainsKey('Registry') | Should -BeTrue
   }
+  It 'reads the registry when the claude.cmd it found is gone (cmd.exe itself would still start)' {
+    $script:ConfigDir = Join-Path $TestDrive 'cfg-nocmd'; $ConfigDir = $script:ConfigDir
+    New-Item -ItemType Directory -Force -Path (Join-Path $ConfigDir 'sessions') | Out-Null
+    $script:ClaudeCmd = Join-Path $TestDrive 'gone/claude.cmd'
+    $script:Roster = @(); $script:RegistryUnreadable = @(); $script:Poll = $null
+    try { Start-RosterPoll } finally { $script:ClaudeCmd = $null }
+    $script:Poll.ContainsKey('Registry') | Should -BeTrue
+  }
 }
 
 # A process ctop may not open has no StartTime, and reading it raises no error on either runtime (seen for pid 4

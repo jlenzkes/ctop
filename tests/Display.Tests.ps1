@@ -463,5 +463,7 @@ Describe 'session text cannot paint the terminal' {
     $text = Text (Get-ClosedLines @($rec))
     $text | Should -Not -Match '\x1b'
     $text | Should -Match 'nz' -Because 'the text itself is kept'
+    @(Get-ClosedLines @($rec, $rec)) | ForEach-Object { $_ -is [string] -or $_ -is [hashtable] | Should -BeTrue -Because 'one line each, for paging' }
+    @(Get-ClosedLines @($rec, $rec)).Count | Should -Be 6
   }
 }

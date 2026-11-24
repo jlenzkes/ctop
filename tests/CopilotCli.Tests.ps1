@@ -468,6 +468,7 @@ Describe 'a Copilot CLI session in a linked git worktree whose HEAD cannot be re
     $linked = Join-Path $work 'linked'; $gitdir = Join-Path $work 'main/.git/worktrees/linked'
     foreach ($d in $linked, $gitdir) { [void][IO.Directory]::CreateDirectory($d) }
     [IO.File]::WriteAllText((Join-Path $linked '.git'), "gitdir: $gitdir`n")
+    [IO.File]::WriteAllText((Join-Path $gitdir 'commondir'), "../..`n")   # as git worktree add writes it
     $head = Join-Path $gitdir 'HEAD'
     [IO.File]::WriteAllText($head, "ref: refs/heads/live-branch`n")
     $root = Join-Path $work 'copilot'; $env:COPILOT_HOME = $root
@@ -691,5 +692,12 @@ Describe 'Get-GitInfo: a submodule is not a linked worktree' {
     $g = Get-GitInfo (Join-Path $super 'lib')
     $g.Branch | Should -Be 'libmain'
     $g.Worktree | Should -BeFalse
+  }
+  It 'does not mark a submodule a worktree when its path ends in worktrees/<name>: a linked worktree''s gitdir has a commondir file' {
+    $super = Join-Path $TestDrive 'super2'; $mod = Join-Path $super '.git/modules/worktrees/lib'
+    [void][IO.Directory]::CreateDirectory($mod); [void][IO.Directory]::CreateDirectory((Join-Path $super 'worktrees/lib'))
+    [IO.File]::WriteAllText((Join-Path $mod 'HEAD'), "ref: refs/heads/libmain`n")
+    [IO.File]::WriteAllText((Join-Path $super 'worktrees/lib/.git'), "gitdir: ../../.git/modules/worktrees/lib`n")
+    (Get-GitInfo (Join-Path $super 'worktrees/lib')).Worktree | Should -BeFalse
   }
 }
