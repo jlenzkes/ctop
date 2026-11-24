@@ -43,7 +43,7 @@ lose track of. ctop puts them all on one screen and points at the ones that need
 - **See compaction coming.** CTX is the context size; the figure under it (`/967K`) is about where
   Claude Code will compact it, from the model and the settings ctop can see. CMP counts compactions.
 - **Find any session again.** Closed sessions are logged with their titles and resume commands (`x`).
-  `y` copies a session's `claude --resume` command; `n` copies a contact you can paste into another
+  `y` copies a session's resume command (`claude --resume`, or `copilot --resume`); `n` copies a contact you can paste into another
   Claude session, so that one can message it.
 - **It costs nothing to watch.** ctop reads files on your computer and makes no model calls, so it uses
   no tokens. It's one PowerShell script: no service, no install step, nothing to configure.
@@ -199,7 +199,7 @@ once, with the script line it happened on, so a column stuck at `-` can be trace
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | Move the selection |
 | `Enter` / `Space`    | Peek: a live detail screen for the selected session (`↑` `↓` switch session, `Esc` closes) |
 | `t`                  | Copy the selected row's transcript path (see [Copying](#copying)) |
-| `y`                  | Copy its `claude --resume <id>` command |
+| `y`                  | Copy its resume command (`claude --resume <id>`, `copilot --resume <id>`) |
 | `n`                  | Copy its contact, to reach it from another Claude session (see [Contacts](#contacts)) |
 | `d`                  | Copy its session ID (a subagent: its agent ID) |
 | `o`                  | Cycle sort: activity, roster, start, cost, ctx, cache |
@@ -306,7 +306,8 @@ match add nothing to COST (a session with only those shows `-`). Restart ctop af
   `session.shutdown` (or its log's last write, if it was killed). These sessions are listed whatever their
   KIND (a `copilot -p` run is `headless`), without `-All`. COST is each model call's tokens at the model's
   API price: the CLI records a cost of 0 for a call on your own key; peek says when some calls had no
-  price. CPU and MEM are blank. Tested on Windows with CLI 1.0.114.
+  price. A question the CLI asks you (`ask_user`) shows as `waiting`. `y` copies `copilot --resume <id>`.
+  CPU and MEM are blank. Tested on Windows with CLI 1.0.114.
 - **Cline** (its VS Code extension or its `cline` command). ctop reads Cline's own session files
   (`~/.cline/data/sessions/`); no SQLite or `cline` command is needed. COST is what Cline records; CPU
   and MEM are blank, because in VS Code a Cline session's process is the window's extension host; `y`

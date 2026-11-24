@@ -87,6 +87,15 @@ Describe 'Update-CopilotCliScan: what a session log says' {
     [IO.File]::AppendAllText($p, (Ev 'permission.completed' @{ requestId = 'r1'; result = @{ kind = 'denied' } }) + "`n")
     (Scan $p).State | Should -Be 'working'
   }
+  # The CLI asks you a question with its ask_user tool: the tool runs until you answer, and no permission is
+  # asked (seen once in 146 real sessions, 2026-11-23: a 136 s wait).
+  It 'is waiting while its ask_user tool waits on your answer' {
+    [IO.File]::WriteAllText($p, ((Start-Ev), (Ev 'user.message' @{ content = 'plan it' }), (Ev 'assistant.turn_start' @{ turnId = '0' }),
+      (Ev 'tool.execution_start' @{ toolCallId = 'q1'; toolName = 'ask_user'; arguments = @{ question = 'Which branch?' } }) -join "`n") + "`n")
+    (Scan $p).State | Should -Be 'waiting'
+    [IO.File]::AppendAllText($p, ((Ev 'human_response.recorded' @{ requestId = 'h1'; toolCallId = 'q1' }), (Ev 'tool.execution_complete' @{ toolCallId = 'q1'; success = $true }) -join "`n") + "`n")
+    (Scan $p).State | Should -Be 'thinking'
+  }
   It 'counts your prompts, not autopilot''s continuations or messages from another agent' {
     [IO.File]::WriteAllText($p, ((Start-Ev), (Ev 'user.message' @{ content = 'one'; parentAgentTaskId = 'p1' }), (Ev 'user.message' @{ content = 'go on'; source = 'autopilot'; isAutopilotContinuation = $true }),
       (Ev 'user.message' @{ content = 'done'; source = 'agent-1234' }), (Ev 'user.message' @{ content = 'two' }) -join "`n") + "`n")
@@ -217,6 +226,8 @@ Describe 'Update-CopilotCliRoster' {
     $text | Should -Match 'a GitHub Copilot CLI session run by the copilot command'
     $text | Should -Match 'ENDED .*\(routine\)'
     $text | Should -Not -Match 'claude --resume'
+    $text | Should -Match 'resume: copilot --resume bbbbbbbb-done' -Because 'an ended interactive session is resumed as a headless one is'
+    Get-ResumeCommand $r | Should -Be 'copilot --resume bbbbbbbb-done' -Because 'what y copies'
     $c = Format-Contact $r 'box'
     $c | Should -Match '^GitHub Copilot CLI session \(the copilot command\)'
     $c | Should -Match 'copilot --resume bbbbbbbb-done'
@@ -251,6 +262,25 @@ Describe 'Get-CopilotCliOwner: a process whose start time cannot be read' {
   It 'leaves Test-ProcessSince taking an unreadable start time as live for its other callers (a Claude Code registry entry, a Cline session)' {
     Test-ProcessSince 4242 (Get-Date) { param($id) 'unknown' } | Should -BeTrue
     Test-ProcessSince 4242 (Get-Date) { param($id) 'unknown' } -Verified | Should -BeFalse
+  }
+}
+
+# A process's start time is local time, and so is a file's LastWriteTime; compared as local clock readings they
+# disagree by an hour across the autumn change back from daylight time, and by the zone offset when one side is
+# UTC. They are compared as instants.
+Describe 'Test-ProcessSince and Get-CopilotCliOwner compare instants, not local clock readings' {
+  BeforeEach { Reset-CopilotCli }
+  It 'compares a local start time with a UTC one as the same instant' {
+    $began = [datetime]::SpecifyKind([datetime]'2026-06-01T12:00:00', 'Utc')
+    Test-ProcessSince 4242 $began { param($id) $began.AddHours(1).ToLocalTime() } | Should -BeFalse -Because 'it started an hour after'
+    Test-ProcessSince 4242 $began { param($id) $began.AddMinutes(-1).ToLocalTime() } | Should -BeTrue
+  }
+  It 'takes a process that started half an hour before its lock, across the autumn clock change' {
+    # 08:40Z and 09:10Z on 1 Nov 2026: 01:40 daylight time and 01:10 standard time in the US zones
+    $lf = Join-Path $TestDrive 'inuse.4242.lock'; [IO.File]::WriteAllText($lf, '4242')
+    [IO.File]::SetLastWriteTimeUtc($lf, [datetime]::SpecifyKind([datetime]'2026-11-01T09:10:00', 'Utc'))
+    $start = [datetime]::FromFileTime([datetime]::SpecifyKind([datetime]'2026-11-01T08:40:00', 'Utc').ToFileTimeUtc())
+    Get-CopilotCliOwner @([IO.FileInfo]::new($lf)) { param($id) $start } | Should -Be 4242
   }
 }
 
@@ -438,6 +468,7 @@ Describe 'a Copilot CLI session in a linked git worktree whose HEAD cannot be re
     $linked = Join-Path $work 'linked'; $gitdir = Join-Path $work 'main/.git/worktrees/linked'
     foreach ($d in $linked, $gitdir) { [void][IO.Directory]::CreateDirectory($d) }
     [IO.File]::WriteAllText((Join-Path $linked '.git'), "gitdir: $gitdir`n")
+    [IO.File]::WriteAllText((Join-Path $gitdir 'commondir'), "../..`n")   # as git worktree add writes it
     $head = Join-Path $gitdir 'HEAD'
     [IO.File]::WriteAllText($head, "ref: refs/heads/live-branch`n")
     $root = Join-Path $work 'copilot'; $env:COPILOT_HOME = $root
@@ -645,5 +676,28 @@ Describe 'a Copilot CLI session in a linked git worktree whose HEAD cannot be re
     $again = @(Build-Rows | Where-Object { $_.NAME -eq 'cpcli-wt000001' })[0]
     [object]::ReferenceEquals($next, $again) | Should -BeTrue
     $script:BranchCache.Count | Should -Be 0   # settled: git is not asked again
+  }
+}
+
+# A submodule's .git is a pointer file too ("gitdir: ../.git/modules/<name>", as git submodule add writes it),
+# but its gitdir is not under a worktrees folder: it is the submodule's own repository, not a linked worktree.
+Describe 'Get-GitInfo: a submodule is not a linked worktree' {
+  BeforeEach { $script:BranchCache = @{} }
+  It 'reads a submodule''s branch and does not mark it a worktree' {
+    $super = Join-Path $TestDrive 'super'; $mod = Join-Path $super '.git/modules/lib'
+    [void][IO.Directory]::CreateDirectory($mod); [void][IO.Directory]::CreateDirectory((Join-Path $super 'lib'))
+    [IO.File]::WriteAllText((Join-Path $super '.git/HEAD'), "ref: refs/heads/main`n")
+    [IO.File]::WriteAllText((Join-Path $mod 'HEAD'), "ref: refs/heads/libmain`n")
+    [IO.File]::WriteAllText((Join-Path $super 'lib/.git'), "gitdir: ../.git/modules/lib`n")
+    $g = Get-GitInfo (Join-Path $super 'lib')
+    $g.Branch | Should -Be 'libmain'
+    $g.Worktree | Should -BeFalse
+  }
+  It 'does not mark a submodule a worktree when its path ends in worktrees/<name>: a linked worktree''s gitdir has a commondir file' {
+    $super = Join-Path $TestDrive 'super2'; $mod = Join-Path $super '.git/modules/worktrees/lib'
+    [void][IO.Directory]::CreateDirectory($mod); [void][IO.Directory]::CreateDirectory((Join-Path $super 'worktrees/lib'))
+    [IO.File]::WriteAllText((Join-Path $mod 'HEAD'), "ref: refs/heads/libmain`n")
+    [IO.File]::WriteAllText((Join-Path $super 'worktrees/lib/.git'), "gitdir: ../../.git/modules/worktrees/lib`n")
+    (Get-GitInfo (Join-Path $super 'worktrees/lib')).Worktree | Should -BeFalse
   }
 }

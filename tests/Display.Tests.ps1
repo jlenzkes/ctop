@@ -437,3 +437,33 @@ Describe 'BRANCH: at most 14 wide, a longer name on the row''s second line; LAST
     $w['LAST ACTION'] | Should -Be 53    # its share (42) and the 11 cells NAME and CWD left
   }
 }
+
+# Text from sessions reaches peek and the closed-sessions list as it was written; an escape sequence in it
+# (here ESC[5;8m, blink and hide, which ctop never paints with) must not reach the terminal.
+Describe 'session text cannot paint the terminal' {
+  BeforeAll {
+    Mock Get-WindowWidth { 200 }
+    $script:PriceFrom = 'test'
+    $script:X = "$([char]27)[5;8m"
+    function Taint($o) { foreach ($p in @($o.PSObject.Properties)) { if ($p.Value -is [string]) { $p.Value = $p.Value + $script:X + 'z' } } }
+    function Text($lines) { (@($lines) | ForEach-Object { if ($_ -is [hashtable]) { $_.Text } else { $_ } }) -join "`n" }
+  }
+  It 'in a session''s peek' {
+    $row = [pscustomobject]@{ NAME = 'p-one'; TITLE = 't'; KIND = 'interactive'; VIA = 'cli'; STATE = 'idle'; PID = 1; 'CPU(s)' = 0; 'MEM(MB)' = 0
+      AGE = '1m'; IDLE = '1m'; TURN = ''; TURNS = 1; TOOLS = 0; CTX = '-'; MODEL = 'opus-5-5'; BRANCH = 'main'; COST = '$1.00'; RATE = '-'; ACTIVITY = ''
+      'LAST ACTION' = '-'; CWD = '/w'; _SessionId = 's'; _Desc = 'the task'; _LaunchCwd = '/v'
+      _Act = [pscustomobject]@{ Cost = 1.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0; Compacts = 1; LastCompactTrigger = 'auto'; ToolMix = 'Bash 1'; LastFull = 'said' }
+      _Transcript = '/w/s.jsonl'; _StartedAt = (Get-Date) }
+    Taint $row; Taint $row._Act
+    Text (Build-Peek $row) | Should -Not -Match '\x1b\[5;8m'
+  }
+  It 'in the closed-sessions list' {
+    $rec = [pscustomobject]@{ closedAt = (Get-Date).ToString('o'); why = 'closed'; name = 'n'; title = 't'; sessionId = 's'; cwd = '/w' }
+    Taint $rec; $rec.closedAt = (Get-Date).ToString('o')
+    $text = Text (Get-ClosedLines @($rec))
+    $text | Should -Not -Match '\x1b'
+    $text | Should -Match 'nz' -Because 'the text itself is kept'
+    @(Get-ClosedLines @($rec, $rec)) | ForEach-Object { $_ -is [string] -or $_ -is [hashtable] | Should -BeTrue -Because 'one line each, for paging' }
+    @(Get-ClosedLines @($rec, $rec)).Count | Should -Be 6
+  }
+}

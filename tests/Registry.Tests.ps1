@@ -108,3 +108,39 @@ Describe 'Get-RegistryRoster: an entry caught half-written is not a session that
     @(Get-RegistryRoster).Count | Should -Be 0
   }
 }
+
+# The claude command found at start can go away while ctop runs (uninstalled, or caught mid-update): the poll
+# then reads Claude Code's registry, as with no claude command at all, instead of stopping ctop.
+Describe 'Start-RosterPoll: a claude command that will not start' {
+  It 'reads the registry instead' {
+    $script:ConfigDir = Join-Path $TestDrive 'cfg-nostart'; $ConfigDir = $script:ConfigDir
+    New-Item -ItemType Directory -Force -Path (Join-Path $ConfigDir 'sessions') | Out-Null
+    $script:ClaudeCmd = Join-Path $TestDrive 'gone/claude.exe'
+    $script:Roster = @(); $script:RegistryUnreadable = @(); $script:Poll = $null
+    try { { Start-RosterPoll } | Should -Not -Throw }
+    finally { $script:ClaudeCmd = $null }
+    $script:Poll.ContainsKey('Registry') | Should -BeTrue
+  }
+  It 'reads the registry when the claude.cmd it found is gone (cmd.exe itself would still start)' {
+    $script:ConfigDir = Join-Path $TestDrive 'cfg-nocmd'; $ConfigDir = $script:ConfigDir
+    New-Item -ItemType Directory -Force -Path (Join-Path $ConfigDir 'sessions') | Out-Null
+    $script:ClaudeCmd = Join-Path $TestDrive 'gone/claude.cmd'
+    $script:Roster = @(); $script:RegistryUnreadable = @(); $script:Poll = $null
+    try { Start-RosterPoll } finally { $script:ClaudeCmd = $null }
+    $script:Poll.ContainsKey('Registry') | Should -BeTrue
+  }
+}
+
+# A process ctop may not open has no StartTime, and reading it raises no error on either runtime (seen for pid 4
+# from an unelevated shell, 2026-11-23): a start time that can't be read, which Test-ProcessSince takes as live
+# for a registry entry or a Cline session and not for a Copilot CLI lock.
+Describe 'Get-ProcessStart: a process whose start time cannot be read' {
+  It 'says unknown, not that no process has the pid' {
+    Mock Get-Process { [pscustomobject]@{ Id = 4242; StartTime = $null } }
+    Get-ProcessStart 4242 | Should -Be 'unknown'
+  }
+  It 'says $null when no process has the pid' {
+    Mock Get-Process { }
+    Get-ProcessStart 4242 | Should -BeNullOrEmpty
+  }
+}

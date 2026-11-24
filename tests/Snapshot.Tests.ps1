@@ -206,6 +206,28 @@ Describe 'a snapshot (-Snapshot)' {
     $rows.Count | Should -Be 80
     @($rows | Where-Object { $_ -match '\$0\.40' }).Count | Should -Be 80 -Because 'every row''s cost is read: 40 replies at $0.01'
   }
+  It 'reads every ended Copilot CLI session''s log before it prints, however many there are' {
+    # as for Cline: the live display reads a few logs a frame; a snapshot prints one frame and exits
+    $fx = New-Fixture (Join-Path $TestDrive 'snap-cli-many') @() -NoLive
+    $fx.NoClaude = $true
+    $fx.CopilotCli = Join-Path $fx.Cfg 'copilot-home'
+    $at = [DateTime]::UtcNow.AddMinutes(-5).ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    function Ev([string]$type, [string]$data) { '{"type":"' + $type + '","data":' + $data + ',"id":"' + [guid]::NewGuid() + '","timestamp":"' + $at + '"}' }
+    $turn = @((Ev 'user.message' '{"content":"do it"}'), (Ev 'assistant.turn_start' '{"turnId":"0"}'),
+              (Ev 'session.usage_record' '{"usage":{"model":"claude-opus-5-5","inputTokens":1000,"outputTokens":10,"cacheReadTokens":0,"cacheWriteTokens":0,"isByok":true,"maxPromptTokens":128000}}'),
+              (Ev 'assistant.message' ('{"content":"' + ('y' * 2000) + '"}')), (Ev 'assistant.turn_end' '{"turnId":"0"}'))
+    $log = @((Ev 'session.start' ('{"startTime":"' + $at + '","selectedModel":"claude-opus-5-5"}'))) + @(for ($k = 0; $k -lt 40; $k++) { $turn }) + @(Ev 'session.shutdown' '{"shutdownType":"routine"}')
+    $text = ($log -join "`n") + "`n"
+    for ($n = 0; $n -lt 60; $n++) {
+      $dir = Join-Path $fx.CopilotCli ('session-state/{0:x8}-0000-4000-8000-000000000000' -f $n); New-Item -ItemType Directory -Force -Path $dir | Out-Null
+      [IO.File]::WriteAllText((Join-Path $dir 'events.jsonl'), $text)
+      [IO.File]::WriteAllText((Join-Path $dir 'workspace.yaml'), "id: x`ncwd: /w`nclient_name: github/cli`nname: run $n`n")
+    }
+    $x = Invoke-Snapshot $fx @('-MaxWidth', '400', '-Keep', 'inf')
+    $x.Code | Should -Be 0 -Because $x.Err
+    @($x.Text -split "`r?`n" | Where-Object { $_ -match '^cpcli-[0-9a-f]{8} ' }).Count | Should -Be 60
+    $x.Text | Should -Not -Match 'not read yet'
+  }
   It 'lists a Copilot chat from VS Code''s chat files, with no claude command' {
     $fx = New-Fixture (Join-Path $TestDrive 'snap-copilot') @() -NoLive
     $fx.NoClaude = $true
