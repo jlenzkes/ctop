@@ -1526,7 +1526,7 @@ function Test-SameHead([string]$path, [string]$head) {
 function New-ScanState([System.IO.FileInfo]$file) {
   @{ Path = $file.FullName; Head = (Get-HeadPrint $file.FullName)
      PriceVer = $script:PriceVer; ScanVer = $script:ScanVer; Reader = (Get-EntryReader); Offset = 0; Turns = 0; Tools = 0; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0;
-     RecentCalls = @(); Model = '-'; AiTitle = ''; Summary = ''; Title = ''; First = ''; MsgSummary = ''; Cwd = ''; GitBranch = ''; ToolCounts = @{}
+     RecentCalls = @(); SeenIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal); Model = '-'; AiTitle = ''; Summary = ''; Title = ''; First = ''; MsgSummary = ''; Cwd = ''; GitBranch = ''; ToolCounts = @{}
      Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; LastCompactPostTokens = 0; ToolLog = @()
      CacheAnchor = ''; CacheAnchorId = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = ''; CacheReqAt = ''; CacheModel = '' }
 }
@@ -1668,22 +1668,29 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
       # the 5-minute writes, subtracted in decimal (exact for any two longs), then a double for the dollars: as doubles
       # the two counts round apart past 2^53, which loses or doubles a token; and [math]::Max(0, a long) takes the
       # long as an Int32, which throws past 2^31-1 and would leave the rest of the lines unread
+      # (a 1-hour part larger than the write it splits counts only up to the write: real zeroed lines carry one)
       $cw5 = [double][math]::Max([decimal]0, [decimal]$cw - [decimal]$cw1h)
+      $w1h = [double][math]::Max([decimal]0, [math]::Min([decimal]$cw1h, [decimal]$cw))
       $price = Get-Price $st.Model (Get-PromptTokens $in $cr $cw)
-      $c = if ($price) { ([double]$in * $price.In + [double]$out * $price.Out + [double]$cr * $price.Read + $cw5 * $price.W5 + [double]$cw1h * $price.W1h) / 1e6 } else { 0.0 }
-      # One reply is one call, written as one line per content block, each with the usage so far: a later line of
-      # a recent reply replaces its cost and output (the last carries the final output_tokens), even when another
-      # reply's lines came between (seen in 14 of 4,542 real transcripts). Ids are compared exactly.
+      $c = if ($price) { ([double]$in * $price.In + [double]$out * $price.Out + [double]$cr * $price.Read + $cw5 * $price.W5 + $w1h * $price.W1h) / 1e6 } else { 0.0 }
+      # One reply is one call. Claude Code writes it as one line per content block, each with the usage so far, and
+      # another reply's lines can come between them: a later line of a recent reply replaces its cost and output
+      # (the last carries the final output_tokens). A reply can also come again much later, copied whole or with
+      # every count 0 (1,816 such lines in 221 real transcripts, none with more output than the reply had): an id
+      # counted before is not counted again, and a line with no tokens is no call. Ids are compared exactly.
+      if ($st.SeenIds -isnot [Collections.Generic.HashSet[string]]) {   # a saved scan holds them as a list
+        $st.SeenIds = [Collections.Generic.HashSet[string]]::new([string[]]@(@($st.SeenIds) | Where-Object { $_ }), [StringComparer]::Ordinal)
+      }
       $call = $null
       if ($id) { foreach ($x in @($st.RecentCalls)) { if ($x.Id -ceq $id) { $call = $x; break } } }
-      if ($call) {
-        $st.Cost -= $call.Cost; $st.OutTok -= $call.Out
+      if (-not ($in -or $out -or $cr -or $cw)) { }   # no tokens: no call
+      elseif ($call) {
+        $st.Cost += $c - $call.Cost; $st.OutTok += $out - $call.Out
         $call.Cost = $c; $call.Out = $out
-      } else {
-        $st.InTok += $in; $st.CacheR += $cr; $st.CacheW += $cw
-        $st.RecentCalls = @(@($st.RecentCalls) + @(@{ Id = $id; Cost = $c; Out = $out }) | Select-Object -Last 8)
+      } elseif (-not $id -or $st.SeenIds.Add($id)) {
+        $st.InTok += $in; $st.CacheR += $cr; $st.CacheW += $cw; $st.Cost += $c; $st.OutTok += $out
+        if ($id) { $st.RecentCalls = @(@($st.RecentCalls) + @(@{ Id = $id; Cost = $c; Out = $out }) | Select-Object -Last 8) }
       }
-      $st.Cost += $c; $st.OutTok += $out
     }
     # The regex reader skips the kinds it doesn't read (Read-EntryRx), but a newer entry of such a kind (a
     # progress entry, say) still has the session's cwd and branch: look back over those after the last one

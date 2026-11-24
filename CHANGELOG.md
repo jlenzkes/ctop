@@ -6,9 +6,10 @@ Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build numbe
 
 - **`-Snapshot` lists every Copilot CLI session** in the keep window. It listed as many as it could read in 120 ms
   (2 of 137 on one machine), and its note spoke of rows it had not printed.
-- **COST counts each reply once.** Claude Code writes a reply as several lines; when another reply's lines came
-  between them, the reply was counted again (seen in 14 of 4,542 transcripts, 0.4% to 30% over).
-  Saved scans are redone once.
+- **COST counts each reply once.** Claude Code writes a reply as several lines, and can write it again much later,
+  copied whole or with every count 0. A reply whose lines had another reply's between them, or that came again, was
+  counted again (14 of 4,542 real transcripts, 0.4% to 30% over), and a zeroed copy could undo a reply's cost.
+  Checked against one charge per reply on 221 real transcripts: equal on every one. Saved scans are redone once.
 - **A Copilot CLI question to you shows `waiting`** (its `ask_user` tool), not `working`.
 - **A `claude` command that will not start** (uninstalled, or caught mid-update) no longer stops ctop: that poll
   reads Claude Code's session registry instead.

@@ -108,6 +108,20 @@ Describe 'Update-Scan: the cache anchor' {
     Load-ScanCache
     foreach ($f in 'CacheAnchor', 'CacheReqAt', 'CacheCompactAt') { (At ([string]$script:ScanCache.k[$f])) | Should -Be (At $t) -Because $f }
   }
+  It 'keeps the replies it counted through a save and a load: a copy of one written after a restart is not counted' {
+    $script:CacheDays = 2; $script:ScanCachePath = Join-Path $TestDrive "sc-$([guid]::NewGuid().ToString('N')).json"
+    $script:ScanCache = @{}; $script:ScanVerified = @{}
+    $f = Join-Path $TestDrive "t-$([guid]::NewGuid().ToString('N')).jsonl"; $key = [IO.Path]::GetFileNameWithoutExtension($f)
+    $lines = @(for ($i = 1; $i -le 10; $i++) { Usage '2026-11-13T12:00:00.000Z' "msg_$i" })
+    [IO.File]::WriteAllText($f, (($lines -join "`n") + "`n"))
+    $before = (Update-Scan (Get-Item -LiteralPath $f) $key).InTok
+    $script:ScanCache[$key].Used = (Get-Date).ToUniversalTime().Ticks
+    Mock Move-Over { [IO.File]::Copy($src, $dst, $true); [IO.File]::Delete($src) }
+    Save-ScanCache; $script:ScanCache = @{}; $script:ScanVerified = @{}; Load-ScanCache
+    $script:ScanCache.ContainsKey($key) | Should -BeTrue -Because 'the scan resumes from where it stopped'
+    [IO.File]::AppendAllText($f, (Usage '2026-11-13T12:00:00.000Z' 'msg_1') + "`n")
+    (Update-Scan (Get-Item -LiteralPath $f) $key).InTok | Should -Be $before
+  }
   # Windows PowerShell 5.1 saves a DateTime as "\/Date(<ms since 1970, UTC>)\/", and both runtimes read that back
   # as a UTC DateTime; TURN and CMP subtract it from local time, so it must come back as local time.
   It 'gives back a turn start and a compaction time saved by Windows PowerShell 5.1 as local times' {
