@@ -16,7 +16,7 @@ Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build numbe
   saved came back off by the UTC offset.
 - **`y` copies a Copilot CLI session's resume command** (`copilot --resume <id>`), peek shows it for an ended
   interactive session too, and `y` says so when a session has no resume command.
-- **Every footer item can be clicked**: `v truncate`, and each key of `t/y/n/d copy` and `+/- keep`.
+- **More footer items can be clicked**: `v truncate`, and each key of `t/y/n/d copy` and `+/- keep`.
 - **A git submodule is no longer shown as a linked worktree** (`wt:`).
 - **Session text cannot recolor peek or the closed-sessions list**: escape sequences in it are taken out.
 - **Liveness compares times as instants**, so a Copilot CLI session is not shown gone across the autumn clock

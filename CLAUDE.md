@@ -45,9 +45,8 @@ Every PR is audited before it merges.
 - **One Gemini review at a time, and it answers one narrow question, never a whole PR.** Two whole-PR reviews run together used up the Gemini quota before either finished.
 - **A review round that is owed is written here, with where its report will land, until the report is back,** so a session that ends mid-review leaves the next one a handle.
   - **Owed now** (the owner's decisions, 23 Nov 2026), one Gemini round at a time, in this order:
-    1. Gemini (Neon), round 1 on the fixes in the PR from `audit/copilot-cli-state`: does any change make a row show something wrong that `main` showed right? Report: `C:\Users\jlenzkes\ctop-neon\fix-r1\VERDICT.md`.
-    2. Gemini (Neon), one narrow question on COST accounting, after the first is back. Report: `C:\Users\jlenzkes\ctop-neon\cost-r1\VERDICT.md`.
-    3. After that PR merges: Astra (Codex), a design review of `ctop.ps1`, seeded with the static audit's architecture findings, proposing a refactor plan and writing no code. Report: the `final.md` of the job folder `C:\Users\jlenzkes\ctop-astra\design-r1\`.
+    1. Gemini (Neon), one narrow question on COST accounting. Report: `C:\Users\jlenzkes\ctop-neon\cost-r1\VERDICT.md`.
+    2. After the PR from `audit/copilot-cli-state` merges: Astra (Codex), a design review of `ctop.ps1`, seeded with the static audit's architecture findings, proposing a refactor plan and writing no code. Report: the `final.md` of the job folder `C:\Users\jlenzkes\ctop-astra\design-r1\`.
 - **Finding weights** (the paragraph each brief carries): "Weigh every finding by the decision it changes, regardless of edit size. Weigh it HOLDS when you can name who would decide what differently because of it as it stands: a wrong verdict, behavior or outcome for a user or maintainer, a false instruction, closure condition or claim a session would follow, or a promise that fails. A true finding is a NOTE when you can name no such decision, as with wording, placement, style or a citation that still lands on the passage it means. One word that reverses a claim is HOLDS. A finding you cannot weigh is HOLDS. Only a HOLDS finding is an objection, and a pass whose findings are all NOTEs approves. Each reader alone can re-weigh its own finding; the author may argue a finding's weight once."
 
 ## Known problems
