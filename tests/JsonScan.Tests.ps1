@@ -14,12 +14,13 @@ BeforeAll {
   function Scan([string[]]$lines) { ScanRaw (($lines -join "`n") + "`n") }
   # what a scan found, everything but where the file is and how far it was read
   function Fields($st) {
-    $names = 'Turns', 'Tools', 'TurnStart', 'Cost', 'InTok', 'OutTok', 'CacheR', 'CacheW', 'LastId', 'LastCost', 'LastOut', 'Model', 'AiTitle', 'Summary',
+    $names = 'Turns', 'Tools', 'TurnStart', 'Cost', 'InTok', 'OutTok', 'CacheR', 'CacheW', 'Model', 'AiTitle', 'Summary',
              'Title', 'First', 'MsgSummary', 'Cwd', 'GitBranch', 'Compacts', 'LastCompactAt', 'LastCompactTrigger', 'LastCompactPreTokens', 'LastCompactPostTokens',
              'CacheAnchor', 'CacheAnchorId', 'CacheTtl', 'RecacheTok', 'CacheCompactAt', 'CacheReqAt'
     $o = foreach ($n in $names) { '{0}={1}' -f $n, $st[$n] }
     $o += 'ToolCounts=' + (($st.ToolCounts.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name):$($_.Value)" }) -join ',')
     $o += 'ToolLog=' + @($st.ToolLog).Count
+    $o += 'RecentCalls=' + ((@($st.RecentCalls) | ForEach-Object { "$($_.Id):$($_.Cost):$($_.Out)" }) -join ',')
     $o -join "`n"
   }
   function At([string]$ts) { [DateTimeOffset]::Parse($ts, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime }
@@ -164,7 +165,19 @@ Describe 'Update-Scan reads what JSON.parse reads' {
   ) {
     $st = Scan @($B.Replace('"output_tokens":5', '"output_tokens":' + $Text))
     $st.OutTok | Should -Be $Want
-    $st.LastOut | Should -Be $Want
+    @($st.RecentCalls)[-1].Out | Should -Be $Want
+  }
+  # Claude Code writes a reply that has several content blocks as several lines, each with the reply's usage so
+  # far; another reply's lines can come between them (seen in 14 of 4,542 real transcripts). One reply is one call.
+  It 'counts a reply once when another reply''s lines come between its own' {
+    function Reply([string]$id, [int]$in, [int]$out) { $B.Replace('"id":"msg_1"', '"id":"' + $id + '"').Replace('"input_tokens":3', '"input_tokens":' + $in).Replace('"output_tokens":5', '"output_tokens":' + $out) }
+    $st = Scan @((Reply 'msg_A' 100 5), (Reply 'msg_B' 200 1), (Reply 'msg_A' 100 10))
+    $st.InTok | Should -Be 300
+    $st.OutTok | Should -Be 11 -Because 'msg_A''s last line carries its final output'
+    $st.CacheR | Should -Be 2000
+    $once = Scan @((Reply 'msg_B' 200 1), (Reply 'msg_A' 100 10))
+    [math]::Round($st.Cost, 9) | Should -Be ([math]::Round($once.Cost, 9))
+    (Scan @((Reply 'msg_A' 100 5), (Reply 'msg_a' 100 5))).InTok | Should -Be 200 -Because 'ids are case-sensitive: two calls'
   }
   It 'the last compactMetadata, whole: a count only the first one had is not read' {
     $st = Scan @('{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":280717,"postTokens":51232},"compactMetadata":{"trigger":"manual"},"timestamp":"2026-11-14T02:15:54.010Z"}')

@@ -108,6 +108,20 @@ Describe 'Update-Scan: the cache anchor' {
     Load-ScanCache
     foreach ($f in 'CacheAnchor', 'CacheReqAt', 'CacheCompactAt') { (At ([string]$script:ScanCache.k[$f])) | Should -Be (At $t) -Because $f }
   }
+  # Windows PowerShell 5.1 saves a DateTime as "\/Date(<ms since 1970, UTC>)\/", and both runtimes read that back
+  # as a UTC DateTime; TURN and CMP subtract it from local time, so it must come back as local time.
+  It 'gives back a turn start and a compaction time saved by Windows PowerShell 5.1 as local times' {
+    $script:CacheDays = 2; $script:PriceVer = 2; $script:ScanVer = 6
+    $script:ScanCachePath = Join-Path $TestDrive "sc-$([guid]::NewGuid().ToString('N')).json"
+    $now = (Get-Date).ToUniversalTime()
+    $ms = [DateTimeOffset]::UtcNow.AddMinutes(-30).ToUnixTimeMilliseconds()
+    [IO.File]::WriteAllText($script:ScanCachePath, '{"k":{"Path":"/a.jsonl","Head":"h","Used":' + $now.Ticks + ',"PriceVer":2,"ScanVer":6,"ToolCounts":{},' +
+      '"TurnStart":"\/Date(' + $ms + ')\/","LastCompactAt":"\/Date(' + $ms + ')\/"}}')
+    $script:ScanCache = @{}
+    Load-ScanCache
+    Get-Since $script:ScanCache.k.TurnStart | Should -Be '30m'
+    Get-Since $script:ScanCache.k.LastCompactAt | Should -Be '30m'
+  }
   It 'reads the entry''s own fields, not look-alikes inside a tool input: <Name>' -ForEach @(
     @{ Name = 'a usage object';        Nested = '{"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}' }
     @{ Name = 'isSidechain true';      Nested = '{"isSidechain":true}' }

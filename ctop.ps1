@@ -100,7 +100,7 @@
   sees. Width: -MaxWidth, else the window's, else 200 columns.
 
 .NOTES
-  VERSION 2026.11.23.23 — calendar versioning: YYYY.MM.DD of the build, then that day's build
+  VERSION 2026.11.23.24 — calendar versioning: YYYY.MM.DD of the build, then that day's build
   number. Shown as "build …" at the end of the instrument strip (line 2), on the help screen and
   on any crash message; -Version prints it.
   Release notes: CHANGELOG.md, beside this script.
@@ -137,7 +137,7 @@ param(
   [switch]$Version,
   [Parameter(DontShow)][switch]$Worker
 )
-$script:CtopVersion = '2026.11.23.23'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
+$script:CtopVersion = '2026.11.23.24'   # YYYY.MM.DD.<build that day>; keep in step with .NOTES and CHANGELOG.md
 if ($Version) { "ctop $script:CtopVersion"; return }
 # CTOP_TRACE=<file>: each process appends when it reaches a startup phase (Unix ms, ms since its own start,
 # role, phase), to see where startup time goes. Off unless set; failures to write are ignored.
@@ -418,6 +418,26 @@ function Protect-TerminalText([string]$text) {
   if (-not $text) { return $text }
   [regex]::Replace([regex]::Replace($text, '\x1b(?!\[[0-9;]*m)', ''), '[\x00-\x1A\x1C-\x1F\x7F-\x9F]', ' ')
 }
+# That keeps color codes, so session text must not bring its own: table cells pass through Clean, and peek
+# and the closed-sessions list, which put a row's fields into their lines as they are, take them from
+# Get-PlainView, a copy of the row (its strings, and those of the objects, maps and lists under it, $depth
+# levels down) with every escape sequence taken out.
+function Remove-EscapeSequences([string]$s) { [regex]::Replace($s, '\x1b(\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)?)?', '') }
+function Get-PlainView($o, [int]$depth = 3) {
+  if ($o -is [string]) { return (Remove-EscapeSequences $o) }
+  if ($null -eq $o -or $depth -lt 0) { return $o }
+  if ($o -is [System.Management.Automation.PSCustomObject]) {
+    $h = [ordered]@{}; foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = Get-PlainView $p.Value ($depth - 1) }
+    return [pscustomobject]$h
+  }
+  if ($o -is [Collections.IDictionary]) {
+    $h = if ($o -is [Collections.Specialized.OrderedDictionary]) { [ordered]@{} } else { @{} }
+    foreach ($k in @($o.Keys)) { $h[$k] = Get-PlainView $o[$k] ($depth - 1) }
+    return $h
+  }
+  if ($o -is [object[]]) { return ,@(foreach ($x in $o) { Get-PlainView $x ($depth - 1) }) }
+  return $o
+}
 # Move the cursor, never past the console buffer's last row. The window can shrink between reading its
 # size and moving the cursor (a resize while a frame is drawn): SetCursorPosition would then throw ("must
 # be less than the console's buffer size", seen on Windows) and stop ctop. The next frame sees the new size and
@@ -681,7 +701,7 @@ $script:PriceVer = 4   # the price table's version: raise it with any change to 
 $script:PriceFrom = 'the built-in table, read 2026-10-20, Fable 5.2 2026-11-22, fast mode ids 2026-11-23 (-PricingFile for your own)'   # the date in the Source line above; peek and help show it
 # ScanVer: the version of what a scan extracts. Raise it whenever that changes: cached scan state saved under
 # another version is redone once.
-$script:ScanVer = 12
+$script:ScanVer = 13
 $script:Pricing = @(
   @{ Match = 'fable-5-2-fast|mythos-5-2-fast'; In = 16; W5 = 20; W1h = 32; Read = 0.4; Out = 80 }   # fast mode (Foundry)
   @{ Match = 'fable-5-2|mythos-5-2'; In = 8;   W5 = 10;    W1h = 16;  Read = 0.2;  Out = 40 }
@@ -1418,6 +1438,15 @@ function Load-ScanCache {
         if ($v -is [DateTimeOffset]) { $v = $v.UtcDateTime }
         if ($v -is [datetime]) { $e[$tf] = Format-CacheTime $(if ($v.Kind -eq 'Unspecified') { [datetime]::SpecifyKind($v, 'Utc') } else { $v.ToUniversalTime() }) }
       }
+      # The turn start and the last compaction are local DateTimes in a scan; Windows PowerShell 5.1 saves one as
+      # "\/Date(<ms, UTC>)\/", which both runtimes read back as a UTC DateTime, and TURN and CMP subtract it from
+      # local time: back to local, as an instant
+      foreach ($tf in 'TurnStart', 'LastCompactAt') {
+        $v = $e[$tf]
+        if ($v -is [DateTimeOffset]) { $e[$tf] = $v.LocalDateTime }
+        elseif ($v -is [datetime] -and $v.Kind -eq 'Utc') { $e[$tf] = $v.ToLocalTime() }
+        elseif ($v -is [string]) { $e[$tf] = $(if ($v) { try { [DateTimeOffset]::Parse($v, [Globalization.CultureInfo]::InvariantCulture).LocalDateTime } catch { $null } }) }   # 5.1 reading PowerShell 7's ISO text
+      }
       $script:ScanCache[$k] = $e
     }
   } catch {}   # unreadable cache: just scan from scratch
@@ -1497,7 +1526,7 @@ function Test-SameHead([string]$path, [string]$head) {
 function New-ScanState([System.IO.FileInfo]$file) {
   @{ Path = $file.FullName; Head = (Get-HeadPrint $file.FullName)
      PriceVer = $script:PriceVer; ScanVer = $script:ScanVer; Reader = (Get-EntryReader); Offset = 0; Turns = 0; Tools = 0; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0;
-     LastId = ''; LastCost = 0.0; LastOut = 0; Model = '-'; AiTitle = ''; Summary = ''; Title = ''; First = ''; MsgSummary = ''; Cwd = ''; GitBranch = ''; ToolCounts = @{}
+     RecentCalls = @(); Model = '-'; AiTitle = ''; Summary = ''; Title = ''; First = ''; MsgSummary = ''; Cwd = ''; GitBranch = ''; ToolCounts = @{}
      Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; LastCompactPostTokens = 0; ToolLog = @()
      CacheAnchor = ''; CacheAnchorId = ''; CacheTtl = ''; RecacheTok = 0; CacheCompactAt = ''; CacheReqAt = ''; CacheModel = '' }
 }
@@ -1642,13 +1671,19 @@ function Update-Scan([System.IO.FileInfo]$file, [string]$key) {
       $cw5 = [double][math]::Max([decimal]0, [decimal]$cw - [decimal]$cw1h)
       $price = Get-Price $st.Model (Get-PromptTokens $in $cr $cw)
       $c = if ($price) { ([double]$in * $price.In + [double]$out * $price.Out + [double]$cr * $price.Read + $cw5 * $price.W5 + [double]$cw1h * $price.W1h) / 1e6 } else { 0.0 }
-      if ($id -and $id -eq $st.LastId) {
-        # same message: replace, don't add (later lines carry the final output_tokens)
-        $st.Cost -= $st.LastCost; $st.OutTok -= $st.LastOut
+      # One reply is one call, written as one line per content block, each with the usage so far: a later line of
+      # a recent reply replaces its cost and output (the last carries the final output_tokens), even when another
+      # reply's lines came between (seen in 14 of 4,542 real transcripts). Ids are compared exactly.
+      $call = $null
+      if ($id) { foreach ($x in @($st.RecentCalls)) { if ($x.Id -ceq $id) { $call = $x; break } } }
+      if ($call) {
+        $st.Cost -= $call.Cost; $st.OutTok -= $call.Out
+        $call.Cost = $c; $call.Out = $out
       } else {
         $st.InTok += $in; $st.CacheR += $cr; $st.CacheW += $cw
+        $st.RecentCalls = @(@($st.RecentCalls) + @(@{ Id = $id; Cost = $c; Out = $out }) | Select-Object -Last 8)
       }
-      $st.Cost += $c; $st.OutTok += $out; $st.LastId = $id; $st.LastCost = $c; $st.LastOut = $out
+      $st.Cost += $c; $st.OutTok += $out
     }
     # The regex reader skips the kinds it doesn't read (Read-EntryRx), but a newer entry of such a kind (a
     # progress entry, say) still has the session's cwd and branch: look back over those after the last one
@@ -2044,10 +2079,11 @@ function Get-GitInfo([string]$dir) {
       $g = Join-Path $d '.git'
       $wt = $false; $main = ''
       $headFile = if (Test-Path -LiteralPath $g -PathType Leaf) {
-        # linked worktree: .git is a pointer file "gitdir: <main>/.git/worktrees/<name>"
+        # .git is a pointer file "gitdir: <dir>": a linked worktree's dir is <main>/.git/worktrees/<name>; a
+        # submodule's is the superproject's .git/modules/<name>, its own repository, not a worktree
         $ptr = ([string]$(try { Read-SharedText $g -FirstLine } catch { '' })) -replace '^gitdir:\s*', ''
         if (-not [IO.Path]::IsPathRooted($ptr)) { $ptr = Join-Path $d $ptr }
-        $wt = $true
+        $wt = $ptr -match '[\\/]worktrees[\\/][^\\/]+[\\/]*$'
         if ($ptr -match '^(.*)[\\/]\.git[\\/]worktrees[\\/]') { $main = $Matches[1] }
         Join-Path $ptr 'HEAD'
       } else { Join-Path $g 'HEAD' }
@@ -2452,16 +2488,21 @@ function Read-ClosedLog([int]$max = 200) {
   foreach ($r in ($recs | Sort-Object { [datetime]$_.closedAt } -Descending)) { if (-not $seen[[string]$r.sessionId]) { $seen[[string]$r.sessionId] = $true; $out += $r } }
   return $out
 }
-function Show-Closed {
-  $recs = @(Read-ClosedLog)
+# The closed-sessions list (x), as lines: each record's text without escape sequences of its own.
+function Get-ClosedLines([object[]]$recs) {
   $lines = @(@{ Text = "  ctop — closed sessions   ($($recs.Count), newest first; clr = replaced by /clear, still resumable)   log: $($script:ClosedLogPath)"; Inverse = $true }, '')
   if ($recs.Count -eq 0) { $lines += '  (none recorded yet — sessions are logged here when they leave the roster)' }
-  foreach ($r in $recs) {
+  foreach ($rec in $recs) {
+    $r = Get-PlainView $rec 1
     $t = ([datetime]$r.closedAt).ToString('MM-dd HH:mm')
     $nm = [string]$r.name; $nm += ' ' * [math]::Max(0, 14 - (Get-CellWidth $nm))   # cells, not characters
     $lines += "  $t  $(if ($r.why -eq 'cleared') { 'clr' } else { '   ' })  $nm  $($r.title)"
     $lines += "                              claude --resume $($r.sessionId)     $($r.cwd)"
   }
+  return ,$lines
+}
+function Show-Closed {
+  $lines = @(Get-ClosedLines @(Read-ClosedLog))
   $per = [math]::Max(4, (Get-WindowHeight) - 3)
   $pages = [math]::Max(1, [math]::Ceiling($lines.Count / $per))
   for ($pg = 0; $pg -lt $pages; $pg++) {
@@ -2512,12 +2553,18 @@ function Test-ProcessSince([int]$id, $began, [scriptblock]$getStart, [switch]$Ve
   if ($null -eq $start) { return $false }
   if ($start -is [string]) { return (-not $Verified) }   # cannot tell: the process is there
   if (-not $began) { return $true }
-  return ([datetime]$start -le ([datetime]$began).AddSeconds(5))
+  # as instants: a process's start time is local, a lock's or a session's start may be UTC, and two local clock
+  # readings disagree by an hour across the autumn change back from daylight time
+  return (([datetime]$start).ToUniversalTime() -le ([datetime]$began).ToUniversalTime().AddSeconds(5))
 }
 function Get-ProcessStart([int]$id) {
   $p = Get-Process -Id $id -ErrorAction SilentlyContinue
   if (-not $p) { return $null }
-  try { return $p.StartTime } catch { return 'unknown' }
+  # a process this one may not open (another user's, an elevated one, a system process) gives no StartTime,
+  # without an error on both runtimes: that is a start time that can't be read, not a missing process
+  $s = $null; try { $s = $p.StartTime } catch {}
+  if ($null -eq $s) { return 'unknown' }
+  return $s
 }
 # An entry that cannot be read this time (Claude Code rewrites it in place, so a read can catch it half-written)
 # is not a session that ended: while its process still runs, the session the last roster had for that pid
@@ -3446,7 +3493,7 @@ function Get-CopilotCliOwner([IO.FileInfo[]]$locks, [scriptblock]$getStart) {
     $p = [int]$Matches[1]
     $k = $f.FullName + '|' + $f.LastWriteTimeUtc.Ticks
     if ($script:CopilotCliDeadLocks.ContainsKey($k)) { continue }
-    if (Test-ProcessSince $p $f.LastWriteTime $getStart -Verified) { return $p }
+    if (Test-ProcessSince $p $f.LastWriteTimeUtc $getStart -Verified) { return $p }
     $script:CopilotCliDeadLocks[$k] = $true
   }
   return $null
@@ -3590,13 +3637,14 @@ function Update-CopilotCliScan([IO.FileInfo]$f) {
   return $st
 }
 # What a session's log says, in the same fields as Get-LastAction (a new object only when the scan read
-# something new: the row cache compares them). STATE: waiting (a permission is asked), working (a tool
+# something new: the row cache compares them). STATE: waiting (a permission or your answer), working (a tool
 # runs), thinking (a model call is out, or a prompt was just sent), idle.
 function Get-CopilotCliSummary($st) {
   $out = [ordered]@{ State = '-'; Last = '-'; LastFull = ''; Questions = @(); ToolLog = @(); Handback = $false; Synthetic = $false; SysError = $false; Cwd = ''; GitBranch = ''; ToolMix = ''; Compacts = 0; LastCompactAt = $null; LastCompactTrigger = ''; LastCompactPreTokens = 0; Turns = '-'; Model = '-'; Ctx = '-'; Tools = '-'; TurnStart = $null; Cost = 0.0; InTok = 0; OutTok = 0; CacheR = 0; CacheW = 0
                      Started = $null; Effort = ''; Headless = $false; First = ''; Calls = 0; Unpriced = 0; UnpricedModels = ''; Billed = 0; CtxLimit = 0; ShutdownAt = $null; ShutdownType = ''; Error = ''; Offset = 0L }
   if (-not $st) { return $out }
-  $out.State = if ($st.OpenPerms.Count) { 'waiting' } elseif ($st.OpenTools.Count) { 'working' } elseif ($st.OpenTurns.Count -or $st.AfterPrompt) { 'thinking' } else { 'idle' }
+  # waiting: a permission asked, or the CLI's ask_user tool running (it runs until you answer)
+  $out.State = if ($st.OpenPerms.Count -or @($st.OpenTools.Values) -ccontains 'ask_user') { 'waiting' } elseif ($st.OpenTools.Count) { 'working' } elseif ($st.OpenTurns.Count -or $st.AfterPrompt) { 'thinking' } else { 'idle' }
   if ($st.Last) { $out.LastFull = $st.Last; $out.Last = (Clean $st.Last).Trim() }
   $out.Cwd = $st.Cwd; $out.GitBranch = $st.Branch
   $out.ToolMix = ($st.ToolCounts.GetEnumerator() | Sort-Object Value -Descending | ForEach-Object { "$($_.Key) $($_.Value)" }) -join ' · '
@@ -3826,7 +3874,7 @@ function Build-CopilotCliPeek([object]$r) {
     "  ACTIVITY     $(Paint-Spark $r.ACTIVITY)   ($(Paint-Spark '█') working  $(Paint-Spark '▒') thinking  $(Paint-Spark '·') idle  $(Paint-Spark '▁') waiting on you, 1 char = 2 s, newest right)",
     $(Peek-Block 'LAST ACTION' $(if ($act.LastFull) { $act.LastFull } else { $r.'LAST ACTION' }) $pw),
     "  CWD          $($r.CWD)",
-    "  SESSION ID   $($r._SessionId)$(if ($act.Headless) { "      resume: copilot --resume $($r._SessionId)" })",
+    "  SESSION ID   $($r._SessionId)$(if ($act.Headless -or $r._Gone) { "      resume: $(Get-ResumeCommand $r)" })",
     "  EVENTS       $($r._Transcript)"
   )
   $flat = @(); foreach ($l in $lines) { if ($null -eq $l) { continue }; $flat += $l }
@@ -3856,7 +3904,11 @@ function Start-RosterPoll {
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError  = $true
   $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
-  $proc = [System.Diagnostics.Process]::Start($psi)
+  # The claude command found at start can be gone or half-written now (uninstalled, or caught mid-update):
+  # this poll then reads the registry, as with no claude command at all.
+  $proc = $null
+  try { $proc = [System.Diagnostics.Process]::Start($psi) } catch { Write-Trace "claude would not start: $($_.Exception.Message)" }
+  if (-not $proc) { $script:Poll = @{ Registry = @(Get-RegistryRoster); Started = [Diagnostics.Stopwatch]::StartNew() }; return }
   # Async readers so a full pipe buffer can never deadlock the child.
   $script:Poll = @{
     Proc    = $proc
@@ -5118,6 +5170,7 @@ function Get-QuestionLines([object[]]$qs, [int]$width) {
   return ,$out
 }
 function Build-Peek([object]$r) {
+  $r = Get-PlainView $r   # session text, as it is put into the lines below: no escape sequences of its own
   if ($r._Agent -eq 'cline') { return ,(Build-ClinePeek $r) }
   if ($r._Agent -eq 'copilot') { return ,(Build-CopilotPeek $r) }
   if ($r._Agent -eq 'copilot-cli') { return ,(Build-CopilotCliPeek $r) }
@@ -5721,8 +5774,13 @@ function Resolve-Mouse($e, [string]$footer, [bool]$inPeek, [int]$selOrd) {
   $h = try { (Get-WindowHeight) } catch { 0 }
   if ($y -eq $h - 1) {   # footer: "<key> <label>" items
     $plain = Strip-Ansi $footer
-    foreach ($m in [regex]::Matches($plain, '(?<![\w/])([a-z])\s+(sort:\w+|sort|wrap|compact|subagents|gone|closed|poll|help|quit)\b')) {
+    # any "<key> <label>": the key, wherever in the item; "t/y/n/d copy", "+/- keep": the key clicked
+    foreach ($m in [regex]::Matches($plain, '(?<![\w/])([a-z])\s+[\w:]+')) {
       if ($e.X -ge $m.Index -and $e.X -lt $m.Index + $m.Length) { return @{ Key = (Key-Of $m.Groups[1].Value) } }
+    }
+    foreach ($m in [regex]::Matches($plain, '(?<![\w/])[a-z+-](?:/[a-z+-])+(?=\s)')) {
+      $k = if ($e.X -ge $m.Index -and $e.X -lt $m.Index + $m.Length) { [string]$plain[$e.X] }
+      if ($k -and $k -ne '/') { return @{ Key = (Key-Of $k) } }
     }
     if ($plain -match 'enter peek' -and $e.X -ge $plain.IndexOf('enter peek') -and $e.X -lt $plain.IndexOf('enter peek') + 10) { return @{ Key = (Key-Of 'Enter') } }
     return $null
@@ -6194,7 +6252,7 @@ function Invoke-Frame($view) {
   if ($sel) {
     $cid = Get-CopyId $sel
     $copy = @{ Id = [string]$sel._SessionId; Transcript = $(if ($sel._Transcript -and $sel._Transcript -ne '-') { [string]$sel._Transcript } else { '' })
-               Resume = $(if ($sel._Agent) { '' } else { "claude --resume $(if ($sel._Parent) { $sel._Parent } else { $sel._SessionId })" }); Contact = (Format-Contact $sel); IdText = $cid.Text; IdWhat = $cid.What }
+               Resume = (Get-ResumeCommand $sel); Contact = (Format-Contact $sel); IdText = $cid.Text; IdWhat = $cid.What }
   }
   if ($script:Roster.Count -and @($sorted).Count) { $script:LiveShown = $true }
   $script:LastFrameMs = [int]$frameSw.ElapsedMilliseconds
@@ -6286,10 +6344,19 @@ function Complete-PendingCopies($packet, $view) {
   }
   $view.CopyFor = if (@($view.PendingCopies).Count) { [string]@($view.PendingCopies)[0].Id } else { $null }
 }
+# The command that resumes a row's session in a terminal (what y copies), or '' when its agent has none: Cline
+# and Copilot chats. A subagent resumes with its parent session.
+function Get-ResumeCommand($r) {
+  switch ([string]$r._Agent) {
+    ''            { return "claude --resume $(if ($r._Parent) { $r._Parent } else { $r._SessionId })" }
+    'copilot-cli' { return "copilot --resume $($r._SessionId)" }
+    default       { return '' }
+  }
+}
 function Copy-From([string]$what, $c) {
   switch ($what) {
     't' { if ($c.Transcript) { Copy-Text $c.Transcript 'transcript path' } }
-    'y' { if ($c.Resume) { Copy-Text $c.Resume 'resume command' } }   # none for a Cline session
+    'y' { if ($c.Resume) { Copy-Text $c.Resume 'resume command' } else { $script:Flash = 'no resume command for this session (Cline and Copilot chats have none)'; $script:FlashUntil = (Get-Date).AddSeconds(3) } }
     'n' { Copy-Text $c.Contact 'contact' }
     'd' { Copy-Text $c.IdText $c.IdWhat }
   }
@@ -6522,6 +6589,7 @@ if ($Snapshot) {
   $script:GoneBuildMs = [int]::MaxValue    # every row in the one frame
   $script:ClineBuildMs = [int]::MaxValue   # every Cline session's files, too
   $script:CopilotBuildMs = [int]::MaxValue # and every Copilot chat's
+  $script:CopilotCliBuildMs = [int]::MaxValue   # and every Copilot CLI session's log
 }
 if ($script:Mode -ne 'Worker') { try { [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false) } catch {} }
 try {

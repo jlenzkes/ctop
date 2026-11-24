@@ -106,3 +106,43 @@ Describe 'the console reader (C#, compiled from ctop.ps1)' -Skip:(-not ($IsWindo
     $e.Ch | Should -Be 'q'
   }
 }
+
+# A click on a footer item presses its key: every "<key> <label>" item, whatever its label, and each key of an
+# item that names several ("t/y/n/d copy", "+/- keep").
+Describe 'Resolve-Mouse on the footer' {
+  BeforeAll {
+    Mock Get-WindowHeight { 40 }
+    $script:SortModes = @('activity', 'roster', 'start', 'cost', 'ctx', 'cache'); $script:Layouts = @('wrap', 'truncate')
+    $script:SortMode = 0; $script:Compact = $false; $script:ShowSubagents = $false; $script:ShowGone = $true; $script:KeepMin = 60
+    function Click([string]$footer, [int]$x) {
+      $top = try { [Console]::WindowTop } catch { 0 }
+      $a = Resolve-Mouse ([pscustomobject]@{ X = $x; Y = 39 + $top; Buttons = [uint32]1; Flags = [uint32]0 }) $footer $false -1
+      if ($a -and $a.Key) { [string]$a.Key.KeyChar } else { '' }
+    }
+  }
+  It 'presses <Key> for a click on "<Item>"' -ForEach @(
+    @{ Layout = 0; Item = 'v wrap'; Key = 'v' }, @{ Layout = 1; Item = 'v truncate'; Key = 'v' },
+    @{ Layout = 0; Item = 'o sort:activity'; Key = 'o' }, @{ Layout = 0; Item = 'x closed'; Key = 'x' }, @{ Layout = 0; Item = 'q quit'; Key = 'q' }
+  ) {
+    Mock Get-WindowWidth { 300 }
+    $script:LayoutMode = $Layout
+    $plain = Strip-Ansi (Build-Footer)
+    $at = $plain.IndexOf($Item); $at | Should -BeGreaterOrEqual 0 -Because $plain
+    for ($x = $at; $x -lt $at + $Item.Length; $x++) { Click (Build-Footer) $x | Should -Be $Key -Because "column $x of '$Item'" }
+  }
+  It 'presses the key clicked in "<Item>"' -ForEach @(@{ Item = 't/y/n/d copy'; Keys = 't', 'y', 'n', 'd' }, @{ Item = '+/- keep'; Keys = '+', '-' }) {
+    Mock Get-WindowWidth { 300 }
+    $script:LayoutMode = 0
+    $plain = Strip-Ansi (Build-Footer)
+    $at = $plain.IndexOf($Item); $at | Should -BeGreaterOrEqual 0 -Because $plain
+    for ($i = 0; $i -lt $Keys.Count; $i++) { Click (Build-Footer) ($at + 2 * $i) | Should -Be $Keys[$i] }
+  }
+}
+
+Describe 'Copy-From y' {
+  It 'says so when the session has no resume command, instead of doing nothing' {
+    $script:Flash = ''
+    Copy-From 'y' @{ Resume = '' }
+    $script:Flash | Should -Match 'no resume command'
+  }
+}

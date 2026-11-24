@@ -29,7 +29,7 @@ Flaky tests are listed in `CLAUDE.md`.
 ### D4. Liveness is a heuristic, not proof of process identity
 
 - **Where:** `Test-ProcessSince`. It is used for Claude registry entries and Cline sessions, and, with `-Verified`, for the Copilot CLI's locks.
-- **What happens:** an entry counts as live while its pid names a process that started no later than the session plus 5 s. For registry entries and Cline sessions, a start time that can't be read also counts as live; for a Copilot CLI lock it does not. A pid reused by a process started within those 5 s, or one whose start time is hidden, is taken for the session.
+- **What happens:** an entry counts as live while its pid names a process that started no later than the session plus 5 s, compared as instants. For registry entries and Cline sessions, a start time that can't be read also counts as live; for a Copilot CLI lock it does not. A process ctop may not open (another user's, a system one) has no readable start time: seen for pid 4 from an unelevated shell, on PowerShell 7.6.10 and Windows PowerShell 5.1. A pid reused by a process started within those 5 s, or one whose start time is hidden, is taken for the session. A Copilot CLI session run in an elevated terminal, watched by a ctop that is not, may show as gone: whether the elevated process's start time can be read is not checked.
 - **Possible fix (inference, not checked):** Claude Code's registry entries carry a `procStart` field. Comparing that to the process's real start time could replace the 5 s window for Claude sessions. What `procStart` holds, and in what format, has not been checked.
 
 ### D5. The cache can be fooled by a write that keeps both length and write time
@@ -144,10 +144,10 @@ Flaky tests are listed in `CLAUDE.md`.
 - **Why kept:** both rest on the reader's two assumptions: the CLI only appends to `events.jsonl`, and only a process holding the session's lock writes to it (inference: every writer seen holds one). Whether the CLI ever breaks either is unverified. Statting every old unlocked log each call is the cost the roster avoids.
 - **Possible fix:** for the first, a hash of the bytes up to the offset, as the Copilot chat reader keeps, at the cost of reading the whole log on each change; for the second, stat old unlocked logs every few calls instead of never.
 
-### D19. A Copilot chat is priced by its model id without `claude-`
+### D19. Copilot chats and Copilot CLI sessions are priced by the model id without `claude-`
 
-- **Where:** the Copilot chat reader, where it calls `Get-Price` with `(($model -split '/')[-1]) -replace '^claude-', ''`.
-- **What happens:** `-PricingFile`'s `Match` is documented as a regex on the model id. Claude Code rows, CACHE included, are priced by the transcript's id (`claude-opus-5-5`); Copilot rows by the id cut down (`opus-5-5`). A rule anchored on `^claude-` prices the first and leaves Copilot chats at $0 with no word. The built-in table matches both (its patterns are not anchored). Read, not run.
+- **Where:** the Copilot chat reader, where it calls `Get-Price` with `(($model -split '/')[-1]) -replace '^claude-', ''`; and `Update-CopilotCliScan`, which prices a `session.usage_record` by `Get-CopilotCliModel`, the same cut.
+- **What happens:** `-PricingFile`'s `Match` is documented as a regex on the model id. Claude Code rows, CACHE included, are priced by the transcript's id (`claude-opus-5-5`); Copilot chat and Copilot CLI rows by the id cut down (`opus-5-5`). A rule anchored on `^claude-` prices the first, leaves Copilot chats at $0 with no word (read, not run), and leaves Copilot CLI calls unpriced, which its peek does say (run on PowerShell 7.6.10, 2026-11-23: cost 0, 1 call on a model with no price).
 - **Why kept:** which id a Copilot rule should see (VS Code's `copilot/...` id, or Anthropic's) is still to be decided.
 - **Possible fix:** match the rule against the id without the vendor prefix but with `claude-`, or try both forms; say in `-PricingFile`'s help which one Copilot rows use.
 
@@ -194,11 +194,59 @@ Flaky tests are listed in `CLAUDE.md`.
 - **Why kept:** reading a reftable means parsing its binary blocks (or running git).
 - **Possible fix:** when `.git/reftable/tables.list` exists, read HEAD's record from the newest table it names (the reftable format's ref block), or run `git symbolic-ref --short HEAD` for such repositories only.
 
+### D26. Copilot CLI STATE: cases no real log has shown
+
+- **Where:** `Update-CopilotCliScan` and `Get-CopilotCliSummary`.
+- **What happens:** each was run with a synthetic log on PowerShell 7.6.10 and Windows PowerShell 5.1 (2026-11-23); none occurs in the 146 real sessions of one Windows machine, replayed line by line through ctop's own reader:
+  - a compaction outside any turn shows `idle`, since `session.compaction_start` is not read (all 42 real compactions ran inside a turn);
+  - a line whose `data` has two keys differing only in letter case, or an empty key, is dropped whole on both runtimes, and one nested deeper than 100 on 5.1, so a permission asked there shows `thinking` (0 of 28,310 real lines);
+  - a `copilot -p` run's permission check shows `waiting` until the CLI denies it unattended: real waits were a median 3 ms and at most 4.7 s;
+  - `session.error` leaves a pending prompt open (`thinking`), and its message stays in peek after later turns succeed (all 12 real errors came after a turn ended; 1 session went on for 5 more prompts);
+  - open tool, turn and permission ids are matched without letter case (no two real ids differ only in case);
+  - a lock rewritten in place by a later process with the same pid is not seen until the folder changes;
+  - `workspace.yaml`: a block value ends at a line of only spaces (no real file has a block value).
+- **Why kept:** none is reached by what the CLI writes.
+- **Possible fix:** read `session.compaction_start`; pick the state-bearing fields out of a line without parsing all of it; clear `Error` on the next prompt; use ordinal maps for the open ids.
+
+### D27. A malformed number in an agent's file stops ctop
+
+- **Where:** casts without a guard: Cline token counts (`Read-ClineMessages`) and manifest pid (`Update-ClineRoster`), a registry pid (`Test-RegistryLive`), `startedAt` in `Read-Roster`'s duplicate-pid tie-break, `closedAt` in the closed-sessions list, Copilot CLI token counts (`Update-CopilotCliScan`), and the quit path's last write to the worker.
+- **What happens:** a value such as `"abc"` or `1e30` in one of those fields ends ctop with "stopped: RuntimeException" (run on both runtimes, 2026-11-23): ctop's one top-level `try` catches it, with no `try` around one session or one frame. No real file seen holds such a value: 178 Cline token counts, 45 manifests, 8,381 closed-log lines, 3,177 Copilot CLI usage records. The quit write fails only if the worker dies between the check and the write.
+- **Why kept:** no writer produces such a value; the fix is the design change below. Related: D7.
+- **Possible fix:** read each session inside its own `try`, so one bad file costs its row, not ctop.
+
+### D28. LAST ACTION is not cut short for Cline, Copilot chats and the Copilot CLI
+
+- **Where:** `Read-ClineMessages`, the Copilot chat reader, `Get-CopilotCliSummary`; Claude Code's reader cuts it to about 120 characters and keeps the whole text for peek and hover.
+- **What happens:** what shows is the same (cells are cut to the column), but each row key holds the whole text. Copilot CLI's last reply is a median 4,089 characters and at most 28,373 (137 real sessions); measured, 1,000 keys of one row grew the heap by 8.2 MB at the median and 54.5 MB at the longest, so up to about 218 MB before the row cache is cleared at 4,000 keys (arithmetic from that measurement).
+- **Why kept:** memory only, no wrong output.
+- **Possible fix:** cut `Last` as Claude Code's reader does, keeping `LastFull` whole.
+
+### D29. Long runs: caches grow, and settings files are re-checked for every folder ever seen
+
+- **Where:** script caches keyed by session or file (`TailCache`, `MetaCache`, `SpawnerCache`, `SidecarCache`, `AllAgents`, `History`, `CompactSeen`, `ScanVerified`, `ClineMsgCache`, the in-memory `ScanCache`, `CeilingCache`), and `Sync-SettingsFiles`.
+- **What happens:** measured on one machine's real transcripts (2026-11-23), about 78 KB of heap per transcript, about 3.5 MB a day at that machine's rate. `Sync-SettingsFiles` stats two settings files for every working folder seen, 2-5 ms each, at most every 5 s: about 25 ms per 5 s after a week, 120 ms after a month, at that machine's rate of new folders (arithmetic from those measurements).
+- **Why kept:** slow; nothing wrong is shown.
+- **Possible fix:** prune these caches against the listed sessions when the scan cache is saved, and check settings files only for listed sessions' folders.
+
+### D30. Edge cases no real input reaches
+
+Each was run on PowerShell 7.6.10 and Windows PowerShell 5.1 (2026-11-23); what real data was counted is in parentheses.
+
+- A Claude Code transcript first seen empty keeps no head, so a longer file replacing it reads as an append, and the scan cache drops it at the next start (no real transcript is empty).
+- A row nested four deep or more (a launched session holding a depth-3 subagent) is wider than NAME in a narrow window (real subagents nest at most 3 deep).
+- COST cuts a session's own cost of $1,000 or more to `$1,234…`, and `Σ` cuts $99.995 to $99.999 (the highest real session cost was $552).
+- The row cache keys rows without letter case, so a rename that changes only case shows the old case until another cell changes; path caches would collide on a case-sensitive file system for two folders differing only in case.
+- A sidechain line in a main transcript sets the session's model (no real transcript has one; pricing is not affected).
+- A copy key queued behind another waits up to one frame tick, 250 ms by default.
+- `-Keep` above about 1.0e9 minutes stops ctop at start.
+- A bad `-Keep` or `-PricingFile` starts a worker that rejects it and exits about 3 s later.
+- A Copilot chat edit that pushes a `null` drops it (none of 4,848 real edits holds one).
+
 ## Not yet checked (not bugs)
 
 - **Cline's `cost`:** that it is in dollars is inference. Whether it equals the manifest's `metadata.totalCost` is unverified. A run that prints both would settle it.
 - **The `cli` VIA label:** never seen from a real terminal `claude` session.
-- **ctop on a real Cline session:** ctop has run only against its test fixtures, not against a real Cline session.
 - **A Copilot chat that VS Code moves between workspaces:** not yet seen on a real machine; ctop keys chat rows on the chat's id across every chat folder, so a copy should show as one row.
 - **A Copilot chat after File > Add Folder to Workspace:** its workspace is then an untitled multi-root workspace, whose `workspace.json` names a `.code-workspace` file rather than a folder, so CWD would show that file's path (inference, not run).
 - **Copilot credits:** that VS Code's `copilotCredits` are GitHub AI credits at $0.01 each is inference; no chat that used credits has been seen.

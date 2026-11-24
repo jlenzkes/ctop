@@ -2,6 +2,26 @@
 
 Calendar versioning: `YYYY.MM.DD.N`, the build date, then that day's build number. Newest first.
 
+## 2026.11.23.24 — fixes from two code audits
+
+- **`-Snapshot` lists every Copilot CLI session** in the keep window. It listed as many as it could read in 120 ms
+  (2 of 137 on one machine), and its note spoke of rows it had not printed.
+- **COST counts each reply once.** Claude Code writes a reply as several lines; when another reply's lines came
+  between them, the reply was counted again (seen in 14 of 4,542 transcripts, 0.4% to 30% over).
+  Saved scans are redone once.
+- **A Copilot CLI question to you shows `waiting`** (its `ask_user` tool), not `working`.
+- **A `claude` command that will not start** (uninstalled, or caught mid-update) no longer stops ctop: that poll
+  reads Claude Code's session registry instead.
+- **TURN and CMP are right after a restart on Windows PowerShell 5.1**: the turn start and last compaction it had
+  saved came back off by the UTC offset.
+- **`y` copies a Copilot CLI session's resume command** (`copilot --resume <id>`), peek shows it for an ended
+  interactive session too, and `y` says so when a session has no resume command.
+- **Every footer item can be clicked**: `v truncate`, and each key of `t/y/n/d copy` and `+/- keep`.
+- **A git submodule is no longer shown as a linked worktree** (`wt:`).
+- **Session text cannot recolor peek or the closed-sessions list**: escape sequences in it are taken out.
+- **Liveness compares times as instants**, so a Copilot CLI session is not shown gone across the autumn clock
+  change, and a process whose start time cannot be read (one ctop may not open) is no longer taken for no process.
+
 ## 2026.11.23.23 — first build in this repository
 
 ctop is `top` for AI coding agents: one PowerShell script that shows every Claude session on the computer, live, in
